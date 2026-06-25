@@ -199,6 +199,7 @@ class Pipeline(IPipelineStats, StageRegistryMixin, LifecycleManager):
                 stage.stop(stage_timeout)
 
         # Stop managers
+        self.queue_manager.save_all_queues(self.stages)
         self.queue_manager.stop()
         self.result_manager.stop_all()
 

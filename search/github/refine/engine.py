@@ -264,17 +264,20 @@ class RefineEngine:
             logger.debug("No query provided for language refinement")
             return []
 
+        has_language = re.search(r"(?:^|\s)language:[^\s]+(?:\s|$)", base, flags=re.I)
+        has_size = re.search(r"(?:^|\s)size:[^\s]+(?:\s|$)", base, flags=re.I)
+
         queries = set()
-        if not re.match(r" language:[a-zA-Z0-9#]+ ", base, flags=re.I):
+        if not has_language:
             # Language-based refinement
             for lang in POPULAR_LANGUAGES:
                 queries.add(f"{base} language:{lang}")
-        elif not re.match(r" size:[a-zA-Z0-9#=<>.]+ ", base, flags=re.I):
-            # Sise-based refinement
+        elif not has_size:
+            # Size-based refinement
             for size in SIZE_RANGES:
-                queries.add(f"{base} size:{size}")
+                queries.add(f"{base} {size}")
         else:
-            logger.debug("Cannot refine with language or sie refinement due to existing refinement criteria")
+            logger.debug("Cannot refine with language or size refinement due to existing refinement criteria")
             queries.add(base)
 
         return list(queries)

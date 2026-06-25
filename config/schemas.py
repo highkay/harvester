@@ -424,7 +424,6 @@ class Config:
         return {
             "global": self._dataclass_to_dict(self.global_config),
             "pipeline": self._dataclass_to_dict(self.pipeline),
-            "stats": self._dataclass_to_dict(self.stats),
             "monitoring": self._dataclass_to_dict(self.monitoring),
             "display": self._dataclass_to_dict(self.display),
             "persistence": self._dataclass_to_dict(self.persistence),

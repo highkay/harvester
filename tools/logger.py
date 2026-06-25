@@ -190,6 +190,12 @@ class RedactionFilter(logging.Filter):
             return True
 
 
+def _ensure_redaction_filter(target: logging.Filterer) -> None:
+    """Attach API key redaction once to a logger or handler."""
+    if not any(isinstance(item, RedactionFilter) for item in target.filters):
+        target.addFilter(RedactionFilter())
+
+
 # Log format with file location and fixed width
 FORMATTER = ColoredFormatter("%(asctime)s | %(levelname)-17s | %(fileloc)-30s | %(message)s")
 # Optional JSON formatter for file logs
@@ -563,6 +569,7 @@ class Logger:
         )
         module_handler.setFormatter(get_file_formatter())
         module_handler.setLevel(logging.DEBUG)
+        _ensure_redaction_filter(module_handler)
 
         Logger._module_handlers[module_name] = module_handler
         return module_handler
@@ -591,6 +598,7 @@ class Logger:
         logger_instance = logging.getLogger(name)
         logger_instance.setLevel(log_level)
         logger_instance.propagate = False
+        _ensure_redaction_filter(logger_instance)
 
         # Setup file handlers if not already done
         Logger._setup_file_handlers()
@@ -599,6 +607,7 @@ class Logger:
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setFormatter(FORMATTER)
         console_handler.setLevel(log_level)
+        _ensure_redaction_filter(console_handler)
         logger_instance.addHandler(console_handler)
 
         # Add module-specific file handler
@@ -607,6 +616,7 @@ class Logger:
 
         # Add main pipeline log handler (for centralized logging)
         if Logger._file_handler:
+            _ensure_redaction_filter(Logger._file_handler)
             logger_instance.addHandler(Logger._file_handler)
 
         Logger._loggers[name] = logger_instance
@@ -866,9 +876,8 @@ def init_logging(
     # Configure rollover behavior
     Logger.configure_rollover(rollover_retries, rollover_delay)
 
-    # Attach redaction filter to all loggers (root level for simplicity)
-    redaction_filter = RedactionFilter()
-    logging.getLogger().addFilter(redaction_filter)
+    # Attach redaction filter to root; named loggers also receive it in setup_logger().
+    _ensure_redaction_filter(logging.getLogger())
 
     # Setup exit handlers for graceful shutdown
     _setup_exit_handlers()
@@ -964,8 +973,11 @@ def setup_access_logging():
     - Google/Gemini API keys: AIza[35 chars]
     - OpenAI API keys: sk-[48 chars]
     - OpenAI project keys: sk-proj-[48 chars]
+    - OpenRouter keys: sk-or-v1-[20+ chars]
+    - Cerebras keys: csk-[20+ chars]
     - Anthropic keys: anthrop[20+ chars]
-    - GooeyAI keys: gsk_[20+ chars]
+    - Groq/GooeyAI keys: gsk_[20+ chars]
+    - xAI/Grok keys: xai-[20+ chars]
     - StabilityAI keys: stab_[20+ chars]
     """
     # Get access logger (if using uvicorn or similar)

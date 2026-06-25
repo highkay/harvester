@@ -510,6 +510,10 @@ sequenceDiagram
 - **Anthropic Claude**
 - **Azure OpenAI**
 - **Google Gemini**
+- **Cerebras**
+- **OpenRouter**
+- **GroqCloud**
+- **xAI Grok**
 - **AWS Bedrock**
 - **GooeyAI**
 - **Stability AI**
@@ -693,7 +697,7 @@ sequenceDiagram
    #### 主要配置选项
 
    - **`name`**: 任务的唯一标识符
-   - **`provider_type`**: 决定验证方法（`openai`、`openai_like`、`anthropic`、`gemini` 等）
+   - **`provider_type`**: 决定验证方法（`openai`、`openai_like`、`anthropic`、`gemini`、`cerebras`、`openrouter`、`groq`、`grok` 等）
    - **`api`**: 用于密钥验证的API端点配置
    - **`patterns.key_pattern`**: 识别有效API密钥的正则表达式模式
    - **`conditions`**: 用于查找潜在密钥的搜索查询
@@ -763,11 +767,15 @@ harvester/
 │   │   ├── azure.py        # Azure OpenAI 提供商
 │   │   ├── base.py         # 基础提供商类
 │   │   ├── bedrock.py      # AWS Bedrock 提供商
+│   │   ├── cerebras.py     # Cerebras 提供商
 │   │   ├── doubao.py       # 字节跳动豆包提供商
 │   │   ├── gemini.py       # Google Gemini 提供商
 │   │   ├── gooeyai.py      # GooeyAI 提供商
+│   │   ├── grok.py         # xAI Grok 提供商
+│   │   ├── groq.py         # Groq 提供商
 │   │   ├── openai.py       # OpenAI 提供商
 │   │   ├── openai_like.py  # OpenAI 兼容提供商
+│   │   ├── openrouter.py   # OpenRouter 提供商
 │   │   ├── qianfan.py      # 百度千帆提供商
 │   │   ├── registry.py     # 提供商注册表
 │   │   ├── stabilityai.py  # Stability AI 提供商

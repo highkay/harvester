@@ -522,6 +522,10 @@ The system features a sophisticated **Query Optimization Engine** with mathemati
 - **Anthropic Claude**
 - **Azure OpenAI**
 - **Google Gemini**
+- **Cerebras**
+- **OpenRouter**
+- **GroqCloud**
+- **xAI Grok**
 - **AWS Bedrock**
 - **GooeyAI**
 - **Stability AI**
@@ -691,7 +695,7 @@ The system features a sophisticated **Query Optimization Engine** with mathemati
    #### Key Configuration Options
 
    - **`name`**: Unique identifier for the task
-   - **`provider_type`**: Determines validation method (`openai`, `openai_like`, `anthropic`, `gemini`, etc.)
+   - **`provider_type`**: Determines validation method (`openai`, `openai_like`, `anthropic`, `gemini`, `cerebras`, `openrouter`, `groq`, `grok`, etc.)
    - **`api`**: API endpoint configuration for key validation
    - **`patterns.key_pattern`**: Regex pattern to identify valid API keys
    - **`conditions`**: Search queries to find potential keys
@@ -761,11 +765,15 @@ harvester/
 │   │   ├── azure.py        # Azure OpenAI provider
 │   │   ├── base.py         # Base provider class
 │   │   ├── bedrock.py      # AWS Bedrock provider
+│   │   ├── cerebras.py     # Cerebras provider
 │   │   ├── doubao.py       # ByteDance Doubao provider
 │   │   ├── gemini.py       # Google Gemini provider
 │   │   ├── gooeyai.py      # GooeyAI provider
+│   │   ├── grok.py         # xAI Grok provider
+│   │   ├── groq.py         # Groq provider
 │   │   ├── openai.py       # OpenAI provider
 │   │   ├── openai_like.py  # OpenAI-compatible provider
+│   │   ├── openrouter.py   # OpenRouter provider
 │   │   ├── qianfan.py      # Baidu Qianfan provider
 │   │   ├── registry.py     # Provider registry
 │   │   ├── stabilityai.py  # Stability AI provider

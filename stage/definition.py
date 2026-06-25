@@ -32,6 +32,7 @@ from core.types import IProvider
 from search import client
 from search.github.refine.engine import RefineEngine
 from tools.logger import get_logger
+from tools.patterns import extract_github_query_pattern
 from tools.state import GithubCredentialLimited
 from tools.utils import get_service_name, handle_exceptions
 
@@ -40,6 +41,16 @@ from .factory import TaskFactory
 from .registry import register_stage
 
 logger = get_logger("stage")
+
+
+def _wait_for_rate_limit(resources: StageResources, service_type: str, label: str) -> None:
+    """Block until the shared rate limiter grants a token."""
+    while not resources.limiter.acquire(service_type):
+        wait_time = resources.limiter.wait_time(service_type)
+        if wait_time <= 0:
+            wait_time = 0.1
+        logger.debug(f"Rate limit hit for {label}, waiting {wait_time:.2f}s")
+        time.sleep(wait_time)
 
 
 @register_stage(
@@ -170,7 +181,7 @@ class SearchStage(BasePipelineStage):
 
     def _preprocess_query(self, query: str, use_api: bool) -> str:
         """Github Rest API search syntax don't support regex, so we need remove it if exists"""
-        if use_api:
+        if use_api and extract_github_query_pattern(query):
             keyword = RefineEngine.get_instance().clean_regex(query=query)
             if keyword:
                 query = keyword
@@ -208,17 +219,8 @@ class SearchStage(BasePipelineStage):
     def _apply_rate_limit(self, use_api: bool) -> bool:
         """Apply rate limiting for GitHub requests"""
         service_type = SERVICE_TYPE_GITHUB_API if use_api else SERVICE_TYPE_GITHUB_WEB
-        if not self.resources.limiter.acquire(service_type):
-            wait_time = self.resources.limiter.wait_time(service_type)
-            if wait_time > 0:
-                time.sleep(wait_time)
-                if not self.resources.limiter.acquire(service_type):
-                    bucket = self.resources.limiter._get_bucket(service_type)
-                    max_value = bucket.burst if bucket else "unknown"
-                    logger.info(
-                        f'[{self.name}] rate limit exceeded for Github {"Rest API" if use_api else "Web"}, max: {max_value}'
-                    )
-                    return False
+        label = f'Github {"Rest API" if use_api else "Web"}'
+        _wait_for_rate_limit(self.resources, service_type, label)
         return True
 
     def _handle_first_page_results(self, task: SearchTask, total: int, output: StageOutput) -> None:
@@ -409,17 +411,7 @@ class CheckStage(BasePipelineStage):
 
             # Apply rate limiting
             service_type = get_service_name(task.provider)
-            if not self.resources.limiter.acquire(service_type):
-                wait_time = self.resources.limiter.wait_time(service_type)
-                if wait_time > 0:
-                    time.sleep(wait_time)
-                    if not self.resources.limiter.acquire(service_type):
-                        bucket = self.resources.limiter._get_bucket(service_type)
-                        max_value = bucket.burst if bucket else "unknown"
-                        logger.info(
-                            f"[{self.name}] rate limit exceeded for provider: {task.provider}, max: {max_value}"
-                        )
-                        return None
+            _wait_for_rate_limit(self.resources, service_type, f"provider: {task.provider}")
 
             # Execute check
             result = provider.check(

@@ -21,6 +21,7 @@ from core.enums import ErrorReason
 from core.models import CheckResult, Condition
 from search.client import http_error_message, http_error_status, request
 from tools.coordinator import get_user_agent
+from tools.patterns import redact_api_key, redact_api_keys_in_text
 from tools.utils import trim
 
 from .base import AIBaseProvider
@@ -108,9 +109,10 @@ class StabilityAIProvider(AIBaseProvider):
                     code = http_error_status(e)
                     if code != 401:
                         message = http_error_message(e)
+                        safe_message = redact_api_keys_in_text(message)
 
                         logger.error(
-                            f"[chat] failed to request URL: {url}, token: {token}, status code: {code}, message: {message}"
+                            f"[chat] failed to request URL: {url}, token: {redact_api_key(token)}, status code: {code}, message: {safe_message}"
                         )
 
                     if code in NO_RETRY_ERROR_CODES:

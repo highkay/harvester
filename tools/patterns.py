@@ -10,10 +10,22 @@ from typing import List, Pattern
 # API key patterns for redaction
 API_KEY_PATTERNS = [
     r"\bAIza[0-9A-Za-z_-]{35}",  # Google API keys (Gemini)
-    r"\bsk-[0-9A-Za-z_-]{20,}",  # OpenAI and sk- prefixed keys
     r"\bsk-proj-[0-9A-Za-z_-]{20,}",  # OpenAI project keys
+    r"\bsk-or-v1-[0-9A-Za-z_-]{20,}",  # OpenRouter keys
+    r"\bcsk-[0-9A-Za-z_-]{20,}",  # Cerebras keys
+    r"\bxai-[0-9A-Za-z_-]{20,}",  # xAI/Grok keys
+    (
+        r"(?i)\b(?:grok|xai|x_ai)?[_-]?"
+        r"(?:sso|session|auth|id[_-]?token|access[_-]?token|refresh[_-]?token)"
+        r"\b[\"']?\s*[:=]\s*[\"']?[0-9A-Za-z._~+/=-]{20,}[\"']?"
+    ),  # Grok web/SSO token assignments
+    (
+        r"(?i)\b(?:__Secure-[A-Za-z0-9_.-]+|next-auth\.session-token)"
+        r"\s*=\s*[0-9A-Za-z._~+/=-]{20,}"
+    ),  # Grok web session cookies
+    r"\bsk-[0-9A-Za-z_-]{20,}",  # OpenAI and sk- prefixed keys
     r"\banthrop[0-9A-Za-z_-]{20,}",  # Anthropic keys
-    r"\bgsk_[0-9A-Za-z_-]{20,}",  # GooeyAI keys
+    r"\bgsk_[0-9A-Za-z_-]{20,}",  # Groq/GooeyAI keys
     r"\bstab_[0-9A-Za-z_-]{20,}",  # StabilityAI keys
 ]
 

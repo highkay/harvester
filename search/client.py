@@ -19,6 +19,7 @@ import requests
 
 from core.models import Service
 from tools.logger import get_logger
+from tools.patterns import redact_api_keys_in_text
 from tools.utils import encoding_url, isblank, trim
 
 logger = get_logger("search")
@@ -624,7 +625,9 @@ def chat(
     """Make chat API request with retry logic."""
 
     def output(code: int, message: str, debug: bool = False) -> None:
-        text = f"[chat] failed to request URL: {url}, headers: {headers}, status code: {code}, message: {message}"
+        safe_headers = redact_api_keys_in_text(str(headers))
+        safe_message = redact_api_keys_in_text(str(message))
+        text = f"[chat] failed to request URL: {url}, headers: {safe_headers}, status code: {code}, message: {safe_message}"
         if debug:
             logger.debug(text)
         else:
