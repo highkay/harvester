@@ -7,6 +7,7 @@ HTTP client utilities and GitHub-specific search functions for the search engine
 import gzip
 import itertools
 import json
+import os
 import random
 import re
 import time
@@ -27,6 +28,16 @@ logger = get_logger("search")
 _HTTP_SESSION = requests.Session()
 _HTTP_SESSION.trust_env = False
 _HTTP_PROXY = ""
+_RESPONSE_CACHE = None  # Optional[ResponseCache]
+_QUOTA_TRACKER = None  # Optional[QuotaTracker]
+_LINK_INDEX = None  # Optional[LinkIndex]
+_SKIP_KNOWN_LINKS = False
+_TEXT_MATCH = True
+_CACHE_TTL_SEARCH = 60
+_CACHE_TTL_CORE = 300
+_ALLOWED_SEARCH_TYPES = frozenset({"code", "issues", "commits"})
+# Prefer text-match fragments so SearchStage can regex keys from API JSON
+_GITHUB_SEARCH_ACCEPT = "application/vnd.github.text-match+json"
 
 
 def _new_session(proxy: str = "") -> requests.Session:
@@ -35,6 +46,19 @@ def _new_session(proxy: str = "") -> requests.Session:
     if proxy:
         session.proxies.update({"http": proxy, "https": proxy})
     return session
+
+
+def _remount_edge_adapter() -> None:
+    """Re-attach edge routing after session recreation."""
+    try:
+        from search.github.adapter import mount_edge_adapter
+        from search.github.transport import get_edge_pool
+
+        pool = get_edge_pool()
+        if pool is not None:
+            mount_edge_adapter(_HTTP_SESSION, pool)
+    except Exception as e:
+        logger.debug(f"[edge] remount skipped: {e}")
 
 
 def http_error_status(error: requests.exceptions.HTTPError) -> int:
@@ -66,6 +90,7 @@ def set_proxy(proxy: Optional[str]) -> None:
     if not proxy:
         _HTTP_PROXY = ""
         _HTTP_SESSION = _new_session()
+        _remount_edge_adapter()
         logger.info("HTTP proxy disabled")
         return
 
@@ -83,7 +108,127 @@ def set_proxy(proxy: Optional[str]) -> None:
 
     _HTTP_SESSION = _new_session(proxy)
     _HTTP_PROXY = proxy
+    _remount_edge_adapter()
     logger.info(f"HTTP proxy enabled: {scheme}://{parsed.hostname}:{parsed.port or ''}")
+
+
+def configure_github_transport(
+    *,
+    workspace: str,
+    proxy: str = "",
+    transport_config: Any = None,
+) -> None:
+    """
+    Initialize edge pool, response cache, link index and quota tracker.
+
+    transport_config: optional GithubTransportConfig from config.schemas
+    """
+    global _RESPONSE_CACHE, _QUOTA_TRACKER, _LINK_INDEX, _SKIP_KNOWN_LINKS
+    global _TEXT_MATCH, _CACHE_TTL_SEARCH, _CACHE_TTL_CORE, _GITHUB_SEARCH_ACCEPT
+
+    from search.github.adapter import mount_edge_adapter
+    from search.github.cache import ResponseCache
+    from search.github.index import init_link_index
+    from search.github.quota import QuotaTracker
+    from search.github.transport import init_github_transport
+
+    edge_enabled = True
+    edge_source = "auto"
+    hosts_url = "https://hosts.ohmygh.com/v1/hosts"
+    gx_bin = "gx"
+    refresh_interval = 3600
+    max_edges = 32
+    verify = True
+    prefer_over_proxy = False
+    doh_enabled = True
+    doh_endpoints = None
+    cache_enabled = True
+    cache_dir = "cache/github_api"
+    max_entries = 1000
+    quota_tracking = True
+    index_enabled = True
+    index_dir = "cache/search_index"
+    skip_known = False
+    text_match = True
+
+    if transport_config is not None:
+        edge = getattr(transport_config, "edge_pool", None)
+        doh = getattr(transport_config, "doh", None)
+        cache = getattr(transport_config, "cache", None)
+        index = getattr(transport_config, "index", None)
+        if edge is not None:
+            edge_enabled = bool(edge.enabled)
+            edge_source = edge.source
+            hosts_url = edge.hosts_url
+            gx_bin = edge.gx_bin
+            refresh_interval = edge.refresh_interval
+            max_edges = edge.max_edges
+            verify = edge.verify
+            prefer_over_proxy = edge.prefer_over_proxy
+        if doh is not None:
+            doh_enabled = bool(doh.enabled)
+            doh_endpoints = list(doh.endpoints or [])
+        if cache is not None:
+            cache_enabled = bool(cache.enabled)
+            cache_dir = cache.directory
+            max_entries = cache.max_entries
+            _CACHE_TTL_SEARCH = int(cache.ttl_search)
+            _CACHE_TTL_CORE = int(cache.ttl_core)
+        if index is not None:
+            index_enabled = bool(index.enabled)
+            index_dir = index.directory
+            skip_known = bool(index.skip_known_links)
+        quota_tracking = bool(getattr(transport_config, "quota_tracking", True))
+        text_match = bool(getattr(transport_config, "text_match", True))
+
+    pool = init_github_transport(
+        workspace=workspace,
+        proxy=proxy,
+        edge_enabled=edge_enabled,
+        edge_source=edge_source,
+        hosts_url=hosts_url,
+        gx_bin=gx_bin,
+        refresh_interval=refresh_interval,
+        max_edges=max_edges,
+        verify=verify,
+        prefer_over_proxy=prefer_over_proxy,
+        doh_enabled=doh_enabled,
+        doh_endpoints=doh_endpoints,
+    )
+    if pool is not None:
+        mount_edge_adapter(_HTTP_SESSION, pool)
+
+    if not os.path.isabs(cache_dir):
+        cache_path = os.path.join(workspace, cache_dir)
+    else:
+        cache_path = cache_dir
+    _RESPONSE_CACHE = ResponseCache(directory=cache_path, max_entries=max_entries, enabled=cache_enabled)
+    _QUOTA_TRACKER = QuotaTracker(enabled=quota_tracking)
+
+    if not os.path.isabs(index_dir):
+        index_path = os.path.join(workspace, index_dir)
+    else:
+        index_path = index_dir
+    _LINK_INDEX = init_link_index(index_path, enabled=index_enabled)
+    _SKIP_KNOWN_LINKS = bool(skip_known and index_enabled)
+    _TEXT_MATCH = text_match
+    _GITHUB_SEARCH_ACCEPT = (
+        "application/vnd.github.text-match+json" if text_match else "application/vnd.github+json"
+    )
+    logger.info(
+        f"[transport] configured edge={'on' if pool else 'off'}, "
+        f"cache={'on' if cache_enabled else 'off'}, index={'on' if index_enabled else 'off'}, "
+        f"quota={'on' if quota_tracking else 'off'}, text_match={'on' if text_match else 'off'}"
+    )
+
+
+def get_link_index():
+    """Return the process-wide link index if configured."""
+    return _LINK_INDEX
+
+
+def should_skip_known_links() -> bool:
+    return bool(_SKIP_KNOWN_LINKS and _LINK_INDEX is not None and _LINK_INDEX.enabled)
 
 
 def request(method: str, url: str, timeout: float = 10, **kwargs: Any) -> requests.Response:
@@ -244,20 +389,94 @@ class GitHubClient:
         interval: float = 0,
         timeout: float = 10,
         credential: Optional[str] = None,
+        use_cache: bool = True,
     ) -> Tuple[str, Dict[str, str]]:
         """Make rate-limited HTTP GET request to GitHub and return headers"""
         service = self._service(url)
+        headers = dict(headers or {})
+
+        # Build final URL early so cache keys match the real request
+        encoded_url = self._build_url(url, params)
+
+        # Server-side resource quota (search/core) — wait before burning a request
+        if service == SERVICE_TYPE_GITHUB_API and _QUOTA_TRACKER is not None and credential:
+            from search.github.quota import resource_from_url
+
+            _QUOTA_TRACKER.wait_if_needed(credential, resource_from_url(encoded_url))
+
+        # TTL cache fast path (API only)
+        cache_key = ""
+        cached_entry = None
+        if (
+            use_cache
+            and service == SERVICE_TYPE_GITHUB_API
+            and _RESPONSE_CACHE is not None
+            and _RESPONSE_CACHE.enabled
+        ):
+            from search.github.cache import ResponseCache
+
+            cache_key = ResponseCache.make_key(
+                "GET",
+                encoded_url,
+                ResponseCache.fingerprint_auth(credential or ""),
+            )
+            cached_entry = _RESPONSE_CACHE.get(cache_key)
+            if cached_entry and cached_entry.fresh:
+                logger.debug(f"[cache] TTL hit for {encoded_url}")
+                return cached_entry.body, cached_entry.headers
+            if cached_entry and cached_entry.etag:
+                headers.setdefault("If-None-Match", cached_entry.etag)
 
         # Apply rate limiting
         if service and not self._limit(service, credential):
             logger.debug(f"Rate limit acquisition failed for {service}")
             return "", {}
 
-        content, response_headers = self._http_get(url, headers, params, retries, interval, timeout)
-        success = bool(content)
+        content, response_headers, status = self._http_get(
+            url, headers, params, retries, interval, timeout, return_status=True
+        )
+
+        # 304 Not Modified → serve cached body
+        if status == 304 and cached_entry is not None:
+            if _RESPONSE_CACHE is not None and cache_key:
+                _RESPONSE_CACHE.touch(cache_key, response_headers)
+            logger.debug(f"[cache] ETag revalidated (304) for {encoded_url}")
+            content = cached_entry.body
+            # Prefer fresh rate-limit headers from the 304 response
+            merged = dict(cached_entry.headers)
+            merged.update(response_headers or {})
+            response_headers = merged
+            status = 200
+
+        success = bool(content) or status == 304
 
         # Report result for adaptive adjustment
         self._report(service, success, credential)
+
+        if service == SERVICE_TYPE_GITHUB_API and _QUOTA_TRACKER is not None:
+            _QUOTA_TRACKER.update_from_headers(credential or "", response_headers or {})
+
+        if (
+            use_cache
+            and service == SERVICE_TYPE_GITHUB_API
+            and success
+            and content
+            and _RESPONSE_CACHE is not None
+            and _RESPONSE_CACHE.enabled
+            and cache_key
+            and status == 200
+        ):
+            from search.github.cache import classify_ttl
+
+            ttl = classify_ttl(encoded_url, _CACHE_TTL_SEARCH, _CACHE_TTL_CORE)
+            _RESPONSE_CACHE.put(
+                cache_key=cache_key,
+                url=encoded_url,
+                body=content,
+                headers=response_headers or {},
+                ttl=ttl,
+                status=200,
+            )
 
         if service and credential and self.is_rate_limited_content(service, content):
             self.mark_credential_limited(
@@ -322,8 +541,12 @@ class GitHubClient:
         retries: int = 3,
         interval: float = 1.0,
         timeout: float = 10,
-    ) -> Tuple[str, Dict[str, str]]:
-        """HTTP GET request that preserves response headers"""
+        return_status: bool = False,
+    ):
+        """HTTP GET request that preserves response headers.
+
+        When return_status is True, returns (content, headers, status_code).
+        """
         if isblank(url):
             raise ValidationError("URL cannot be empty", field="url")
 
@@ -336,10 +559,31 @@ class GitHubClient:
 
         for attempt in range(retries):
             try:
-                with managed_network(
-                    request("GET", encoded_url, headers=headers, timeout=timeout), "http_connection"
-                ) as response:
-                    return self._decode_response(response.content), dict(response.headers)
+                # Use session directly so 304 is not raised as HTTPError
+                response = _HTTP_SESSION.request(
+                    method="GET",
+                    url=encoded_url,
+                    headers=headers,
+                    timeout=timeout,
+                )
+                status = response.status_code
+                response_headers = dict(response.headers)
+
+                if status == 304:
+                    result = ("", response_headers, 304) if return_status else ("", response_headers)
+                    return result
+
+                if status >= 400:
+                    # Reuse error classification path
+                    http_error = requests.exceptions.HTTPError(
+                        f"HTTP {status}", response=response
+                    )
+                    raise http_error
+
+                body = self._decode_response(response.content)
+                if return_status:
+                    return body, response_headers, status
+                return body, response_headers
             except GithubCredentialLimited:
                 raise
             except requests.exceptions.HTTPError as e:
@@ -357,7 +601,11 @@ class GitHubClient:
                 elif code == 404:
                     raise FileNotFoundError(f"File not found (HTTP {code}), url: {url}")
                 elif code in (401, 403):
-                    raise NetworkError(f"Authentication failed (HTTP {code})")
+                    # Prefer resource quota wait over hard auth failure when headers say so
+                    if self._is_http_rate_limited(code, reason):
+                        last_error = ConnectionError(f"HTTP {code} error: {reason}")
+                    else:
+                        raise NetworkError(f"Authentication failed (HTTP {code})")
                 else:
                     raise NetworkError(f"HTTP {code} error: {reason}")
             except requests.exceptions.Timeout as e:
@@ -375,6 +623,8 @@ class GitHubClient:
 
         if last_error:
             raise last_error
+        if return_status:
+            return "", {}, 0
         return "", {}
 
     def _build_url(self, url: str, params: Optional[Dict] = None) -> str:
@@ -693,12 +943,27 @@ def chat(
     return code, message
 
 
-def search_github_web(query: str, session: str, page: int) -> str:
+def normalize_search_type(search_type: str = "code") -> str:
+    """Normalize and validate GitHub search type."""
+    value = trim(search_type).lower() or "code"
+    if value not in _ALLOWED_SEARCH_TYPES:
+        logger.warning(f"[search] unsupported search_type '{search_type}', falling back to code")
+        return "code"
+    return value
+
+
+def search_github_web(query: str, session: str, page: int, search_type: str = "code") -> str:
     """Use github web search instead of rest api due to it not support regex syntax."""
     if page <= 0 or isblank(session) or isblank(query):
         return ""
 
-    url = f"https://github.com/search?o=desc&p={page}&type=code&q={query}"
+    # Web HTML extraction currently only implements code blob links
+    search_type = normalize_search_type(search_type)
+    if search_type != "code":
+        logger.warning(f"[search] web search only supports type=code; got {search_type}")
+        search_type = "code"
+
+    url = f"https://github.com/search?o=desc&p={page}&type={search_type}&q={query}"
     headers: Dict[str, str] = {
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9",
         "Referer": "https://github.com",
@@ -718,45 +983,56 @@ def search_github_web(query: str, session: str, page: int) -> str:
     return content
 
 
-def search_github_api(query: str, token: str, page: int = 1, peer_page: int = API_RESULTS_PER_PAGE) -> List[str]:
-    """Rate limit: 10RPM."""
-    if isblank(token) or isblank(query):
-        return []
+def _extract_api_links(items: List[Any], search_type: str = "code") -> List[str]:
+    """Extract html_url links from GitHub search API items."""
+    links: set[str] = set()
+    for item in items:
+        if not item or not isinstance(item, dict):
+            continue
+        link = item.get("html_url", "")
+        if isblank(link) and search_type == "commits":
+            # Prefer html_url; fall back to API url only as last resort
+            link = item.get("html_url") or item.get("url", "")
+        if isblank(link):
+            link = item.get("html_url") or item.get("url", "")
+        if isblank(link):
+            continue
+        # Prefer human-facing pages for gather
+        if str(link).startswith("https://api.github.com/"):
+            continue
+        links.add(link)
+    return list(links)
 
-    peer_page, page = min(max(peer_page, 1), API_RESULTS_PER_PAGE), max(1, page)
-    url = f"https://api.github.com/search/code?q={query}&sort=indexed&order=desc&per_page={peer_page}&page={page}"
-    headers: Dict[str, str] = {
-        "Accept": "application/vnd.github+json",
+
+def _api_search_headers(token: str) -> Dict[str, str]:
+    return {
+        "Accept": _GITHUB_SEARCH_ACCEPT,
         "Authorization": f"Bearer {token}",
         "X-GitHub-Api-Version": "2022-11-28",
     }
 
-    client = get_github_client()
-    content = client.get(
-        url=url,
-        headers=headers,
-        interval=GITHUB_API_INTERVAL,
-        timeout=GITHUB_API_TIMEOUT,
-        credential=token,
+
+def _api_search_url(query: str, page: int, peer_page: int, search_type: str) -> str:
+    if search_type == "code":
+        return (
+            f"https://api.github.com/search/code?q={query}"
+            f"&sort=indexed&order=desc&per_page={peer_page}&page={page}"
+        )
+    return f"https://api.github.com/search/{search_type}?q={query}&order=desc&per_page={peer_page}&page={page}"
+
+
+def search_github_api(
+    query: str,
+    token: str,
+    page: int = 1,
+    peer_page: int = API_RESULTS_PER_PAGE,
+    search_type: str = "code",
+) -> List[str]:
+    """Authenticated GitHub search API. Default type=code (needs token)."""
+    links, _, _ = search_api_with_count(
+        query=query, token=token, page=page, peer_page=peer_page, search_type=search_type
     )
-    if isblank(content):
-        return []
-    try:
-        items = json.loads(content).get("items", [])
-        links: set[str] = set()
-
-        for item in items:
-            if not item or type(item) != dict:
-                continue
-
-            link = item.get("html_url", "")
-            if isblank(link):
-                continue
-            links.add(link)
-
-        return list(links)
-    except Exception:
-        return []
+    return links
 
 
 def search_web_with_count(
@@ -764,6 +1040,7 @@ def search_web_with_count(
     session: str,
     page: int = 1,
     callback: Optional[Callable[[List[str], str], None]] = None,
+    search_type: str = "code",
 ) -> Tuple[List[str], int, str]:
     """
     Search GitHub web and return results, total count, and content.
@@ -773,7 +1050,7 @@ def search_web_with_count(
         return [], 0, ""
 
     # Get results from web search
-    content = search_github_web(query, session, page)
+    content = search_github_web(query, session, page, search_type=search_type)
     if isblank(content):
         return [], 0, ""
 
@@ -809,7 +1086,11 @@ def search_web_with_count(
 
 
 def search_api_with_count(
-    query: str, token: str, page: int = 1, peer_page: int = API_RESULTS_PER_PAGE
+    query: str,
+    token: str,
+    page: int = 1,
+    peer_page: int = API_RESULTS_PER_PAGE,
+    search_type: str = "code",
 ) -> Tuple[List[str], int, str]:
     """
     Search GitHub API and return results, total count, and raw content.
@@ -819,6 +1100,7 @@ def search_api_with_count(
         token: GitHub API token for authentication
         page: Page number to retrieve (default: 1)
         peer_page: Results per page (default: API_RESULTS_PER_PAGE)
+        search_type: code | issues | commits
 
     Returns:
         Tuple containing:
@@ -829,13 +1111,10 @@ def search_api_with_count(
     if isblank(token) or isblank(query):
         return [], 0, ""
 
+    search_type = normalize_search_type(search_type)
     peer_page, page = min(max(peer_page, 1), API_RESULTS_PER_PAGE), max(1, page)
-    url = f"https://api.github.com/search/code?q={query}&sort=indexed&order=desc&per_page={peer_page}&page={page}"
-    headers = {
-        "Accept": "application/vnd.github+json",
-        "Authorization": f"Bearer {token}",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
+    url = _api_search_url(query, page, peer_page, search_type)
+    headers = _api_search_headers(token)
 
     client = get_github_client()
     content = client.get(
@@ -852,20 +1131,41 @@ def search_api_with_count(
         data = json.loads(content)
         items = data.get("items", [])
         total = data.get("total_count", 0)
-
-        links = set()
-        for item in items:
-            if not item or type(item) != dict:
-                continue
-
-            link = item.get("html_url", "")
-            if isblank(link):
-                continue
-            links.add(link)
-
-        return list(links), total, content
+        # Flatten text_matches / issue body / commit message into content so regex
+        # key extraction works even before gather downloads full pages.
+        enriched = _enrich_search_content_for_extract(content, items, search_type)
+        return _extract_api_links(items, search_type), total, enriched
     except Exception:
-        return [], 0, ""
+        return [], 0, content or ""
+
+
+def _enrich_search_content_for_extract(content: str, items: List[Any], search_type: str) -> str:
+    """Append high-signal text fields so collect() can regex keys from API JSON."""
+    fragments: List[str] = [content or ""]
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        # text-match fragments (when Accept: text-match+json)
+        for match in item.get("text_matches") or []:
+            if isinstance(match, dict) and match.get("fragment"):
+                fragments.append(str(match["fragment"]))
+        if search_type == "issues":
+            if item.get("title"):
+                fragments.append(str(item["title"]))
+            if item.get("body"):
+                fragments.append(str(item["body"]))
+        elif search_type == "commits":
+            commit = item.get("commit") or {}
+            if isinstance(commit, dict):
+                if commit.get("message"):
+                    fragments.append(str(commit["message"]))
+        elif search_type == "code":
+            # path can contain env-like names; name is filename
+            if item.get("path"):
+                fragments.append(str(item["path"]))
+            if item.get("name"):
+                fragments.append(str(item["name"]))
+    return "\n".join(fragments)
 
 
 def search_with_count(
@@ -875,6 +1175,7 @@ def search_with_count(
     with_api: bool,
     peer_page: int,
     callback: Optional[Callable[[List[str], str], None]] = None,
+    search_type: str = "code",
 ) -> Tuple[List[str], int, str]:
     """
     Unified search interface that returns results, total count, and content.
@@ -882,9 +1183,9 @@ def search_with_count(
     """
     keywords = urllib.parse.quote_plus(query)
     if with_api:
-        return search_api_with_count(keywords, session, page, peer_page)
+        return search_api_with_count(keywords, session, page, peer_page, search_type=search_type)
     else:
-        return search_web_with_count(keywords, session, page, callback)
+        return search_web_with_count(keywords, session, page, callback, search_type=search_type)
 
 
 @handle_exceptions(default_result=0, log_level="error")
@@ -1013,20 +1314,29 @@ def search_code(
     with_api: bool,
     peer_page: int,
     callback: Optional[Callable[[List[str], str], None]] = None,
+    search_type: str = "code",
 ) -> Tuple[List[str], str]:
     """
-    Search code with unified interface.
+    Search GitHub with unified interface (historically code-only; now multi-type).
     Returns: (results_list, content)
     """
     keyword = urllib.parse.quote_plus(trim(query))
     if not keyword:
         return [], ""
 
-    if with_api:
-        results = search_github_api(query=keyword, token=session, page=page, peer_page=peer_page)
-        return results, ""  # API doesn't provide page content
+    search_type = normalize_search_type(search_type)
 
-    content = search_github_web(query=keyword, session=session, page=page)
+    if with_api:
+        results, _, content = search_api_with_count(
+            query=keyword,
+            token=session,
+            page=page,
+            peer_page=peer_page,
+            search_type=search_type,
+        )
+        return results, content
+
+    content = search_github_web(query=keyword, session=session, page=page, search_type=search_type)
     if isblank(content):
         return [], ""
 
