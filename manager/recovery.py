@@ -103,9 +103,12 @@ class TaskRecoveryManager:
             logger.warning(f"No config found for provider: {name}")
             return
 
-        # Recover check tasks (Service objects can be used directly)
+        # Recover check tasks (Service objects can be used directly).
+        # Previously-valid keys are re-checked instead of being trusted:
+        # stale results (e.g. keys validated before 402/no-quota filtering
+        # existed) must not be re-seeded as valid without re-validation.
         if StageUtils.check(config, PipelineStage.CHECK):
-            self._recover_check_tasks(name, tasks.check, tasks.invalid)
+            self._recover_check_tasks(name, tasks.check + tasks.valid, tasks.invalid)
 
         # Recover acquisition tasks (URLs need to be converted to AcquisitionTask objects)
         if StageUtils.check(config, PipelineStage.GATHER):

@@ -91,6 +91,27 @@ class ConfigValidator:
         if global_config.max_retries_requeued < 0:
             self.errors.append("Max retries requeued must be non-negative")
 
+        # Validate GitHub transport enhancements
+        transport = getattr(global_config, "github_transport", None)
+        if transport is not None:
+            edge = transport.edge_pool
+            if edge.refresh_interval < 60:
+                self.errors.append("github_transport.edge_pool.refresh_interval must be >= 60")
+            if edge.max_edges < 1:
+                self.errors.append("github_transport.edge_pool.max_edges must be >= 1")
+            if edge.source not in {"auto", "http", "gx", "builtin", "disabled"}:
+                self.errors.append(
+                    "github_transport.edge_pool.source must be one of: auto, http, gx, builtin, disabled"
+                )
+            cache = transport.cache
+            if cache.ttl_search < 0 or cache.ttl_core < 0:
+                self.errors.append("github_transport.cache TTL values must be non-negative")
+            if cache.max_entries < 1:
+                self.errors.append("github_transport.cache.max_entries must be >= 1")
+            doh = transport.doh
+            if doh.enabled and not doh.endpoints:
+                self.errors.append("github_transport.doh.endpoints cannot be empty when DoH is enabled")
+
     def _validate_pipeline_config(self, config: Config) -> None:
         """Validate pipeline configuration section
 
@@ -175,6 +196,26 @@ class ConfigValidator:
 
         if task.storage.plan and not task.storage.directory:
             self.errors.append(f"Task {task.name} storage.plan requires storage.directory")
+
+        if task.max_pages is not None and task.max_pages <= 0:
+            self.errors.append(f"Task {task.name} max_pages must be positive")
+
+        from config.schemas import ALLOWED_SEARCH_TYPES
+
+        if not task.search_types:
+            self.errors.append(f"Task {task.name} search_types cannot be empty")
+        else:
+            for search_type in task.search_types:
+                if search_type not in ALLOWED_SEARCH_TYPES:
+                    self.errors.append(
+                        f"Task {task.name} has invalid search_type '{search_type}'; "
+                        f"allowed: {sorted(ALLOWED_SEARCH_TYPES)}"
+                    )
+                if search_type != "code" and not task.use_api:
+                    self.errors.append(
+                        f"Task {task.name}: search_type '{search_type}' requires use_api=true "
+                        "(web HTML parsing only supports code search)"
+                    )
 
         # Validate stage dependencies
         try:

@@ -127,7 +127,7 @@ class ProviderFactory:
 
         if isinstance(api_config.timeout, (int, float)) and api_config.timeout > 0:
             kwargs["timeout"] = api_config.timeout
-        if type(api_config.retries) == int and api_config.retries > 0:
+        if type(api_config.retries) is int and api_config.retries > 0:
             kwargs["retries"] = api_config.retries
 
         return ProviderRegistry.create(provider_type, conditions=conditions, **kwargs)
@@ -280,6 +280,13 @@ class TaskManager(LifecycleManager, TaskDataProvider):
         # 6. Backup existing files (after recovery is complete)
         self.pipeline.result_manager.backup_all_existing_files()
 
+        # 6b. Previously-valid keys were re-queued for check during recovery
+        # (see TaskRecoveryManager._recover_provider_tasks), so they are
+        # re-validated with the current provider logic instead of being
+        # re-seeded blindly. This prevents stale valid entries (e.g. keys
+        # accepted before 402/no-quota filtering existed) from surviving.
+        # NOTE: no reseed_valid_keys call here.
+
         # 7. Start queue manager periodic save, after recovery to avoid file conflicts
         self.pipeline.queue_manager.start_periodic_save(self.pipeline.stages)
 
@@ -399,19 +406,30 @@ class TaskManager(LifecycleManager, TaskDataProvider):
             if not provider:
                 continue
 
+            search_types = getattr(task_config, "search_types", None) or ["code"]
             for condition in provider.conditions:
-                # Create search task for each condition using its patterns
-                task = TaskFactory.create_search_task(
-                    provider=task_config.name,
-                    query=condition.query or condition.patterns.key_pattern,
-                    regex=condition.patterns.key_pattern,
-                    page=1,
-                    use_api=task_config.use_api,
-                    address_pattern=condition.patterns.address_pattern,
-                    endpoint_pattern=condition.patterns.endpoint_pattern,
-                    model_pattern=condition.patterns.model_pattern,
-                )
-                tasks.append(task)
+                # Fan out one search task per configured search type (default: code only)
+                for search_type in search_types:
+                    # Web HTML path only supports code search
+                    if search_type != "code" and not task_config.use_api:
+                        logger.warning(
+                            f"Skipping search_type={search_type} for provider {task_config.name}: "
+                            "requires use_api=true"
+                        )
+                        continue
+                    task = TaskFactory.create_search_task(
+                        provider=task_config.name,
+                        query=condition.query or condition.patterns.key_pattern,
+                        regex=condition.patterns.key_pattern,
+                        page=1,
+                        use_api=task_config.use_api,
+                        max_pages=task_config.max_pages,
+                        search_type=search_type,
+                        address_pattern=condition.patterns.address_pattern,
+                        endpoint_pattern=condition.patterns.endpoint_pattern,
+                        model_pattern=condition.patterns.model_pattern,
+                    )
+                    tasks.append(task)
 
         # Log summary of initial task creation
         if tasks:

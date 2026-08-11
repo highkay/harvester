@@ -94,6 +94,9 @@ class SearchTask(ProviderTask):
     regex: str = ""
     page: int = 1
     use_api: bool = False
+    max_pages: Optional[int] = None
+    # GitHub search kind: code (default), issues, commits
+    search_type: str = "code"
     address_pattern: str = ""
     endpoint_pattern: str = ""
     model_pattern: str = ""
@@ -104,6 +107,8 @@ class SearchTask(ProviderTask):
             "regex": self.regex,
             "page": self.page,
             "use_api": self.use_api,
+            "max_pages": self.max_pages,
+            "search_type": self.search_type,
             "address_pattern": self.address_pattern,
             "endpoint_pattern": self.endpoint_pattern,
             "model_pattern": self.model_pattern,
@@ -114,6 +119,8 @@ class SearchTask(ProviderTask):
         self.regex = data.get("regex", "")
         self.page = data["page"]
         self.use_api = data.get("use_api", False)
+        self.max_pages = data.get("max_pages")
+        self.search_type = data.get("search_type", "code") or "code"
         self.address_pattern = data.get("address_pattern", "")
         self.endpoint_pattern = data.get("endpoint_pattern", "")
         self.model_pattern = data.get("model_pattern", "")
@@ -261,10 +268,12 @@ class RecoveredTasks:
     check: List["Service"] = field(default_factory=list)
     acquisition: List[str] = field(default_factory=list)
     invalid: Set["Service"] = field(default_factory=set)
+    # Previously validated keys (re-seeded after backup so valid-keys.txt is not lost)
+    valid: List["Service"] = field(default_factory=list)
 
     def has_tasks(self) -> bool:
         """Check if any tasks need recovery"""
-        return bool(self.check or self.acquisition or self.invalid)
+        return bool(self.check or self.acquisition or self.invalid or self.valid)
 
     def check_count(self) -> int:
         """Get number of check tasks"""
@@ -278,13 +287,20 @@ class RecoveredTasks:
         """Get number of invalid keys"""
         return len(self.invalid)
 
+    def valid_count(self) -> int:
+        """Get number of previously valid keys"""
+        return len(self.valid)
+
     def valid_check_tasks(self) -> List["Service"]:
         """Get check tasks filtered by invalid keys"""
         return [task for task in self.check if task not in self.invalid]
 
     def summary(self) -> str:
         """Get task summary string"""
-        return f"check: {self.check_count()}, acquisition: {self.acquisition_count()}, invalid: {self.invalid_count()}"
+        return (
+            f"check: {self.check_count()}, acquisition: {self.acquisition_count()}, "
+            f"invalid: {self.invalid_count()}, valid: {self.valid_count()}"
+        )
 
 
 @dataclass
@@ -321,6 +337,10 @@ class AllRecoveredTasks:
     def total_invalid_keys(self) -> int:
         """Get total invalid keys across all providers"""
         return sum(tasks.invalid_count() for tasks in self.providers.values())
+
+    def total_valid_keys(self) -> int:
+        """Get total previously valid keys across all providers"""
+        return sum(tasks.valid_count() for tasks in self.providers.values())
 
     def summary(self) -> str:
         """Get summary of all recovered tasks"""

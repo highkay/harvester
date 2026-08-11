@@ -5,7 +5,7 @@ Task Factory for the asynchronous pipeline system.
 Provides factory methods for creating tasks from configuration and serialized data.
 """
 
-from typing import Any, Dict, Union
+from typing import Any, Dict, Optional, Union
 
 from core.models import (
     AcquisitionTask,
@@ -31,6 +31,8 @@ class TaskFactory:
         regex: str = "",
         page: int = 1,
         use_api: bool = False,
+        max_pages: Optional[int] = None,
+        search_type: str = "code",
         address_pattern: str = "",
         endpoint_pattern: str = "",
         model_pattern: str = "",
@@ -42,6 +44,8 @@ class TaskFactory:
             regex=regex,
             page=page,
             use_api=use_api,
+            max_pages=max_pages,
+            search_type=search_type or "code",
             address_pattern=address_pattern,
             endpoint_pattern=endpoint_pattern,
             model_pattern=model_pattern,

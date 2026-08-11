@@ -62,6 +62,16 @@ class Pipeline(IPipelineStats, StageRegistryMixin, LifecycleManager):
         # Configure the shared HTTP opener before any stage starts making network requests
         client.set_proxy(config.global_config.proxy)
 
+        # Edge IP pool / ETag cache / quota tracking (ohmygh/gx-inspired)
+        try:
+            client.configure_github_transport(
+                workspace=config.global_config.workspace,
+                proxy=config.global_config.proxy,
+                transport_config=getattr(config.global_config, "github_transport", None),
+            )
+        except Exception as e:
+            logger.warning(f"GitHub transport enhancements failed to initialize: {e}")
+
         # Initialize GitHub client rate limiter
         client.init_github_client(config.ratelimits)
 

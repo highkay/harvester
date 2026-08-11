@@ -429,7 +429,13 @@ class ResultManager:
                         # Links are stored as plain URLs
                         if line.startswith("http"):
                             processed_item = line
-                    elif result_type in (ResultType.MATERIAL, ResultType.INVALID):
+                    elif result_type in (
+                        ResultType.MATERIAL,
+                        ResultType.INVALID,
+                        ResultType.VALID,
+                        ResultType.NO_QUOTA,
+                        ResultType.WAIT_CHECK,
+                    ):
                         # Services are stored as serialized objects or plain keys
                         service = self._deserialize_service(line)
                         if service:
@@ -450,6 +456,7 @@ class ResultManager:
         - acquisition_tasks from LINKS data
         - check_tasks from MATERIAL data
         - invalid_keys from INVALID data
+        - valid_keys from VALID data (re-seeded after backup)
 
         Returns:
             RecoveredTasks with all recovered data
@@ -457,7 +464,19 @@ class ResultManager:
         recovered = RecoveredTasks()
 
         # Recover acquisition tasks from LINKS
-        links_count = self._recover_result_type(ResultType.LINKS, recovered.acquisition, self._process_links_data)
+        # Set HARVESTER_SKIP_LINK_RECOVERY=1 to avoid re-inflating gather from links.txt
+        # when resuming a drain-only run that already has a large gather queue.
+        skip_links = str(os.environ.get("HARVESTER_SKIP_LINK_RECOVERY", "")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        if skip_links:
+            links_count = 0
+            logger.info(f"Skipping LINKS recovery for {self.name} (HARVESTER_SKIP_LINK_RECOVERY)")
+        else:
+            links_count = self._recover_result_type(ResultType.LINKS, recovered.acquisition, self._process_links_data)
 
         # Recover check tasks from MATERIAL
         material_count = self._recover_result_type(ResultType.MATERIAL, recovered.check, self._process_service_data)
@@ -470,13 +489,20 @@ class ResultManager:
         if invalid_list:
             recovered.invalid.update(invalid_list)
 
+        # Recover previously validated keys so backup does not wipe valid-keys.txt
+        valid_list: List = []
+        valid_count = self._recover_result_type(ResultType.VALID, valid_list, self._process_service_data)
+        if valid_list:
+            recovered.valid.extend(valid_list)
+
         # Log recovery summary
-        if links_count > 0 or material_count > 0 or invalid_count > 0:
+        if links_count > 0 or material_count > 0 or invalid_count > 0 or valid_count > 0:
             logger.info(
                 f"Recovery completed for {self.name}: "
                 f"{links_count} acquisition tasks, "
                 f"{material_count} check tasks, "
-                f"{invalid_count} invalid keys"
+                f"{invalid_count} invalid keys, "
+                f"{valid_count} valid keys"
             )
         else:
             logger.debug(f"No tasks recovered for {self.name}")
@@ -706,11 +732,27 @@ class MultiResultManager:
         if all_recovered.has_providers():
             logger.info(
                 f"Recovered {all_recovered.total_check_tasks()} check tasks, "
-                f"{all_recovered.total_acquisition_tasks()} acquisition tasks, and "
-                f"{all_recovered.total_invalid_keys()} invalid keys from all providers"
+                f"{all_recovered.total_acquisition_tasks()} acquisition tasks, "
+                f"{all_recovered.total_invalid_keys()} invalid keys, and "
+                f"{all_recovered.total_valid_keys()} valid keys from all providers"
             )
 
         return all_recovered
+
+    def reseed_valid_keys(self, recovered: AllRecoveredTasks) -> int:
+        """Write previously valid keys back after backup moves result files away."""
+        total = 0
+        for name, tasks in recovered.providers.items():
+            if not tasks.valid:
+                continue
+            try:
+                manager = self.get_manager(name)
+                manager.add_result(ResultType.VALID.value, list(tasks.valid))
+                total += len(tasks.valid)
+                logger.info(f"Re-seeded {len(tasks.valid)} valid keys for {name}")
+            except Exception as e:
+                logger.error(f"Failed to re-seed valid keys for {name}: {e}")
+        return total
 
     def backup_all_existing_files(self) -> None:
         """Backup existing files for all providers"""

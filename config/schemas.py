@@ -45,6 +45,89 @@ class CredentialsConfig:
 
 
 @dataclass
+class EdgePoolConfig:
+    """GitHub API edge IP pool configuration (inspired by ohmygh/gx)."""
+
+    enabled: bool = True
+    # auto: HTTP hosts feed → optional gx → builtin seeds
+    source: str = "auto"
+    hosts_url: str = "https://hosts.ohmygh.com/v1/hosts"
+    gx_bin: str = "gx"
+    refresh_interval: int = 3600
+    max_edges: int = 32
+    verify: bool = True
+    # When global.proxy is set, edge routing is off unless this is true
+    prefer_over_proxy: bool = False
+
+    def __post_init__(self):
+        self.source = (self.source or "auto").strip().lower()
+        if self.source not in {"auto", "http", "gx", "builtin", "disabled"}:
+            raise ValueError("edge_pool.source must be one of: auto, http, gx, builtin, disabled")
+        self.hosts_url = (self.hosts_url or "").strip()
+        self.gx_bin = (self.gx_bin or "gx").strip() or "gx"
+        self.refresh_interval = max(60, int(self.refresh_interval or 3600))
+        self.max_edges = max(1, int(self.max_edges or 32))
+
+
+@dataclass
+class DohConfig:
+    """DNS-over-HTTPS fallback for resolving api.github.com."""
+
+    enabled: bool = True
+    endpoints: List[str] = field(
+        default_factory=lambda: [
+            "https://cloudflare-dns.com/dns-query",
+            "https://doh.pub/dns-query",
+        ]
+    )
+
+
+@dataclass
+class GithubCacheConfig:
+    """ETag / TTL response cache for GitHub API."""
+
+    enabled: bool = True
+    ttl_search: int = 60
+    ttl_core: int = 300
+    max_entries: int = 1000
+    # Relative to workspace unless absolute
+    directory: str = "cache/github_api"
+
+    def __post_init__(self):
+        self.ttl_search = max(0, int(self.ttl_search if self.ttl_search is not None else 60))
+        self.ttl_core = max(0, int(self.ttl_core if self.ttl_core is not None else 300))
+        self.max_entries = max(1, int(self.max_entries or 1000))
+        self.directory = (self.directory or "cache/github_api").strip()
+
+
+@dataclass
+class GithubIndexConfig:
+    """Local discovered-link index for dedup / offline lookup."""
+
+    enabled: bool = True
+    directory: str = "cache/search_index"
+    # When true, skip creating gather tasks for URLs already in the index
+    skip_known_links: bool = False
+
+    def __post_init__(self):
+        self.directory = (self.directory or "cache/search_index").strip()
+
+
+@dataclass
+class GithubTransportConfig:
+    """GitHub transport enhancements inspired by ohmygh/gx."""
+
+    edge_pool: EdgePoolConfig = field(default_factory=EdgePoolConfig)
+    doh: DohConfig = field(default_factory=DohConfig)
+    cache: GithubCacheConfig = field(default_factory=GithubCacheConfig)
+    index: GithubIndexConfig = field(default_factory=GithubIndexConfig)
+    # Track X-RateLimit-Resource (search vs core) per credential
+    quota_tracking: bool = True
+    # Request GitHub text-match fragments for richer in-result key extraction
+    text_match: bool = True
+
+
+@dataclass
 class GlobalConfig:
     """Global application configuration"""
 
@@ -53,6 +136,7 @@ class GlobalConfig:
     proxy: str = ""
     github_credentials: Optional[CredentialsConfig] = None
     user_agents: List[str] = field(default_factory=list)
+    github_transport: GithubTransportConfig = field(default_factory=GithubTransportConfig)
 
     def __post_init__(self):
         """Set default values if none provided"""
@@ -65,6 +149,9 @@ class GlobalConfig:
                 tokens=[],
                 strategy=LoadBalanceStrategy.ROUND_ROBIN,
             )
+
+        if self.github_transport is None:
+            self.github_transport = GithubTransportConfig()
 
         # Set default user agents if none provided
         if not self.user_agents:
@@ -319,6 +406,10 @@ class StorageConfig:
     plan: str = ""
 
 
+# Supported GitHub search result types (code is the primary key-discovery path)
+ALLOWED_SEARCH_TYPES = frozenset({"code", "issues", "commits"})
+
+
 @dataclass
 class TaskConfig:
     """Configuration for a single provider task"""
@@ -327,6 +418,9 @@ class TaskConfig:
     enabled: bool = True
     provider_type: str = ""
     use_api: bool = False
+    max_pages: Optional[int] = None
+    # GitHub search kinds to fan out; default code-only for backward compatibility
+    search_types: List[str] = field(default_factory=lambda: ["code"])
     stages: StageConfig = field(default_factory=StageConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
     extras: Dict[str, Any] = field(default_factory=dict)
@@ -334,6 +428,23 @@ class TaskConfig:
     patterns: Patterns = field(default_factory=Patterns)
     conditions: List[Condition] = field(default_factory=list)
     rate_limit: RateLimitConfig = field(default_factory=RateLimitConfig)
+
+    def __post_init__(self):
+        if not self.search_types:
+            self.search_types = ["code"]
+        normalized: List[str] = []
+        for item in self.search_types:
+            value = str(item or "").strip().lower()
+            if not value:
+                continue
+            if value not in ALLOWED_SEARCH_TYPES:
+                raise ValueError(
+                    f"Invalid search_type '{value}' for task {self.name or '<unnamed>'}; "
+                    f"allowed: {sorted(ALLOWED_SEARCH_TYPES)}"
+                )
+            if value not in normalized:
+                normalized.append(value)
+        self.search_types = normalized or ["code"]
 
 
 @dataclass

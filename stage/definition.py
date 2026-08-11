@@ -10,10 +10,8 @@ import time
 from typing import List, Optional, Tuple
 
 from constant.search import (
-    API_LIMIT,
     API_MAX_PAGES,
     API_RESULTS_PER_PAGE,
-    WEB_LIMIT,
     WEB_MAX_PAGES,
     WEB_RESULTS_PER_PAGE,
 )
@@ -68,8 +66,10 @@ class SearchStage(BasePipelineStage):
     def _generate_id(self, task: ProviderTask) -> str:
         """Generate unique task identifier for deduplication"""
         search_task = task if isinstance(task, SearchTask) else SearchTask()
+        search_type = getattr(search_task, "search_type", "code") or "code"
         return (
-            f"{PipelineStage.SEARCH.value}:{task.provider}:{search_task.query}:{search_task.page}:{search_task.regex}"
+            f"{PipelineStage.SEARCH.value}:{task.provider}:{search_type}:"
+            f"{search_task.query}:{search_task.page}:{search_task.regex}"
         )
 
     def _validate_task_type(self, task: ProviderTask) -> bool:
@@ -124,17 +124,43 @@ class SearchStage(BasePipelineStage):
 
             # Create acquisition tasks for links
             if results:
+                search_type = getattr(task, "search_type", "code") or "code"
                 patterns = Patterns(
                     key_pattern=task.regex,
                     address_pattern=task.address_pattern,
                     endpoint_pattern=task.endpoint_pattern,
                     model_pattern=task.model_pattern,
                 )
-                for link in results:
+
+                # Index order: filter known → enqueue gather → record all discoveries
+                gather_links = list(results)
+                link_index = client.get_link_index()
+                if link_index is not None and link_index.enabled:
+                    if client.should_skip_known_links():
+                        gather_links = link_index.filter_new(results, task.provider)
+                        skipped = len(results) - len(gather_links)
+                        if skipped:
+                            logger.info(
+                                f"[{self.name}] skipped {skipped} known links for {task.provider} "
+                                f"(index dedup)"
+                            )
+                    new_count = link_index.add_many(
+                        results,
+                        provider=task.provider,
+                        search_type=search_type,
+                        query=task.query,
+                    )
+                    if new_count < len(results):
+                        logger.debug(
+                            f"[{self.name}] link index: {new_count} new / {len(results)} total "
+                            f"for {task.provider} ({search_type})"
+                        )
+
+                for link in gather_links:
                     acquisition_task = TaskFactory.create_acquisition_task(task.provider, link, patterns)
                     output.add_task(acquisition_task, PipelineStage.GATHER.value)
 
-                # Add links to be saved
+                # Persist all discovered links (including ones skipped for gather)
                 output.add_links(task.provider, results)
 
             # Handle first page results for pagination/refinement
@@ -171,6 +197,7 @@ class SearchStage(BasePipelineStage):
                     page=task.page,
                     with_api=task.use_api,
                     peer_page=API_RESULTS_PER_PAGE if task.use_api else WEB_RESULTS_PER_PAGE,
+                    search_type=getattr(task, "search_type", "code") or "code",
                 )
                 return results, content, total
             except GithubCredentialLimited as e:
@@ -208,6 +235,7 @@ class SearchStage(BasePipelineStage):
                     page=task.page,
                     with_api=task.use_api,
                     peer_page=API_RESULTS_PER_PAGE if task.use_api else WEB_RESULTS_PER_PAGE,
+                    search_type=getattr(task, "search_type", "code") or "code",
                 )
                 return results, content
             except GithubCredentialLimited as e:
@@ -225,11 +253,12 @@ class SearchStage(BasePipelineStage):
 
     def _handle_first_page_results(self, task: SearchTask, total: int, output: StageOutput) -> None:
         """Handle first page results - decide pagination or refinement"""
-        limit = API_LIMIT if task.use_api else WEB_LIMIT
         per_page = API_RESULTS_PER_PAGE if task.use_api else WEB_RESULTS_PER_PAGE
+        limit = self._max_pages(task) * per_page
+        search_type = getattr(task, "search_type", "code") or "code"
 
-        # If needs refine query
-        if total > limit:
+        # Regex refine is only meaningful for code search
+        if total > limit and search_type == "code":
             # Regenerate the query with less data
             partitions = int(math.ceil(total / limit))
             queries = RefineEngine.get_instance().generate_queries(query=task.query, partitions=partitions)
@@ -253,6 +282,8 @@ class SearchStage(BasePipelineStage):
                     regex=task.regex,
                     page=1,
                     use_api=task.use_api,
+                    max_pages=task.max_pages,
+                    search_type=search_type,
                     address_pattern=task.address_pattern,
                     endpoint_pattern=task.endpoint_pattern,
                     model_pattern=task.model_pattern,
@@ -264,22 +295,21 @@ class SearchStage(BasePipelineStage):
                 f"[{self.name}] generated {len(queries)} refined tasks for provider: {task.provider}, query: {task.query}"
             )
 
-        # If needs pagination and not refining
+        # Pagination when within budget (or non-code types that skip regex refine)
         elif total > per_page:
             page_tasks = self._generate_page_tasks(task, total, per_page)
             for page_task in page_tasks:
                 output.add_task(page_task, PipelineStage.SEARCH.value)
             logger.info(
-                f"[{self.name}] generated {len(page_tasks)} page tasks for provider: {task.provider}, query: {task.query}"
+                f"[{self.name}] generated {len(page_tasks)} page tasks for provider: {task.provider}, "
+                f"query: {task.query}, type: {search_type}"
             )
 
     def _generate_page_tasks(self, task: SearchTask, total: int, per_page: int) -> List[SearchTask]:
         """Generate pagination tasks"""
         # Limit max pages
-        max_pages = min(
-            math.ceil(total / per_page),
-            API_MAX_PAGES if task.use_api else WEB_MAX_PAGES,
-        )
+        max_pages = min(math.ceil(total / per_page), self._max_pages(task))
+        search_type = getattr(task, "search_type", "code") or "code"
 
         page_tasks: List[SearchTask] = []
         for page in range(2, max_pages + 1):  # Start from page 2
@@ -289,6 +319,8 @@ class SearchStage(BasePipelineStage):
                 regex=task.regex,
                 page=page,
                 use_api=task.use_api,
+                max_pages=task.max_pages,
+                search_type=search_type,
                 address_pattern=task.address_pattern,
                 endpoint_pattern=task.endpoint_pattern,
                 model_pattern=task.model_pattern,
@@ -296,6 +328,14 @@ class SearchStage(BasePipelineStage):
             page_tasks.append(page_task)
 
         return page_tasks
+
+    def _max_pages(self, task: SearchTask) -> int:
+        """Return task-level max pages, falling back to transport defaults."""
+        if task.max_pages is not None:
+            if task.use_api:
+                return min(task.max_pages, API_MAX_PAGES)
+            return task.max_pages
+        return API_MAX_PAGES if task.use_api else WEB_MAX_PAGES
 
     @handle_exceptions(default_result=[], log_level="error")
     def _extract_keys_from_content(self, content: str, task: SearchTask) -> List[Service]:

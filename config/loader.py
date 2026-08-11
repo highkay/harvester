@@ -154,7 +154,11 @@ class ConfigLoader:
             strategy=LoadBalanceStrategy(credentials_data.get("strategy", "round_robin")),
         )
 
-        proxy = data.get("proxy") or self._get_env_ignore_case("https_proxy", "http_proxy")
+        # Explicit proxy: "" in YAML disables env proxy; omit key to inherit http(s)_proxy
+        if "proxy" in data:
+            proxy = data.get("proxy") or ""
+        else:
+            proxy = self._get_env_ignore_case("https_proxy", "http_proxy")
 
         return GlobalConfig(
             workspace=os.path.abspath(data.get("workspace", "./data")),
@@ -162,6 +166,67 @@ class ConfigLoader:
             proxy=proxy,
             github_credentials=credentials,
             user_agents=data.get("user_agents", []),
+            github_transport=self._parse_github_transport(data.get("github_transport", {})),
+        )
+
+    def _parse_github_transport(self, data: Dict[str, Any]) -> "GithubTransportConfig":
+        """Parse GitHub transport enhancements (edge pool / DoH / cache)."""
+        from config.schemas import (
+            DohConfig,
+            EdgePoolConfig,
+            GithubCacheConfig,
+            GithubIndexConfig,
+            GithubTransportConfig,
+        )
+
+        if not isinstance(data, dict):
+            data = {}
+
+        edge_data = data.get("edge_pool", {}) or {}
+        doh_data = data.get("doh", {}) or {}
+        cache_data = data.get("cache", {}) or {}
+        index_data = data.get("index", {}) or {}
+
+        edge = EdgePoolConfig(
+            enabled=bool(edge_data.get("enabled", True)),
+            source=str(edge_data.get("source", "auto")),
+            hosts_url=str(edge_data.get("hosts_url", "https://hosts.ohmygh.com/v1/hosts")),
+            gx_bin=str(edge_data.get("gx_bin", "gx")),
+            refresh_interval=int(edge_data.get("refresh_interval", 3600)),
+            max_edges=int(edge_data.get("max_edges", 32)),
+            verify=bool(edge_data.get("verify", True)),
+            prefer_over_proxy=bool(edge_data.get("prefer_over_proxy", False)),
+        )
+
+        endpoints = doh_data.get("endpoints")
+        if not isinstance(endpoints, list) or not endpoints:
+            endpoints = None
+        doh = DohConfig(
+            enabled=bool(doh_data.get("enabled", True)),
+            endpoints=endpoints if endpoints is not None else DohConfig().endpoints,
+        )
+
+        cache = GithubCacheConfig(
+            enabled=bool(cache_data.get("enabled", True)),
+            ttl_search=int(cache_data.get("ttl_search", 60)),
+            ttl_core=int(cache_data.get("ttl_core", 300)),
+            max_entries=int(cache_data.get("max_entries", 1000)),
+            directory=str(cache_data.get("directory", "cache/github_api")),
+        )
+
+        index = GithubIndexConfig(
+            enabled=bool(index_data.get("enabled", True)),
+            directory=str(index_data.get("directory", "cache/search_index")),
+            skip_known_links=bool(index_data.get("skip_known_links", False)),
+        )
+
+        return GithubTransportConfig(
+            edge_pool=edge,
+            doh=doh,
+            cache=cache,
+            index=index,
+            quota_tracking=bool(data.get("quota_tracking", True)),
+            text_match=bool(data.get("text_match", True)),
         )
 
     @staticmethod
@@ -353,11 +418,17 @@ class ConfigLoader:
             plan=storage_data.get("plan", ""),
         )
 
+        search_types = data.get("search_types")
+        if not isinstance(search_types, list) or not search_types:
+            search_types = ["code"]
+
         return TaskConfig(
             name=data.get("name", ""),
             enabled=data.get("enabled", True),
             provider_type=data.get("provider_type", ""),
             use_api=data.get("use_api", False),
+            max_pages=data.get("max_pages"),
+            search_types=search_types,
             stages=stages,
             storage=storage,
             extras=data.get("extras", {}),
