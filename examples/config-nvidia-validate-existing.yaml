@@ -1,0 +1,90 @@
+# NVIDIA validation-only profile for a copied existing data workspace.
+# Copy ./data-nvidia to ./data-nvidia-validate-once before running.
+# It validates recovered material/check queue data without re-searching GitHub.
+
+global:
+  workspace: "./data-nvidia-validate-once"
+  max_retries_requeued: 3
+  proxy: ""
+  github_credentials:
+    sessions:
+      - "your_github_session_here"
+    tokens:
+      - "your_github_token_here"
+    strategy: "round_robin"
+  user_agents:
+    - "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
+
+pipeline:
+  threads:
+    search: 1
+    gather: 1
+    check: 1
+    inspect: 1
+  queue_sizes:
+    search: 100000
+    gather: 200000
+    check: 500000
+    inspect: 1000000
+
+monitoring:
+  update_interval: 2.0
+  error_threshold: 0.1
+  queue_threshold: 1000000
+  memory_threshold: 1073741824
+  response_threshold: 5.0
+
+persistence:
+  batch_size: 1
+  save_interval: 5
+  queue_interval: 30
+  snapshot_interval: 300
+  auto_restore: true
+  shutdown_timeout: 30
+  format: txt
+
+ratelimits:
+  github_api:
+    base_rate: 0.15
+    burst_limit: 3
+    adaptive: true
+  nvidia:
+    base_rate: 0.1
+    burst_limit: 1
+    adaptive: true
+
+tasks:
+  - name: nvidia
+    enabled: true
+    provider_type: openai_like
+    use_api: true
+    max_pages: 1
+    stages:
+      search: false
+      gather: false
+      check: true
+      inspect: false
+    api:
+      base_url: https://integrate.api.nvidia.com/v1
+      completion_path: /chat/completions
+      model_path: /models
+      default_model: meta/llama-3.3-70b-instruct
+      auth_key: Authorization
+      extra_headers: {}
+      api_version: ""
+      timeout: 30
+      retries: 1
+    patterns:
+      key_pattern: "nvapi-[0-9A-Za-z_-]{20,}"
+      address_pattern: ""
+      endpoint_pattern: ""
+      model_pattern: ""
+    conditions:
+      - query: '"nvapi-"'
+    rate_limit:
+      base_rate: 0.1
+      burst_limit: 1
+      adaptive: true
+    storage:
+      directory: ""
+      plan: ""

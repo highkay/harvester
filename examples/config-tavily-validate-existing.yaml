@@ -1,0 +1,90 @@
+# Tavily validation-only profile for a copied existing data workspace.
+# Copy prior provider results into ./data-tavily before running if needed.
+# Validates recovered material/check queue data without re-searching GitHub.
+
+global:
+  workspace: "./data-tavily"
+  max_retries_requeued: 3
+  proxy: ""
+  github_credentials:
+    sessions:
+      - "your_github_session_here"
+    tokens:
+      - "your_github_token_here"
+    strategy: "round_robin"
+  user_agents:
+    - "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
+
+pipeline:
+  threads:
+    search: 1
+    gather: 1
+    check: 2
+    inspect: 1
+  queue_sizes:
+    search: 100000
+    gather: 200000
+    check: 500000
+    inspect: 1000000
+
+monitoring:
+  update_interval: 2.0
+  error_threshold: 0.1
+  queue_threshold: 1000000
+  memory_threshold: 1073741824
+  response_threshold: 5.0
+
+persistence:
+  batch_size: 1
+  save_interval: 5
+  queue_interval: 30
+  snapshot_interval: 300
+  auto_restore: true
+  shutdown_timeout: 30
+  format: txt
+
+ratelimits:
+  github_api:
+    base_rate: 0.15
+    burst_limit: 3
+    adaptive: true
+  tavily:
+    base_rate: 1.0
+    burst_limit: 5
+    adaptive: true
+
+tasks:
+  - name: tavily
+    enabled: true
+    provider_type: tavily
+    use_api: true
+    max_pages: 1
+    stages:
+      search: false
+      gather: false
+      check: true
+      inspect: true
+    api:
+      base_url: https://api.tavily.com
+      completion_path: /search
+      model_path: /usage
+      default_model: tavily-search
+      auth_key: Authorization
+      extra_headers: {}
+      api_version: ""
+      timeout: 30
+      retries: 1
+    patterns:
+      key_pattern: "(?:tvly|tavily)-[0-9A-Za-z_-]{20,}"
+      address_pattern: ""
+      endpoint_pattern: ""
+      model_pattern: ""
+    conditions:
+      - query: '"tvly-"'
+    rate_limit:
+      base_rate: 1.0
+      burst_limit: 5
+      adaptive: true
+    storage:
+      directory: ""
+      plan: ""

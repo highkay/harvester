@@ -1,0 +1,104 @@
+# Ollama Cloud scan configuration - 100000 results target
+# Results are written to ./data-ollama-100k/providers/ollama/*.txt
+
+global:
+  workspace: "./data-ollama-100k"
+  max_retries_requeued: 3
+  proxy: ""
+  github_credentials:
+    sessions: []
+    tokens:
+      - "your_github_token_here"
+      - "your_github_token_here"
+    strategy: "round_robin"
+  user_agents:
+    - "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
+
+pipeline:
+  threads:
+    search: 2
+    gather: 12
+    check: 6
+    inspect: 2
+  queue_sizes:
+    search: 500000
+    gather: 1000000
+    check: 2000000
+    inspect: 2000000
+
+monitoring:
+  update_interval: 10.0
+  error_threshold: 0.1
+  queue_threshold: 5000000
+  memory_threshold: 2147483648
+  response_threshold: 5.0
+
+persistence:
+  batch_size: 50
+  save_interval: 15
+  queue_interval: 120
+  snapshot_interval: 600
+  auto_restore: true
+  shutdown_timeout: 60
+  format: txt
+
+ratelimits:
+  github_api:
+    base_rate: 0.15
+    burst_limit: 3
+    adaptive: true
+  ollama:
+    base_rate: 10.0
+    burst_limit: 30
+    adaptive: true
+
+tasks:
+  - name: ollama
+    enabled: true
+    provider_type: ollama
+    use_api: true
+    max_pages: 1000
+    stages:
+      search: true
+      gather: true
+      check: true
+      inspect: true
+    api:
+      base_url: https://ollama.com/v1
+      completion_path: /chat/completions
+      model_path: /models
+      default_model: gpt-oss:20b
+      auth_key: Authorization
+      extra_headers: {}
+      api_version: ""
+      timeout: 30
+      retries: 3
+    patterns:
+      key_pattern: "(?i)(?:OLLAMA_API_KEY|ollama[_-]?key)\\s*[:=]\\s*[\"']?([0-9A-Za-z._~+/=-]{20,})[\"']?"
+      address_pattern: ""
+      endpoint_pattern: ""
+      model_pattern: ""
+    conditions:
+      - query: '"OLLAMA_API_KEY"'
+      - query: '"ollama.com/v1" "api_key"'
+      - query: '"ollama" "api_key" extension:env'
+      - query: '"ollama.com" "Bearer" extension:py'
+      - query: '"OLLAMA_API_KEY" extension:yaml'
+      - query: '"ollama" "api_key" extension:toml'
+      - query: '"ollama.com/v1" extension:json'
+      - query: '"OLLAMA_API_KEY" extension:sh'
+      - query: '"ollama.com" "authorization" extension:js'
+      - query: '"OLLAMA_API_KEY" extension:ts'
+      - query: '"ollama" "api_key" extension:cfg'
+      - query: '"ollama.com/v1" "chat/completions"'
+      - query: '"OLLAMA_API_KEY" extension:ini'
+      - query: '"ollama" "api_key" extension:conf'
+      - query: '"ollama.com" "api_key" extension:go'
+      - query: '"OLLAMA_API_KEY" extension:rs'
+    rate_limit:
+      base_rate: 10.0
+      burst_limit: 30
+      adaptive: true
+    storage:
+      directory: ""
+      plan: ""

@@ -40,6 +40,25 @@ The system aims to build a **universal data acquisition framework** primarily ta
 | Shodan      | 🚧 Planned     | IoT and network device enumeration      |
 | Custom APIs | 🚧 Planned     | Generic REST/GraphQL API adapter        |
 
+### Current AI Provider Scan Presets
+
+| Provider | `provider_type` | Discovery Pattern | Validation | Notes |
+| -------- | --------------- | ----------------- | ---------- | ----- |
+| OpenAI / OpenAI-compatible | `openai`, `openai_like` | `sk...T3BlbkFJ...` style API keys | Chat completion probe | `openai_like` supports custom OpenAI-compatible endpoints |
+| NVIDIA NIM | `openai_like` | `nvapi-...` API keys | OpenAI-compatible chat completion probe and `/v1/models` | Uses `https://integrate.api.nvidia.com/v1` |
+| Cerebras | `cerebras` | `csk-...` API keys | `/v1/models` | Default base URL: `https://api.cerebras.ai/v1` |
+| OpenRouter | `openrouter` | `sk-or-v1-...` API keys | `/api/v1/key` metadata | Adds `X-Title: harvester` during validation |
+| Groq | `groq` | `gsk_...` API keys | `/openai/v1/models` | OpenAI-compatible validation path |
+| Grok Web/SSO | `grok` | `grok.com` / `x.ai` token assignments and session-cookie traces | Manual browser-context check | Intentionally does not scan the `xai-` API-key prefix by default |
+| Gemini | `gemini` | `AIza...` API keys | `generativelanguage.googleapis.com/v1beta/models` | Uses `x-goog-api-key` |
+| Tavily | `tavily` | `tvly-...` / `tavily-...` API keys | `/usage` metadata | Uses `Authorization: Bearer`; inspect stores usage audit fields |
+| DeepSeek | `deepseek` | `sk-...` API keys | `GET /models` gate + minimal chat-completion probe (`max_tokens=1`) to surface 402 | Default base URL: `https://api.deepseek.com`; 401 body may be non-JSON; zero-balance keys map to `no-quota-keys.txt` |
+| Kimi / Moonshot | `kimi` | `sk-...` API keys | `GET /v1/models` | Default base URL: `https://api.moonshot.cn/v1`; quotas map to `no-quota-keys.txt` |
+| GLM / Zhipu | `glm` | `{id}.{secret}` dot-form API keys | Chat completion probe (`glm-4.7-flash`) | Default base URL: `https://open.bigmodel.cn/api/paas/v4`; no `/models` endpoint, so inspect is skipped |
+| Xiaomi MiMo | `mimo` | `tp-...` / `sk-...` API keys | `GET /models` | Default base URL: `https://token-plan-cn.xiaomimimo.com/v1` (CN); regional clusters per task (`token-plan-sgp.xiaomimimo.com/v1` for Singapore) |
+| Alibaba Qwen (DashScope) | `qwen` | `sk-...` API keys | `GET /models` + chat probe | Default base URL: `https://dashscope.aliyuncs.com/compatible-mode/v1` (CN); `dashscope-intl.aliyuncs.com` for international; zero-balance is HTTP 400 + `code: Arrearage` (mapped to no-quota) |
+| ModelScope (魔搭) | `modelscope` | `MODELSCOPE_API_KEY` / `MODELSCOPE_SDK_TOKEN` tokens (no fixed prefix) | Chat completion probe (models list is public, not gated) | Default base URL: `https://api-inference.modelscope.cn/v1`; single CN endpoint |
+
 ## Architecture
 
 ### Layered Architecture
@@ -74,7 +93,7 @@ graph TB
     %% Service Layer
     subgraph Service["Service Layer"]
         SearchSvc["Search Service<br/>(search/client.py)"]
-        SearchProviders["Search Providers<br/>(search/provider/)"]
+        SearchProviders["AI Provider Implementations<br/>(provider/)"]
         RefineSvc["Query Refinement<br/>(refine/)"]
         RefineEngine["Refine Engine<br/>(refine/engine.py)"]
         RefineOptimizer["Query Optimizer<br/>(refine/optimizer.py)"]
@@ -522,15 +541,20 @@ The system features a sophisticated **Query Optimization Engine** with mathemati
 - **Anthropic Claude**
 - **Azure OpenAI**
 - **Google Gemini**
+- **Google Vertex AI**
+- **Tavily**
+- **DeepSeek**
+- **Kimi / Moonshot AI**
+- **GLM / Zhipu AI (BigModel)**
 - **Cerebras**
 - **OpenRouter**
 - **GroqCloud**
-- **xAI Grok**
+- **Grok Web/SSO token traces**
 - **AWS Bedrock**
 - **GooeyAI**
 - **Stability AI**
-- **百度文心一言**
-- **智谱AI**
+- **ByteDance Doubao**
+- **Baidu QianFan**
 - **Custom providers**
 
 ### 🌐 Planned Data Sources
@@ -547,7 +571,7 @@ The system features a sophisticated **Query Optimization Engine** with mathemati
 ## Key Features
 
 ### 🌐 Universal Data Acquisition
-- **Multi-Source Support**: GitHub, FOFA, Shodan, and custom endpoints
+- **Multi-Source Support**: GitHub API/Web is implemented today; FOFA, Shodan, and generic endpoints remain planned
 - **Adaptive Query Engine**: Intelligent optimization for different data sources
 - **Protocol Agnostic**: REST, GraphQL, WebSocket, and web scraping support
 - **Rate Limiting**: Per-source intelligent rate control and quota management
@@ -589,7 +613,25 @@ The system features a sophisticated **Query Optimization Engine** with mathemati
    pip install -r requirements.txt
    ```
 
-2. **Configuration**
+2. **GitHub credentials**
+
+   Use environment variables for normal runs; comma-separated values are supported.
+
+   ```powershell
+   # PowerShell
+   $env:GITHUB_TOKENS = "ghp_xxx"
+   $env:GITHUB_SESSIONS = "raw_user_session_cookie_value"
+   ```
+
+   ```bash
+   # bash/zsh
+   export GITHUB_TOKENS="ghp_xxx"
+   export GITHUB_SESSIONS="raw_user_session_cookie_value"
+   ```
+
+   `GITHUB_TOKENS` are GitHub API tokens. `GITHUB_SESSIONS` are raw `user_session` cookie values for GitHub Web search, not full Cookie headers.
+
+3. **Configuration**
 
   > Choose one of the following methods to create your configuration
 
@@ -608,9 +650,10 @@ The system features a sophisticated **Query Optimization Engine** with mathemati
    ```
 
    Edit the configuration file:
-   - Set your Github session token or API key
-   - Configure provider search patterns
-   - Adjust rate limits and thread counts
+   - Enable only the providers you want under `tasks`
+   - Keep credentials in `GITHUB_TOKENS` / `GITHUB_SESSIONS` when possible
+   - Use `examples/config-full.yaml` for Cerebras, OpenRouter, Groq, Grok, Gemini and Tavily presets
+   - Adjust `pipeline.threads`, `ratelimits` and `--timeout` for longer or more complete scans
 
    ### Configuration Guide
 
@@ -622,9 +665,11 @@ The system features a sophisticated **Query Optimization Engine** with mathemati
       global:
         workspace: "./data"  # Working directory
         github_credentials:
+          tokens:
+            - "your_github_token_here"  # GitHub API token; env variable GITHUB_TOKENS is preferred
           sessions:
-            - "your_github_session_here"  # GitHub session token
-          strategy: "round_robin"  # Load balancing strategy
+            - "your_user_session_cookie_value"  # Raw user_session cookie value for GitHub Web search
+          strategy: "round_robin"
 
       # Pipeline stage configuration
       pipeline:
@@ -657,14 +702,15 @@ The system features a sophisticated **Query Optimization Engine** with mathemati
           enabled: true          # Enable/disable provider
           provider_type: "openai"
           use_api: false         # Use GitHub API for searching
-          
+          max_pages: 1000        # Requested max GitHub search pages per query; API transport caps at 10 pages
+
           # Pipeline stage settings
           stages:
             search: true         # Enable search stage
             gather: true         # Enable acquisition stage
             check: true          # Enable validation stage
             inspect: true        # Enable API capability inspection
-          
+
           # Pattern matching configuration
           patterns:
             key_pattern: "sk(?:-proj)?-[a-zA-Z0-9]{20}T3BlbkFJ[a-zA-Z0-9]{20}"
@@ -689,26 +735,79 @@ The system features a sophisticated **Query Optimization Engine** with mathemati
    > 📋 **For complete configuration examples, please refer to:**
    > - [`examples/config-full.yaml`](examples/config-full.yaml) - Comprehensive configuration with all available options
    > - [`examples/config-simple.yaml`](examples/config-simple.yaml) - Basic configuration for quick start
+   > - [`examples/config-nvidia.yaml`](examples/config-nvidia.yaml) - NVIDIA NIM-only scan that writes provider result files
+   > - [`examples/config-cerebras.yaml`](examples/config-cerebras.yaml) - Cerebras-only scan that writes provider result files
+   > - [`examples/config-groq.yaml`](examples/config-groq.yaml) - Groq-only scan that writes provider result files
+   > - [`examples/config-openrouter.yaml`](examples/config-openrouter.yaml) - OpenRouter-only scan that writes provider result files
+   > - [`examples/config-tavily.yaml`](examples/config-tavily.yaml) - Tavily-only scan that writes provider result files
+> - [`examples/config-deepseek.yaml`](examples/config-deepseek.yaml) - DeepSeek-only scan that writes provider result files
+> - [`examples/config-kimi.yaml`](examples/config-kimi.yaml) - Kimi (Moonshot)-only scan that writes provider result files
+> - [`examples/config-glm.yaml`](examples/config-glm.yaml) - GLM (Zhipu)-only scan that writes provider result files
 
    The `tasks` section is the core of the configuration, defining what providers to search and how to process them. Refer to the basic configuration example above for a complete tasks configuration.
 
    #### Key Configuration Options
 
-   - **`name`**: Unique identifier for the task
-   - **`provider_type`**: Determines validation method (`openai`, `openai_like`, `anthropic`, `gemini`, `cerebras`, `openrouter`, `groq`, `grok`, etc.)
-   - **`api`**: API endpoint configuration for key validation
-   - **`patterns.key_pattern`**: Regex pattern to identify valid API keys
-   - **`conditions`**: Search queries to find potential keys
+- **`name`**: Unique identifier for the task
+- **`provider_type`**: Determines validation method (`openai`, `openai_like`, `anthropic`, `gemini`, `cerebras`, `openrouter`, `groq`, `grok`, `tavily`, `deepseek`, `kimi`, `glm`, etc.)
+- **`use_api` / `max_pages`**: Select GitHub API or web search and cap pages per query. The provider configs set `max_pages: 1000`; GitHub API search still caps execution at 10 pages of 100 results, so a single API query reaches GitHub's 1000-result ceiling. Web search uses the configured page cap directly.
+- **`search_types`**: Optional list of GitHub search kinds to fan out per condition. Default is `[code]`. Supported values: `code`, `issues`, `commits`. Non-code types require `use_api: true` (web HTML parsing only supports code).
+- **`global.github_transport`**: Optional ohmygh/gx-inspired transport layer — edge IP pool for `api.github.com` (bypass polluted DNS via `hosts.ohmygh.com` + SNI; background verify so startup stays fast), DoH fallback, ETag/TTL response cache, local link index (`index.skip_known_links` for gather dedup), `text_match` fragments for in-result key extraction, and `search`/`core` quota tracking from `X-RateLimit-*` headers. Edge routing auto-disables when `global.proxy` is set unless `prefer_over_proxy: true`. Does **not** shell out to the `gx` CLI for search (gx is anonymous-only and cannot do authenticated code search).
+- **`api`**: API endpoint configuration for key validation
+- **`patterns.key_pattern`**: Regex pattern to identify valid API keys
+- **`conditions`**: Search queries to find potential keys
    - **`stages`**: Enable/disable specific processing stages
    - **`extras.directory`**: Custom output directory for results
 
-3. **Running**
+   #### Provider-Specific Notes
+
+   - Use `provider_type: cerebras`, `openrouter`, `groq`, `grok`, `gemini` and `tavily` for the built-in presets. NVIDIA NIM uses `provider_type: openai_like` with its OpenAI-compatible endpoint.
+- The provider-only configs use GitHub API search (`use_api: true`) with `max_pages: 1000`; runtime execution is capped to GitHub's 10-page / 1000-result API window per query.
+- The `tavily` preset scans `tvly-...` / `tavily-...` keys through GitHub API search (`max_pages: 1000`, API-capped to 10 pages) and validates/audits them with Tavily's `/usage` endpoint.
+   - The `grok` preset scans Grok web/SSO token assignments and session-cookie traces. It intentionally does not scan the `xai-` API-key prefix by default.
+   - Grok web/SSO findings require browser-context manual verification, so they are expected to land in `wait-check-keys.txt` rather than `valid-keys.txt`.
+   - `cf_clearance` is intentionally excluded from Grok matching because it is Cloudflare state, not a Grok credential.
+
+   #### Result Files
+
+   Each provider writes results under `<workspace>/providers/<provider-folder>/`:
+
+   - `links.txt`: source links selected for material extraction
+   - `material.txt`: extracted candidate materials
+   - `valid-keys.txt`: automatically validated usable keys
+   - `no-quota-keys.txt`: keys that authenticated but had quota or billing restrictions
+   - `wait-check-keys.txt`: candidates that need manual verification or delayed checking
+   - `invalid-keys.txt`: rejected candidates
+   - `summary.json`: run summary and counters
+
+4. **Running**
    ```bash
-   python main.py                  # Use default config
-   python main.py -c custom.yaml   # Use custom config
-   python main.py --validate       # Validate config
-   python main.py --log-level DEBUG # Enable debug logging
+   python main.py --create-config
+   python main.py --validate -c config.yaml
+   python main.py -c config.yaml --timeout 300 --stats-interval 30
+   python main.py -c config.yaml --log-level DEBUG
    ```
+
+   There is no separate `--limit` CLI flag. To increase the per-query page cap, set task-level `max_pages`; to run a broader scan, enable additional `tasks` / `conditions`, tune `pipeline.threads` and `ratelimits`, and give the process a longer `--timeout`. `monitoring.queue_threshold` only controls queue-size warnings.
+
+   To run one provider-only config and audit the result files:
+
+   ```powershell
+   $provider = "cerebras"  # nvidia, cerebras, groq, openrouter, tavily, deepseek, kimi, glm
+   $config = "examples\config-$provider.yaml"
+   $env:GITHUB_TOKENS = "ghp_xxx"
+   python main.py --validate -c $config
+   python main.py -c $config --timeout 300 --stats-interval 30
+
+   Get-ChildItem ".\data\providers\$provider" -File
+   Get-Content ".\data\providers\$provider\valid-keys.txt" -TotalCount 20
+   Get-Content ".\data\providers\$provider\no-quota-keys.txt" -TotalCount 20
+   Get-Content ".\data\providers\$provider\wait-check-keys.txt" -TotalCount 20
+   Get-Content ".\data\providers\$provider\invalid-keys.txt" -TotalCount 20
+   Get-Content ".\data\providers\$provider\summary.json" -TotalCount 80
+   ```
+
+   These provider-only tasks all use the same provider result files. The Tavily preset searches both `tvly-` and `tavily-` prefixes.
 
 ## Directory Structure
 
@@ -736,8 +835,16 @@ harvester/
 │   ├── types.py      # Core type definitions
 │   └── __init__.py   # Package initialization
 ├── examples/         # Configuration examples
-│   ├── config-full.yaml    # Complete configuration template
-│   └── config-simple.yaml  # Basic configuration template
+│   ├── config-full.yaml        # Complete configuration template
+│   ├── config-simple.yaml      # Basic configuration template
+│   ├── config-nvidia.yaml      # NVIDIA NIM-only provider scan
+│   ├── config-cerebras.yaml    # Cerebras-only provider scan
+│   ├── config-groq.yaml        # Groq-only provider scan
+│   ├── config-openrouter.yaml  # OpenRouter-only provider scan
+│   └── config-tavily.yaml      # Tavily-only provider scan
+   │   ├── config-deepseek.yaml    # DeepSeek-only provider scan
+   │   ├── config-kimi.yaml        # Kimi (Moonshot)-only provider scan
+   │   └── config-glm.yaml         # GLM (Zhipu)-only provider scan
 ├── manager/          # Task and resource management
 │   ├── base.py       # Base management classes
 │   ├── pipeline.py   # Pipeline management
@@ -769,7 +876,7 @@ harvester/
 │   │   ├── doubao.py       # ByteDance Doubao provider
 │   │   ├── gemini.py       # Google Gemini provider
 │   │   ├── gooeyai.py      # GooeyAI provider
-│   │   ├── grok.py         # xAI Grok provider
+│   │   ├── grok.py         # Grok Web/SSO token provider
 │   │   ├── groq.py         # Groq provider
 │   │   ├── openai.py       # OpenAI provider
 │   │   ├── openai_like.py  # OpenAI-compatible provider
@@ -777,6 +884,10 @@ harvester/
 │   │   ├── qianfan.py      # Baidu Qianfan provider
 │   │   ├── registry.py     # Provider registry
 │   │   ├── stabilityai.py  # Stability AI provider
+│   │   ├── tavily.py       # Tavily provider
+│   │   ├── deepseek.py     # DeepSeek provider
+│   │   ├── kimi.py         # Kimi (Moonshot) provider
+│   │   ├── glm.py          # GLM (Zhipu) provider
 │   │   ├── vertex.py       # Google Vertex AI provider
 │   │   └── __init__.py     # Package initialization
 │   └── __init__.py   # Package initialization
@@ -882,7 +993,7 @@ cp examples/config-simple.yaml config.yaml
 ```bash
 # Issue: Too many API requests
 # Solution: Adjust rate limits in config
-rate_limits:
+ratelimits:
   github_api:
     base_rate: 0.1  # Reduce rate
     adaptive: true  # Enable adaptive limiting
@@ -927,16 +1038,14 @@ python main.py --log-level DEBUG > debug.log 2>&1
 - **Implement least privilege** access for API keys
 
 ### **Data Protection**
-```yaml
-# Example: Secure credential configuration
-global:
-  github_credentials:
-    sessions:
-      - "${GITHUB_SESSION_1}"  # Use environment variables
-      - "${GITHUB_SESSION_2}"
-    tokens:
-      - "${GITHUB_TOKEN_1}"
+Use environment variables for secrets:
+
+```powershell
+$env:GITHUB_TOKENS = "ghp_xxx,ghp_yyy"
+$env:GITHUB_SESSIONS = "raw_user_session_cookie_value"
 ```
+
+`config.yaml*` is ignored by Git for local runs, but committed examples should keep placeholders only. The YAML loader does not expand `${VAR}` placeholders automatically; set `GITHUB_TOKENS` / `GITHUB_SESSIONS` in the environment or render a local config before running.
 
 ### **Privacy Considerations**
 - **Respect robots.txt** and website terms of service
@@ -963,6 +1072,8 @@ global:
    - Backup results regularly
    - Monitor error rates
    - Handle alerts promptly
+   - Treat SSO/session tokens as passwords; Grok Web/SSO findings require manual verification and should not be shared in logs or issues
+   - `wait-check-keys.txt` is expected for web/SSO-style findings such as Grok session tokens
 
 ## TODO & Roadmap
 

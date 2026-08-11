@@ -10,6 +10,39 @@ global:
   # Optional HTTP proxy for all outbound HTTP requests. Supports http, https and socks5
   # Example: "http://127.0.0.1:7890" or "socks5://127.0.0.1:1080"
   proxy: ""
+  # GitHub transport enhancements inspired by ohmygh/gx (edge IP pool, DoH, ETag cache)
+  # Edge routing is auto-disabled when proxy is set unless prefer_over_proxy: true
+  github_transport:
+    edge_pool:
+      enabled: true
+      # auto | http | gx | builtin | disabled
+      source: auto
+      hosts_url: "https://hosts.ohmygh.com/v1/hosts"
+      gx_bin: "gx"
+      refresh_interval: 3600
+      max_edges: 32
+      verify: true
+      prefer_over_proxy: false
+    doh:
+      enabled: true
+      endpoints:
+        - "https://cloudflare-dns.com/dns-query"
+        - "https://doh.pub/dns-query"
+    cache:
+      enabled: true
+      ttl_search: 60
+      ttl_core: 300
+      max_entries: 1000
+      directory: "cache/github_api"
+    # Local discovered-link index (dedup / offline lookup)
+    index:
+      enabled: true
+      directory: "cache/search_index"
+      # When true, skip gather for URLs already indexed on prior runs
+      skip_known_links: false
+    # Request GitHub text-match fragments for in-search key extraction
+    text_match: true
+    quota_tracking: true
   # GitHub credentials configuration
   github_credentials:
     # GitHub session tokens (recommended for higher rate limits)
@@ -209,6 +242,8 @@ tasks:
     enabled: true
     provider_type: openai # or openai_like
     use_api: false
+    # GitHub search kinds to fan out. Default [code]. issues/commits require use_api: true
+    search_types: [code]
     stages:
       search: true
       gather: true
@@ -441,6 +476,215 @@ tasks:
     rate_limit:
       base_rate: 1.0
       burst_limit: 5
+      adaptive: true
+    storage:
+      directory: ""
+      plan: ""
+
+  - name: tavily
+    enabled: false
+    provider_type: tavily
+    use_api: true
+    max_pages: 1000
+    stages:
+      search: true
+      gather: true
+      check: true
+      inspect: true
+    api:
+      base_url: https://api.tavily.com
+      completion_path: /search
+      model_path: /usage
+      default_model: tavily-search
+      auth_key: Authorization
+      extra_headers: {}
+      api_version: ""
+      timeout: 30
+      retries: 3
+    patterns:
+      key_pattern: (?:tvly|tavily)-[0-9A-Za-z_-]{20,}
+      address_pattern: ""
+      endpoint_pattern: ""
+      model_pattern: ""
+    conditions:
+      - query: '"tvly-"'
+      - query: '"tavily-"'
+      - query: '"tvly-dev-"'
+      - query: '"tvly-prod-"'
+      - query: '"TAVILY_API_KEY"'
+      - query: '"TAVILY_API_KEY="'
+      - query: '"TAVILY_API_KEY:"'
+      - query: '"TAVILY_API_KEY" "tvly-"'
+      - query: '"api.tavily.com"'
+      - query: '"api.tavily.com" "Authorization"'
+      - query: '"api.tavily.com" "api_key"'
+      - query: '"tvly-" "api.tavily.com"'
+      - query: '"tvly-" "Authorization"'
+      - query: '"tvly-" "api_key"'
+      - query: '"tvly-" "TAVILY"'
+      - query: '"tvly-" language:Python'
+      - query: '"tvly-" language:JavaScript'
+      - query: '"tvly-" language:TypeScript'
+      - query: '"tvly-" language:Go'
+      - query: '"tvly-" language:Shell'
+      - query: '"tvly-" extension:env'
+      - query: '"tvly-" extension:json'
+      - query: '"tvly-" extension:yaml'
+      - query: '"tvly-" extension:yml'
+      - query: '"tvly-" extension:toml'
+      - query: '"tvly-" extension:md'
+      - query: '"tavily-" language:Python'
+      - query: '"tavily-" extension:env'
+    rate_limit:
+      base_rate: 1.0
+      burst_limit: 5
+      adaptive: true
+    storage:
+      directory: ""
+      plan: ""
+
+  - name: deepseek
+    enabled: false
+    provider_type: deepseek
+    use_api: true
+    max_pages: 1000
+    stages:
+      search: true
+      gather: true
+      check: true
+      inspect: true
+    api:
+      base_url: https://api.deepseek.com
+      completion_path: /chat/completions
+      model_path: /models
+      default_model: deepseek-v4-flash
+      auth_key: Authorization
+      extra_headers: {}
+      api_version: ""
+      timeout: 30
+      retries: 3
+    patterns:
+      key_pattern: sk-[0-9A-Za-z_-]{20,}
+      address_pattern: ""
+      endpoint_pattern: ""
+      model_pattern: ""
+    conditions:
+      - query: '"DEEPSEEK_API_KEY"'
+      - query: '"DEEPSEEK_API_KEY="'
+      - query: '"DEEPSEEK_API_KEY:"'
+      - query: '"api.deepseek.com"'
+      - query: '"api.deepseek.com" "Authorization"'
+      - query: '"api.deepseek.com" "api_key"'
+      - query: '"deepseek-chat"'
+      - query: '"deepseek" "api_key"'
+      - query: '"sk-" "api.deepseek.com"'
+      - query: '"deepseek" language:Python'
+      - query: '"DEEPSEEK_API_KEY" language:Python'
+      - query: '"api.deepseek.com" language:JavaScript'
+      - query: '"api.deepseek.com" extension:env'
+      - query: '"api.deepseek.com" extension:json'
+      - query: '"deepseek" extension:yaml'
+    rate_limit:
+      base_rate: 0.2
+      burst_limit: 2
+      adaptive: true
+    storage:
+      directory: ""
+      plan: ""
+
+  - name: kimi
+    enabled: false
+    provider_type: kimi
+    use_api: true
+    max_pages: 1000
+    stages:
+      search: true
+      gather: true
+      check: true
+      inspect: true
+    api:
+      base_url: https://api.moonshot.cn/v1
+      completion_path: /chat/completions
+      model_path: /models
+      default_model: kimi-k3
+      auth_key: Authorization
+      extra_headers: {}
+      api_version: ""
+      timeout: 30
+      retries: 3
+    patterns:
+      key_pattern: sk-[0-9A-Za-z_-]{20,}
+      address_pattern: ""
+      endpoint_pattern: ""
+      model_pattern: ""
+    conditions:
+      - query: '"MOONSHOT_API_KEY"'
+      - query: '"MOONSHOT_API_KEY="'
+      - query: '"MOONSHOT_API_KEY:"'
+      - query: '"api.moonshot.cn"'
+      - query: '"api.moonshot.cn" "Authorization"'
+      - query: '"api.moonshot.cn" "api_key"'
+      - query: '"moonshot" "api_key"'
+      - query: '"kimi" "api_key"'
+      - query: '"sk-" "api.moonshot.cn"'
+      - query: '"MOONSHOT_API_KEY" language:Python'
+      - query: '"api.moonshot.cn" language:JavaScript'
+      - query: '"api.moonshot.cn" extension:env'
+      - query: '"api.moonshot.cn" extension:json'
+      - query: '"moonshot" extension:yaml'
+    rate_limit:
+      base_rate: 0.2
+      burst_limit: 2
+      adaptive: true
+    storage:
+      directory: ""
+      plan: ""
+
+  - name: glm
+    enabled: false
+    provider_type: glm
+    use_api: true
+    max_pages: 1000
+    stages:
+      search: true
+      gather: true
+      check: true
+      inspect: true
+    api:
+      # Zhipu has no GET /models endpoint; validation uses the chat completions probe.
+      base_url: https://open.bigmodel.cn/api/paas/v4
+      completion_path: /chat/completions
+      model_path: ""
+      default_model: glm-4.7-flash
+      auth_key: Authorization
+      extra_headers: {}
+      api_version: ""
+      timeout: 30
+      retries: 3
+    patterns:
+      key_pattern: '[0-9a-f]{32}\.[0-9a-f]{32}'
+      address_pattern: ""
+      endpoint_pattern: ""
+      model_pattern: ""
+    conditions:
+      - query: '"ZHIPUAI_API_KEY"'
+      - query: '"ZHIPUAI_API_KEY="'
+      - query: '"ZHIPUAI_API_KEY:"'
+      - query: '"open.bigmodel.cn"'
+      - query: '"bigmodel.cn"'
+      - query: '"open.bigmodel.cn" "Authorization"'
+      - query: '"open.bigmodel.cn" "api_key"'
+      - query: '"zhipuai" "api_key"'
+      - query: '"glm-4" "api_key"'
+      - query: '"chatglm" "api_key"'
+      - query: '"ZHIPUAI_API_KEY" language:Python'
+      - query: '"open.bigmodel.cn" language:JavaScript'
+      - query: '"open.bigmodel.cn" extension:env'
+      - query: '"bigmodel.cn" extension:json'
+      - query: '"zhipuai" extension:yaml'
+    rate_limit:
+      base_rate: 0.2
+      burst_limit: 2
       adaptive: true
     storage:
       directory: ""

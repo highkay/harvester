@@ -1,0 +1,168 @@
+# Alibaba Cloud Qwen (DashScope Model Studio)-only scan configuration
+# Two regional endpoints, one task each:
+#   qwen-cn -> https://dashscope.aliyuncs.com/compatible-mode/v1          (mainland China)
+#   qwen-intl -> https://dashscope-intl.aliyuncs.com/compatible-mode/v1   (international)
+# Keys are sk- prefixed and region-specific (cannot be mixed).
+# Upstream: per-endpoint GitHub search conditions (top 1000 results per query).
+# Downstream: each task validates keys against its own endpoint's GET /models,
+# then probes a minimal chat completion to surface 402/429-quota (zero-balance
+# keys are filtered to no-quota-keys.txt instead of being marked valid).
+# Results are written to ./data-qwen/providers/<task>/*.txt
+
+global:
+  workspace: "./data-qwen"
+  max_retries_requeued: 3
+  proxy: ""
+  github_credentials:
+    sessions:
+      - "your_github_session_here"
+    tokens:
+      - "your_github_token_here"
+    strategy: "round_robin"
+  user_agents:
+    - "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
+
+pipeline:
+  threads:
+    search: 1
+    gather: 4
+    check: 2
+    inspect: 1
+  queue_sizes:
+    search: 100000
+    gather: 200000
+    check: 500000
+    inspect: 1000000
+
+monitoring:
+  update_interval: 2.0
+  error_threshold: 0.1
+  queue_threshold: 1000000
+  memory_threshold: 1073741824
+  response_threshold: 5.0
+
+persistence:
+  batch_size: 1
+  save_interval: 5
+  queue_interval: 60
+  snapshot_interval: 300
+  auto_restore: true
+  shutdown_timeout: 30
+  format: txt
+
+ratelimits:
+  github_api:
+    base_rate: 0.15
+    burst_limit: 3
+    adaptive: true
+  qwen-cn:
+    base_rate: 0.2
+    burst_limit: 2
+    adaptive: true
+  qwen-intl:
+    base_rate: 0.2
+    burst_limit: 2
+    adaptive: true
+
+tasks:
+  # ============ Mainland China: dashscope.aliyuncs.com ============
+  - name: qwen-cn
+    enabled: true
+    provider_type: qwen
+    use_api: true
+    max_pages: 1000
+    search_types: [code, issues, commits]
+    stages:
+      search: true
+      gather: true
+      check: true
+      inspect: true
+    api:
+      base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+      completion_path: /chat/completions
+      model_path: /models
+      default_model: qwen-turbo
+      auth_key: Authorization
+      extra_headers: {}
+      api_version: ""
+      timeout: 30
+      retries: 3
+    patterns:
+      key_pattern: "sk-[0-9A-Za-z_-]{20,}"
+      address_pattern: ""
+      endpoint_pattern: ""
+      model_pattern: ""
+    conditions:
+      # Each GitHub API search query has its own 1000-result window.
+      - query: '"DASHSCOPE_API_KEY"'
+      - query: '"DASHSCOPE_API_KEY="'
+      - query: '"DASHSCOPE_API_KEY:"'
+      - query: '"dashscope.aliyuncs.com"'
+      - query: '"dashscope.aliyuncs.com" "Authorization"'
+      - query: '"dashscope.aliyuncs.com" "api_key"'
+      - query: '"QWEN_API_KEY"'
+      - query: '"qwen" "api_key" "aliyun"'
+      - query: '"sk-" "dashscope.aliyuncs.com"'
+      - query: '"DASHSCOPE_API_KEY" language:Python'
+      - query: '"dashscope.aliyuncs.com" language:JavaScript'
+      - query: '"dashscope.aliyuncs.com" extension:env'
+      - query: '"dashscope.aliyuncs.com" extension:json'
+      - query: '"dashscope" extension:yaml'
+    rate_limit:
+      base_rate: 0.2
+      burst_limit: 2
+      adaptive: true
+    storage:
+      directory: ""
+      plan: ""
+
+  # ============ International: dashscope-intl.aliyuncs.com ============
+  - name: qwen-intl
+    enabled: true
+    provider_type: qwen
+    use_api: true
+    max_pages: 1000
+    search_types: [code, issues, commits]
+    stages:
+      search: true
+      gather: true
+      check: true
+      inspect: true
+    api:
+      base_url: https://dashscope-intl.aliyuncs.com/compatible-mode/v1
+      completion_path: /chat/completions
+      model_path: /models
+      default_model: qwen-turbo
+      auth_key: Authorization
+      extra_headers: {}
+      api_version: ""
+      timeout: 30
+      retries: 3
+    patterns:
+      key_pattern: "sk-[0-9A-Za-z_-]{20,}"
+      address_pattern: ""
+      endpoint_pattern: ""
+      model_pattern: ""
+    conditions:
+      # International Model Studio (Alibaba Cloud Intl): dashscope-intl.
+      - query: '"dashscope-intl.aliyuncs.com"'
+      - query: '"dashscope-intl.aliyuncs.com" "Authorization"'
+      - query: '"dashscope-intl.aliyuncs.com" "api_key"'
+      - query: '"DASHSCOPE_API_KEY" "intl"'
+      - query: '"QWEN_API_KEY"'
+      - query: '"qwen" "api_key" "alibaba"'
+      - query: '"alibabacloud.com" "model-studio" "api_key"'
+      - query: '"sk-" "dashscope-intl.aliyuncs.com"'
+      - query: '"dashscope-intl.aliyuncs.com" language:Python'
+      - query: '"dashscope-intl.aliyuncs.com" language:JavaScript'
+      - query: '"dashscope-intl.aliyuncs.com" extension:env'
+      - query: '"dashscope-intl.aliyuncs.com" extension:json'
+      - query: '"dashscope" extension:yaml'
+      - query: '"QWEN_API_KEY" language:Python'
+    rate_limit:
+      base_rate: 0.2
+      burst_limit: 2
+      adaptive: true
+    storage:
+      directory: ""
+      plan: ""

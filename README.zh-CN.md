@@ -40,6 +40,25 @@
 | Shodan     | 🚧 计划中 | IoT和网络设备枚举          |
 | 自定义API  | 🚧 计划中 | 通用REST/GraphQL API适配器 |
 
+### 当前 AI Provider 扫描预设
+
+| Provider | `provider_type` | 发现模式 | 验证方式 | 说明 |
+| -------- | --------------- | -------- | -------- | ---- |
+| OpenAI / OpenAI-compatible | `openai`, `openai_like` | `sk...T3BlbkFJ...` 风格 API Key | Chat completion 探针 | `openai_like` 可用于自定义 OpenAI 兼容端点 |
+| NVIDIA NIM | `openai_like` | `nvapi-...` API Key | OpenAI 兼容 Chat completion 探针和 `/v1/models` | 使用 `https://integrate.api.nvidia.com/v1` |
+| Cerebras | `cerebras` | `csk-...` API Key | `/v1/models` | 默认 base URL: `https://api.cerebras.ai/v1` |
+| OpenRouter | `openrouter` | `sk-or-v1-...` API Key | `/api/v1/key` 元数据 | 验证时会带 `X-Title: harvester` |
+| Groq | `groq` | `gsk_...` API Key | `/openai/v1/models` | 使用 OpenAI 兼容验证路径 |
+| Grok Web/SSO | `grok` | `grok.com` / `x.ai` token 赋值和 session cookie 痕迹 | 浏览器上下文手动验证 | 默认刻意不扫描 `xai-` API Key 前缀 |
+| Gemini | `gemini` | `AIza...` API Key | `generativelanguage.googleapis.com/v1beta/models` | 使用 `x-goog-api-key` |
+| Tavily | `tavily` | `tvly-...` / `tavily-...` API Key | `/usage` 元数据 | 使用 `Authorization: Bearer`；inspect 会记录用量审计字段 |
+| DeepSeek | `deepseek` | `sk-...` API Key | `GET /models` 鉴权门 + 最小 chat completion 探针（`max_tokens=1`，用于识别 402） | 默认 base URL: `https://api.deepseek.com`；401 body 可能不是 JSON；余额不足的 Key 计入 `no-quota-keys.txt` |
+| Kimi / Moonshot | `kimi` | `sk-...` API Key | `GET /v1/models` | 默认 base URL: `https://api.moonshot.cn/v1`；额度不足计入 `no-quota-keys.txt` |
+| GLM / 智谱 | `glm` | `{id}.{secret}` 点分格式 API Key | Chat completion 探针（`glm-4.7-flash`） | 默认 base URL: `https://open.bigmodel.cn/api/paas/v4`；无 `/models` 端点，因此跳过 inspect |
+| 小米 MiMo | `mimo` | `tp-...` / `sk-...` API Key | `GET /models` | 默认 base URL: `https://token-plan-cn.xiaomimimo.com/v1`（大陆集群）；按 task 区分区域集群（新加坡为 `token-plan-sgp.xiaomimimo.com/v1`） |
+| 阿里云 Qwen（百炼） | `qwen` | `sk-...` API Key | `GET /models` + chat 探针 | 默认 base URL: `https://dashscope.aliyuncs.com/compatible-mode/v1`（国内）；国际为 `dashscope-intl.aliyuncs.com`；欠费为 HTTP 400 + `code: Arrearage`（映射到 no-quota） |
+| 魔搭 ModelScope | `modelscope` | `MODELSCOPE_API_KEY` / `MODELSCOPE_SDK_TOKEN`（无固定前缀） | chat 探针（models 列表公开、不设鉴权门） | 默认 base URL: `https://api-inference.modelscope.cn/v1`；单一国内端点 |
+
 ## 项目架构
 
 ### 分层架构
@@ -74,7 +93,7 @@ graph TB
     %% 服务层
     subgraph Service["服务层"]
         SearchSvc["搜索服务<br/>(search/client.py)"]
-        SearchProviders["搜索提供商<br/>(search/provider/)"]
+        SearchProviders["AI Provider 实现<br/>(provider/)"]
         RefineSvc["查询优化<br/>(refine/)"]
         RefineEngine["优化引擎<br/>(refine/engine.py)"]
         RefineOptimizer["查询优化器<br/>(refine/optimizer.py)"]
@@ -510,15 +529,20 @@ sequenceDiagram
 - **Anthropic Claude**
 - **Azure OpenAI**
 - **Google Gemini**
+- **Google Vertex AI**
+- **Tavily**
+- **DeepSeek**
+- **Kimi / 月之暗面(Moonshot AI)**
+- **GLM / 智谱(BigModel)**
 - **Cerebras**
 - **OpenRouter**
 - **GroqCloud**
-- **xAI Grok**
+- **Grok Web/SSO Token 痕迹**
 - **AWS Bedrock**
 - **GooeyAI**
 - **Stability AI**
-- **百度文心一言**
-- **智谱AI**
+- **字节跳动豆包**
+- **百度千帆**
 - **自定义提供商**
 
 ### 🌐 计划支持的数据源
@@ -535,7 +559,7 @@ sequenceDiagram
 ## 主要功能
 
 ### 🌐 通用数据采集
-- **多源支持**: GitHub、FOFA、Shodan和自定义端点
+- **多源支持**: 当前已实现 GitHub API/Web；FOFA、Shodan 和通用端点仍在规划中
 - **自适应查询引擎**: 针对不同数据源的智能优化
 - **协议无关**: 支持REST、GraphQL、WebSocket和网页抓取
 - **速率限制**: 每个数据源的智能速率控制和配额管理
@@ -577,7 +601,25 @@ sequenceDiagram
    pip install -r requirements.txt
    ```
 
-2. **配置**
+2. **GitHub 凭据**
+
+   常规运行建议使用环境变量；多个值用英文逗号分隔。
+
+   ```powershell
+   # PowerShell
+   $env:GITHUB_TOKENS = "ghp_xxx"
+   $env:GITHUB_SESSIONS = "raw_user_session_cookie_value"
+   ```
+
+   ```bash
+   # bash/zsh
+   export GITHUB_TOKENS="ghp_xxx"
+   export GITHUB_SESSIONS="raw_user_session_cookie_value"
+   ```
+
+   `GITHUB_TOKENS` 是 GitHub API token。`GITHUB_SESSIONS` 是 GitHub Web 搜索用的原始 `user_session` cookie 值，不是完整 Cookie header。
+
+3. **配置**
 
   > 选择以下方法之一创建配置文件
 
@@ -596,9 +638,10 @@ sequenceDiagram
    ```
 
    编辑配置文件：
-   - 设置Github会话令牌或API密钥
-   - 配置提供商搜索模式
-   - 调整速率限制和线程数
+   - 只在 `tasks` 中启用本次需要的 provider
+   - 尽量通过 `GITHUB_TOKENS` / `GITHUB_SESSIONS` 提供凭据
+   - 使用 `examples/config-full.yaml` 参考 Cerebras、OpenRouter、Groq、Grok、Gemini 和 Tavily 预设
+   - 调整 `pipeline.threads`、`ratelimits` 和 `--timeout` 以支持更长或更完整的扫描
 
    ### 配置文件说明
 
@@ -610,9 +653,11 @@ sequenceDiagram
       global:
         workspace: "./data"  # 工作目录
         github_credentials:
+          tokens:
+            - "your_github_token_here"  # GitHub API token；优先使用环境变量 GITHUB_TOKENS
           sessions:
-            - "your_github_session_here"  # GitHub会话令牌
-          strategy: "round_robin"  # 负载均衡策略
+            - "your_user_session_cookie_value"  # GitHub Web 搜索用的原始 user_session cookie 值
+          strategy: "round_robin"
 
       # 流水线阶段配置
       pipeline:
@@ -645,14 +690,15 @@ sequenceDiagram
           enabled: true          # 是否启用
           provider_type: "openai"
           use_api: false         # 使用GitHub API进行搜索
-          
+          max_pages: 1000        # 每个 GitHub 搜索查询请求的最多翻页数；API 执行时封顶 10 页
+
           # 流水线阶段设置
           stages:
             search: true         # 启用搜索阶段
             gather: true         # 启用采集阶段
             check: true          # 启用验证阶段
             inspect: true        # 启用API能力检查
-          
+
           # 模式匹配配置
           patterns:
             key_pattern: "sk(?:-proj)?-[a-zA-Z0-9]{20}T3BlbkFJ[a-zA-Z0-9]{20}"
@@ -691,26 +737,79 @@ sequenceDiagram
    > 📋 **完整配置示例请参考：**
    > - [`examples/config-full.yaml`](examples/config-full.yaml) - 包含所有可用选项的完整配置
    > - [`examples/config-simple.yaml`](examples/config-simple.yaml) - 快速开始的基础配置
+   > - [`examples/config-nvidia.yaml`](examples/config-nvidia.yaml) - 只跑 NVIDIA NIM 并输出 provider 结果文件
+   > - [`examples/config-cerebras.yaml`](examples/config-cerebras.yaml) - 只跑 Cerebras 并输出 provider 结果文件
+   > - [`examples/config-groq.yaml`](examples/config-groq.yaml) - 只跑 Groq 并输出 provider 结果文件
+   > - [`examples/config-openrouter.yaml`](examples/config-openrouter.yaml) - 只跑 OpenRouter 并输出 provider 结果文件
+   > - [`examples/config-tavily.yaml`](examples/config-tavily.yaml) - 只跑 Tavily 并输出 provider 结果文件
+> - [`examples/config-deepseek.yaml`](examples/config-deepseek.yaml) - 只跑 DeepSeek 并输出 provider 结果文件
+> - [`examples/config-kimi.yaml`](examples/config-kimi.yaml) - 只跑 Kimi(Moonshot) 并输出 provider 结果文件
+> - [`examples/config-glm.yaml`](examples/config-glm.yaml) - 只跑 GLM(智谱) 并输出 provider 结果文件
 
    `tasks` 部分是配置的核心，定义了要搜索哪些提供商以及如何处理它们。请参考上面基础配置示例中的完整tasks配置。
 
    #### 主要配置选项
 
-   - **`name`**: 任务的唯一标识符
-   - **`provider_type`**: 决定验证方法（`openai`、`openai_like`、`anthropic`、`gemini`、`cerebras`、`openrouter`、`groq`、`grok` 等）
-   - **`api`**: 用于密钥验证的API端点配置
-   - **`patterns.key_pattern`**: 识别有效API密钥的正则表达式模式
-   - **`conditions`**: 用于查找潜在密钥的搜索查询
+- **`name`**: 任务的唯一标识符
+- **`provider_type`**: 决定验证方法（`openai`、`openai_like`、`anthropic`、`gemini`、`cerebras`、`openrouter`、`groq`、`grok`、`tavily`、`deepseek`、`kimi`、`glm` 等）
+- **`use_api` / `max_pages`**: 选择 GitHub API 或 Web 搜索，并限制每个查询最多翻几页。provider 配置统一写 `max_pages: 1000`；GitHub API 执行时仍会封顶为 10 页、每页 100 条，所以单个 API query 达到 GitHub 的 1000 条结果窗口上限。Web 搜索会直接使用配置的页数上限。
+- **`search_types`**: 可选，按 condition 展开的 GitHub 搜索类型列表，默认 `[code]`。支持 `code` / `issues` / `commits`。非 code 类型需要 `use_api: true`（Web HTML 解析仅支持 code）。
+- **`global.github_transport`**: 可选，参考 ohmygh/gx 的传输增强——`api.github.com` 边缘 IP 池（经 `hosts.ohmygh.com` + SNI 绕过 DNS 污染；后台校验不阻塞启动）、DoH 回退、ETag/TTL 响应缓存、本地链接索引（`index.skip_known_links` 可跳过已采集 URL 的 gather）、`text_match` 片段就地抽 key，以及基于 `X-RateLimit-*` 的 search/core 额度跟踪。设置了 `global.proxy` 时默认关闭边缘路由（除非 `prefer_over_proxy: true`）。**不会**把搜索主路径交给 `gx` CLI（gx 仅匿名只读，无法做需认证的 code search）。
+- **`api`**: 用于密钥验证的API端点配置
+- **`patterns.key_pattern`**: 识别有效API密钥的正则表达式模式
+- **`conditions`**: 用于查找潜在密钥的搜索查询
    - **`stages`**: 启用/禁用特定的处理阶段
    - **`extras.directory`**: 结果的自定义输出目录
 
-3. **运行**
+   #### Provider 特殊说明
+
+   - 内置预设使用 `provider_type: cerebras`、`openrouter`、`groq`、`grok`、`gemini` 和 `tavily`。NVIDIA NIM 使用 `provider_type: openai_like` 和它的 OpenAI 兼容端点。
+- provider-only 配置统一使用 GitHub API 搜索（`use_api: true`）并设置 `max_pages: 1000`；运行时会按 GitHub API 的 10 页 / 1000 条结果窗口封顶。
+- `tavily` 预设会通过 GitHub API 搜索扫描 `tvly-...` / `tavily-...` Key（`max_pages: 1000`，API 执行封顶 10 页），并用 Tavily `/usage` 接口完成验证和用量审计。
+   - `grok` 预设扫描 Grok Web/SSO token 赋值和 session cookie 痕迹，默认刻意不扫描 `xai-` API Key 前缀。
+   - Grok Web/SSO 发现项需要浏览器上下文手动验证，因此预期会进入 `wait-check-keys.txt`，而不是 `valid-keys.txt`。
+   - `cf_clearance` 属于 Cloudflare 状态，不是 Grok 凭据，因此不会被 Grok 匹配规则收集。
+
+   #### 结果文件
+
+   每个 provider 会把结果写入 `<workspace>/providers/<provider-folder>/`：
+
+   - `links.txt`: 被选中用于提取材料的来源链接
+   - `material.txt`: 提取出的候选材料
+   - `valid-keys.txt`: 自动验证可用的 key
+   - `no-quota-keys.txt`: 认证通过但额度或计费受限的 key
+   - `wait-check-keys.txt`: 需要手动验证或延迟复查的候选项
+   - `invalid-keys.txt`: 被拒绝的候选项
+   - `summary.json`: 本次运行摘要和计数
+
+4. **运行**
    ```bash
-   python main.py                  # 使用默认配置
-   python main.py -c custom.yaml   # 使用自定义配置
-   python main.py --validate       # 验证配置
-   python main.py --log-level DEBUG # 启用调试日志
+   python main.py --create-config
+   python main.py --validate -c config.yaml
+   python main.py -c config.yaml --timeout 300 --stats-interval 30
+   python main.py -c config.yaml --log-level DEBUG
    ```
+
+   当前没有单独的 `--limit` 命令行参数。需要提高单查询翻页上限时，在 task 上设置 `max_pages`；需要扩大扫描范围时，启用更多 `tasks` / `conditions`，调整 `pipeline.threads` 和 `ratelimits`，并给进程更长的 `--timeout`。`monitoring.queue_threshold` 只控制队列积压告警。
+
+   只跑一个 provider-only 配置，并审计输出结果文件：
+
+   ```powershell
+   $provider = "cerebras"  # nvidia, cerebras, groq, openrouter, tavily, deepseek, kimi, glm
+   $config = "examples\config-$provider.yaml"
+   $env:GITHUB_TOKENS = "ghp_xxx"
+   python main.py --validate -c $config
+   python main.py -c $config --timeout 300 --stats-interval 30
+
+   Get-ChildItem ".\data\providers\$provider" -File
+   Get-Content ".\data\providers\$provider\valid-keys.txt" -TotalCount 20
+   Get-Content ".\data\providers\$provider\no-quota-keys.txt" -TotalCount 20
+   Get-Content ".\data\providers\$provider\wait-check-keys.txt" -TotalCount 20
+   Get-Content ".\data\providers\$provider\invalid-keys.txt" -TotalCount 20
+   Get-Content ".\data\providers\$provider\summary.json" -TotalCount 80
+   ```
+
+   这些 provider-only 任务使用相同的 provider 结果文件。Tavily 预设会搜索 `tvly-` 和 `tavily-` 两种前缀。
 
 ## 目录结构
 
@@ -738,8 +837,16 @@ harvester/
 │   ├── types.py      # 核心类型定义
 │   └── __init__.py   # 包初始化
 ├── examples/         # 配置示例
-│   ├── config-full.yaml    # 完整配置模板
-│   └── config-simple.yaml  # 基础配置模板
+│   ├── config-full.yaml        # 完整配置模板
+│   ├── config-simple.yaml      # 基础配置模板
+│   ├── config-nvidia.yaml      # 只跑 NVIDIA NIM 的 provider 扫描
+│   ├── config-cerebras.yaml    # 只跑 Cerebras 的 provider 扫描
+│   ├── config-groq.yaml        # 只跑 Groq 的 provider 扫描
+│   ├── config-openrouter.yaml  # 只跑 OpenRouter 的 provider 扫描
+│   └── config-tavily.yaml      # 只跑 Tavily 的 provider 扫描
+   │   ├── config-deepseek.yaml    # 只跑 DeepSeek 的 provider 扫描
+   │   ├── config-kimi.yaml        # 只跑 Kimi(Moonshot) 的 provider 扫描
+   │   └── config-glm.yaml         # 只跑 GLM(智谱) 的 provider 扫描
 ├── manager/          # 任务和资源管理
 │   ├── base.py       # 基础管理类
 │   ├── pipeline.py   # 流水线管理
@@ -771,7 +878,7 @@ harvester/
 │   │   ├── doubao.py       # 字节跳动豆包提供商
 │   │   ├── gemini.py       # Google Gemini 提供商
 │   │   ├── gooeyai.py      # GooeyAI 提供商
-│   │   ├── grok.py         # xAI Grok 提供商
+│   │   ├── grok.py         # Grok Web/SSO token 提供商
 │   │   ├── groq.py         # Groq 提供商
 │   │   ├── openai.py       # OpenAI 提供商
 │   │   ├── openai_like.py  # OpenAI 兼容提供商
@@ -779,6 +886,10 @@ harvester/
 │   │   ├── qianfan.py      # 百度千帆提供商
 │   │   ├── registry.py     # 提供商注册表
 │   │   ├── stabilityai.py  # Stability AI 提供商
+│   │   ├── tavily.py       # Tavily 提供商
+│   │   ├── deepseek.py     # DeepSeek 提供商
+│   │   ├── kimi.py         # Kimi(Moonshot) 提供商
+│   │   ├── glm.py          # GLM(智谱) 提供商
 │   │   ├── vertex.py       # Google Vertex AI 提供商
 │   │   └── __init__.py     # 包初始化
 │   └── __init__.py   # 包初始化
@@ -884,7 +995,7 @@ cp examples/config-simple.yaml config.yaml
 ```bash
 # 问题：API 请求过多
 # 解决方案：在配置中调整速率限制
-rate_limits:
+ratelimits:
   github_api:
     base_rate: 0.1  # 降低速率
     adaptive: true  # 启用自适应限制
@@ -929,16 +1040,14 @@ python main.py --log-level DEBUG > debug.log 2>&1
 - **实施最小权限** 访问原则
 
 ### **数据保护**
-```yaml
-# 示例：安全凭证配置
-global:
-  github_credentials:
-    sessions:
-      - "${GITHUB_SESSION_1}"  # 使用环境变量
-      - "${GITHUB_SESSION_2}"
-    tokens:
-      - "${GITHUB_TOKEN_1}"
+敏感信息建议使用环境变量：
+
+```powershell
+$env:GITHUB_TOKENS = "ghp_xxx,ghp_yyy"
+$env:GITHUB_SESSIONS = "raw_user_session_cookie_value"
 ```
+
+`config.yaml*` 已被 Git 忽略，可用于本地运行；提交到仓库的示例配置只应保留占位符。YAML loader 不会自动展开 `${VAR}` 占位符，请在环境变量中设置 `GITHUB_TOKENS` / `GITHUB_SESSIONS`，或在运行前生成本地配置。
 
 ### **隐私考虑**
 - **遵守 robots.txt** 和网站服务条款
@@ -965,6 +1074,8 @@ global:
    - 定期备份结果
    - 监控错误率
    - 及时处理警报
+   - 将 SSO/session token 当作密码处理；Grok Web/SSO 发现项需要手动验证，不应写入日志或 issue
+   - 对 Grok session token 这类 Web/SSO 发现项，`wait-check-keys.txt` 是预期输出
 
 ## TODO与路线图
 
@@ -999,7 +1110,7 @@ global:
   - [ ] 添加FOFA特定查询优化
 
 - [ ] **Shodan集成**
-  - [ ] 支持从Shadon查询与提取数据
+  - [ ] 支持从Shodan查询与提取数据
 
 #### 通用网络源
 - [ ] **通用网页抓取器**

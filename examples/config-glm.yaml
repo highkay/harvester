@@ -1,0 +1,168 @@
+# GLM (Zhipu AI / BigModel)-only scan configuration
+# Two regional endpoints, one task each:
+#   glm    -> https://open.bigmodel.cn/api/paas/v4   (mainland China, platform.bigmodel.cn)
+#   glm-ai -> https://api.z.ai/api/paas/v4           (international, z.ai / bigmodel.ai)
+# Upstream: per-endpoint GitHub search conditions (top 1000 results per query).
+# Downstream: each task validates keys against its own endpoint via chat probe.
+# Results are written to ./data-glm/providers/<task>/*.txt
+
+global:
+  workspace: "./data-glm"
+  max_retries_requeued: 3
+  proxy: ""
+  github_credentials:
+    sessions:
+      - "your_github_session_here"
+    tokens:
+      - "your_github_token_here"
+    strategy: "round_robin"
+  user_agents:
+    - "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
+
+pipeline:
+  threads:
+    search: 1
+    gather: 4
+    check: 2
+    inspect: 1
+  queue_sizes:
+    search: 100000
+    gather: 200000
+    check: 500000
+    inspect: 1000000
+
+monitoring:
+  update_interval: 2.0
+  error_threshold: 0.1
+  queue_threshold: 1000000
+  memory_threshold: 1073741824
+  response_threshold: 5.0
+
+persistence:
+  batch_size: 1
+  save_interval: 5
+  queue_interval: 60
+  snapshot_interval: 300
+  auto_restore: true
+  shutdown_timeout: 30
+  format: txt
+
+ratelimits:
+  github_api:
+    base_rate: 0.15
+    burst_limit: 3
+    adaptive: true
+  glm:
+    base_rate: 0.2
+    burst_limit: 2
+    adaptive: true
+  glm-ai:
+    base_rate: 0.2
+    burst_limit: 2
+    adaptive: true
+
+tasks:
+  - name: glm
+    enabled: true
+    provider_type: glm
+    use_api: true
+    max_pages: 1000
+    search_types: [code, issues, commits]
+    stages:
+      search: true
+      gather: true
+      check: true
+      inspect: true
+    api:
+      # Zhipu has no GET /models endpoint; validation uses chat completions probe.
+      base_url: https://open.bigmodel.cn/api/paas/v4
+      completion_path: /chat/completions
+      model_path: ""
+      default_model: glm-4.7-flash
+      auth_key: Authorization
+      extra_headers: {}
+      api_version: ""
+      timeout: 30
+      retries: 3
+    patterns:
+      key_pattern: "[0-9a-f]{32}\\.[0-9a-f]{32}"
+      address_pattern: ""
+      endpoint_pattern: ""
+      model_pattern: ""
+    conditions:
+      # Each GitHub API search query has its own 1000-result window.
+      - query: '"ZHIPUAI_API_KEY"'
+      - query: '"ZHIPUAI_API_KEY="'
+      - query: '"ZHIPUAI_API_KEY:"'
+      - query: '"open.bigmodel.cn"'
+      - query: '"bigmodel.cn"'
+      - query: '"open.bigmodel.cn" "Authorization"'
+      - query: '"open.bigmodel.cn" "api_key"'
+      - query: '"zhipuai" "api_key"'
+      - query: '"glm-4" "api_key"'
+      - query: '"chatglm" "api_key"'
+      - query: '"ZHIPUAI_API_KEY" language:Python'
+      - query: '"open.bigmodel.cn" language:JavaScript'
+      - query: '"open.bigmodel.cn" extension:env'
+      - query: '"bigmodel.cn" extension:json'
+      - query: '"zhipuai" extension:yaml'
+    rate_limit:
+      base_rate: 0.2
+      burst_limit: 2
+      adaptive: true
+    storage:
+      directory: ""
+      plan: ""
+
+  # ============ International endpoint: api.z.ai/api/paas/v4 ============
+  - name: glm-ai
+    enabled: true
+    provider_type: glm
+    use_api: true
+    max_pages: 1000
+    search_types: [code, issues, commits]
+    stages:
+      search: true
+      gather: true
+      check: true
+      inspect: true
+    api:
+      # Zhipu international (z.ai / bigmodel.ai) has no GET /models endpoint
+      # either; validation uses the same chat completions probe.
+      base_url: https://api.z.ai/api/paas/v4
+      completion_path: /chat/completions
+      model_path: ""
+      default_model: glm-4.7-flash
+      auth_key: Authorization
+      extra_headers: {}
+      api_version: ""
+      timeout: 30
+      retries: 3
+    patterns:
+      key_pattern: "[0-9a-f]{32}\\.[0-9a-f]{32}"
+      address_pattern: ""
+      endpoint_pattern: ""
+      model_pattern: ""
+    conditions:
+      # International Zhipu: api.z.ai / bigmodel.ai / z.ai platform keys.
+      - query: '"api.z.ai"'
+      - query: '"api.z.ai" "Authorization"'
+      - query: '"api.z.ai" "api_key"'
+      - query: '"ZHIPUAI_API_KEY" "api.z.ai"'
+      - query: '"z.ai" "api_key"'
+      - query: '"bigmodel.ai" "api_key"'
+      - query: '"glm-4" "api.z.ai"'
+      - query: '"zhipuai" "api.z.ai"'
+      - query: '"api.z.ai" language:Python'
+      - query: '"api.z.ai" language:JavaScript'
+      - query: '"api.z.ai" extension:env'
+      - query: '"api.z.ai" extension:json'
+      - query: '"z.ai" extension:yaml'
+      - query: '"ZHIPUAI_API_KEY" language:Python "api.z.ai"'
+    rate_limit:
+      base_rate: 0.2
+      burst_limit: 2
+      adaptive: true
+    storage:
+      directory: ""
+      plan: ""

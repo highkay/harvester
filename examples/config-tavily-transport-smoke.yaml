@@ -1,0 +1,120 @@
+# Tavily smoke test for ohmygh/gx-inspired search transport.
+# Limited queries + pages so a short --timeout run can finish.
+# Results: ./data-tavily-transport-smoke/
+
+global:
+  workspace: "./data-tavily-transport-smoke"
+  max_retries_requeued: 3
+  proxy: ""
+  github_transport:
+    edge_pool:
+      enabled: true
+      source: auto
+      hosts_url: "https://hosts.ohmygh.com/v1/hosts"
+      refresh_interval: 3600
+      max_edges: 24
+      verify: true
+      prefer_over_proxy: false
+    doh:
+      enabled: true
+    cache:
+      enabled: true
+      ttl_search: 60
+      ttl_core: 300
+      max_entries: 500
+      directory: "cache/github_api"
+    index:
+      enabled: true
+      directory: "cache/search_index"
+      # First smoke run keeps all links; set true for incremental re-runs
+      skip_known_links: false
+    text_match: true
+    quota_tracking: true
+  github_credentials:
+    sessions:
+      - "your_github_session_here"
+    tokens:
+      - "your_github_token_here"
+    strategy: "round_robin"
+  user_agents:
+    - "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
+
+pipeline:
+  threads:
+    search: 1
+    gather: 3
+    check: 2
+    inspect: 1
+  queue_sizes:
+    search: 10000
+    gather: 20000
+    check: 50000
+    inspect: 50000
+
+monitoring:
+  update_interval: 2.0
+  error_threshold: 0.1
+  queue_threshold: 1000000
+  memory_threshold: 1073741824
+  response_threshold: 5.0
+
+persistence:
+  batch_size: 1
+  save_interval: 5
+  queue_interval: 30
+  snapshot_interval: 300
+  auto_restore: false
+  shutdown_timeout: 20
+  format: txt
+
+ratelimits:
+  github_api:
+    base_rate: 0.2
+    burst_limit: 3
+    adaptive: true
+  tavily:
+    base_rate: 1.0
+    burst_limit: 5
+    adaptive: true
+
+tasks:
+  - name: tavily
+    enabled: true
+    provider_type: tavily
+    use_api: true
+    # Keep smoke small: 1 page per query window
+    max_pages: 1
+    # Fan out code + issues + commits for the same seed queries
+    search_types: [code, issues, commits]
+    stages:
+      search: true
+      gather: true
+      check: true
+      inspect: true
+    api:
+      base_url: https://api.tavily.com
+      completion_path: /search
+      model_path: /usage
+      default_model: tavily-search
+      auth_key: Authorization
+      extra_headers: {}
+      api_version: ""
+      timeout: 30
+      retries: 3
+    patterns:
+      key_pattern: "(?:tvly|tavily)-[0-9A-Za-z_-]{20,}"
+      address_pattern: ""
+      endpoint_pattern: ""
+      model_pattern: ""
+    conditions:
+      # Small seed set for transport verification
+      - query: '"tvly-"'
+      - query: '"tvly-" extension:env'
+      - query: '"TAVILY_API_KEY"'
+    rate_limit:
+      base_rate: 1.0
+      burst_limit: 5
+      adaptive: true
+    storage:
+      directory: ""
+      plan: ""
