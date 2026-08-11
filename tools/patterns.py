@@ -14,6 +14,8 @@ API_KEY_PATTERNS = [
     r"\bsk-or-v1-[0-9A-Za-z_-]{20,}",  # OpenRouter keys
     r"\bcsk-[0-9A-Za-z_-]{20,}",  # Cerebras keys
     r"\bxai-[0-9A-Za-z_-]{20,}",  # xAI/Grok keys
+    r"\bnvapi-[0-9A-Za-z_-]{20,}",  # NVIDIA NIM keys
+    r"\b(?:tvly|tavily)-[0-9A-Za-z_-]{20,}",  # Tavily keys
     (
         r"(?i)\b(?:grok|xai|x_ai)?[_-]?"
         r"(?:sso|session|auth|id[_-]?token|access[_-]?token|refresh[_-]?token)"
@@ -24,9 +26,12 @@ API_KEY_PATTERNS = [
         r"\s*=\s*[0-9A-Za-z._~+/=-]{20,}"
     ),  # Grok web session cookies
     r"\bsk-[0-9A-Za-z_-]{20,}",  # OpenAI and sk- prefixed keys
+    r"\btp-[0-9A-Za-z_-]{20,}",  # Xiaomi MiMo Token Plan keys
+    r"(?i)\bMODELSCOPE(?:[_-]?(?:API[_-]?KEY|SDK[_-]?TOKEN|TOKEN|ACCESS[_-]?TOKEN))\b[\"']?\s*[:=]\s*[\"']?[0-9A-Za-z._~+/=-]{20,}[\"']?",  # ModelScope tokens
     r"\banthrop[0-9A-Za-z_-]{20,}",  # Anthropic keys
     r"\bgsk_[0-9A-Za-z_-]{20,}",  # Groq/GooeyAI keys
     r"\bstab_[0-9A-Za-z_-]{20,}",  # StabilityAI keys
+    r"\b[0-9a-f]{32}\.[0-9a-f]{32}\b",  # Zhipu AI (GLM) keys: {id}.{secret}
 ]
 
 # Query parsing patterns
