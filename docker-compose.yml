@@ -1,0 +1,39 @@
+# Harvester Web — Docker Compose
+# Usage: docker compose up -d
+# Data persists in ./data (SQLite DB + provider results).
+
+services:
+  harvester-web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    image: harvester-web:latest
+    container_name: harvester-web
+    ports:
+      - "8000:8000"
+    volumes:
+      - "./data:/app/data"
+    environment:
+      # --- Auth ---
+      - WEB_AUTH_KEY=${WEB_AUTH_KEY:-}
+      # --- Encryption ---
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:-}
+      # --- gpt-load push service ---
+      - GPT_LOAD_AUTH_KEY=${GPT_LOAD_AUTH_KEY:-sk-}
+      - GPT_LOAD_BASE_URL=${GPT_LOAD_BASE_URL:-http://192.168.1.18:43001}
+      # --- Storage ---
+      - HARVESTER_WORKSPACE=/app/data
+      - HARVESTER_DB_PATH=/app/data/harvester.db
+      # --- Timezone ---
+      - TZ=Asia/Shanghai
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped

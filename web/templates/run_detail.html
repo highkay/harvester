@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}运行详情 - Harvester 管理界面{% endblock %}
+{% block content %}
+<h2>运行详情</h2>
+<p><a href="/runs">← 返回运行历史</a></p>
+<table>
+  <tbody>
+    <tr><th>Run ID</th><td>{{ run.id }}</td></tr>
+    <tr><th>Provider</th><td>{{ run.provider_name }}</td></tr>
+    <tr><th>配置文件</th><td>{{ run.config_file }}</td></tr>
+    <tr><th>状态</th><td>{{ run.status }}</td></tr>
+    <tr><th>开始时间</th><td>{{ run.started_at }}</td></tr>
+    <tr><th>结束时间</th><td>{{ run.finished_at or '—' }}</td></tr>
+    <tr><th>耗时（秒）</th><td>{{ run.duration_seconds or '—' }}</td></tr>
+    <tr><th>有效 Key 数</th><td>{{ run.valid_keys_found }}</td></tr>
+    <tr><th>检查 Key 总数</th><td>{{ run.total_keys_checked }}</td></tr>
+    <tr><th>错误信息</th><td>{{ run.error_message or '—' }}</td></tr>
+    <tr><th>创建时间</th><td>{{ run.created_at }}</td></tr>
+  </tbody>
+</table>
+{% endblock %}

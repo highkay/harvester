@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}Token 管理 - Harvester 管理界面{% endblock %}
+{% block content %}
+<h2>Token 管理</h2>
+<p class="muted">凭证以加密形式存储，此处仅展示脱敏信息（哈希前缀），绝不回显原文。如需添加 Token，请调用 API：<code>POST /api/tokens</code>。</p>
+<table>
+  <thead>
+    <tr><th>ID</th><th>类型</th><th>Token（脱敏）</th><th>标签</th><th>启用状态</th><th>创建时间</th></tr>
+  </thead>
+  <tbody>
+    {% for t in tokens %}
+    <tr>
+      <td>{{ t.id }}</td>
+      <td>{% if t.token_type == 'api' %}API Key{% else %}会话{% endif %}</td>
+      <td><code>{{ t.token_masked }}</code></td>
+      <td>{{ t.label or '—' }}</td>
+      <td>{% if t.enabled %}<span class="tag on">启用</span>{% else %}<span class="tag off">停用</span>{% endif %}</td>
+      <td class="muted">{{ t.created_at }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="6" class="muted">暂无 Token</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

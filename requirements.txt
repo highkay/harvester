@@ -2,6 +2,16 @@
 PyYAML
 requests
 
+# Web Layer Dependencies
+fastapi
+uvicorn[standard]
+aiosqlite
+apscheduler
+aiohttp
+jinja2
+python-multipart
+cryptography
+
 # Development Dependencies (Optional)
 # Uncomment if needed for development
 # pytest

@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}推送日志 - Harvester 管理界面{% endblock %}
+{% block content %}
+<h2>推送日志</h2>
+<p class="muted">每次运行后向 gpt-load 目标分组推送有效 Key 的审计记录。</p>
+<table>
+  <thead>
+    <tr><th>ID</th><th>Run ID</th><th>Provider</th><th>分组 ID</th><th>Key 数</th><th>新增</th><th>忽略</th><th>状态</th><th>推送时间</th></tr>
+  </thead>
+  <tbody>
+    {% for p in logs %}
+    <tr>
+      <td>{{ p.id }}</td>
+      <td><a href="/runs/{{ p.run_id }}">{{ p.run_id[:8] }}…</a></td>
+      <td>{{ p.provider_name }}</td>
+      <td>#{{ p.group_id }}</td>
+      <td>{{ p.keys_count }}</td>
+      <td>{{ p.added_count }}</td>
+      <td>{{ p.ignored_count }}</td>
+      <td>{{ p.status }}</td>
+      <td class="muted">{{ p.pushed_at }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="9" class="muted">暂无推送记录</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

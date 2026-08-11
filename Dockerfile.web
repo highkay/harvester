@@ -1,0 +1,30 @@
+# Harvester Web Mode Dockerfile
+# Build: docker build -f Dockerfile.web -t harvester-web .
+# This file coexists with the CLI Dockerfile — do not modify the original.
+
+FROM python:3.12-slim
+
+LABEL maintainer="wzdnzd" \
+      org.opencontainers.image.title="Harvester Web" \
+      org.opencontainers.image.description="Harvester Web API — FastAPI + scheduled scanning + gpt-load push" \
+      org.opencontainers.image.source="https://github.com/wzdnzd/harvester"
+
+WORKDIR /app
+
+# Install dependencies in a cached layer (requirements change less often than source)
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy project source (respects .dockerignore)
+COPY . .
+
+# Create data directory for volume mount
+RUN mkdir -p /app/data
+
+EXPOSE 8000
+
+# Entrypoint handles ENCRYPTION_KEY generation, then starts web_main.py
+COPY entrypoint-web.sh /app/entrypoint-web.sh
+RUN chmod +x /app/entrypoint-web.sh
+
+ENTRYPOINT ["sh", "/app/entrypoint-web.sh"]

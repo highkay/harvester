@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}调度管理 - Harvester 管理界面{% endblock %}
+{% block content %}
+<h2>调度管理</h2>
+<p class="muted">服务启动时 APScheduler 会依据此表重建定时任务。</p>
+<table>
+  <thead>
+    <tr><th>ID</th><th>Provider</th><th>Cron 表达式</th><th>启用状态</th><th>配置文件</th><th>更新时间</th></tr>
+  </thead>
+  <tbody>
+    {% for s in schedules %}
+    <tr>
+      <td>{{ s.id }}</td>
+      <td>{{ s.provider_name }}</td>
+      <td><code>{{ s.cron_expression }}</code></td>
+      <td>{% if s.enabled %}<span class="tag on">启用</span>{% else %}<span class="tag off">停用</span>{% endif %}</td>
+      <td class="muted">{{ s.config_file }}</td>
+      <td class="muted">{{ s.updated_at }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="6" class="muted">暂无调度配置</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

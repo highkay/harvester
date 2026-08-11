@@ -80,8 +80,11 @@ config.yaml.bak
 data/config.yaml.bak
 
 # Docker files
-Dockerfile*
-docker-compose*.yml
+# NOTE: Dockerfile.web + docker-compose.yml must stay IN the build context.
+# Only the legacy CLI Dockerfile is excluded from the *web* build context is
+# not an issue (context exclusion is global), so keep these files available:
+# Dockerfile*
+# docker-compose*.yml
 .dockerignore
 
 # CI/CD files

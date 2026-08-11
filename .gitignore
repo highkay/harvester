@@ -137,3 +137,10 @@ local.json
 cmd/*.txt
 cmd/*.json
 config.yaml*
+# Harvester runtime data (contains real API keys - NEVER commit)
+/data-*/
+# Internal run records
+/.omo/
+# Debug leftovers
+debug_push*.py
+*.bak

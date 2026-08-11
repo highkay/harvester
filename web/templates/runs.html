@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}运行历史 - Harvester 管理界面{% endblock %}
+{% block content %}
+<h2>运行历史</h2>
+<table>
+  <thead>
+    <tr><th>Run ID</th><th>Provider</th><th>状态</th><th>开始时间</th><th>结束时间</th><th>耗时（秒）</th><th>有效 Key</th><th>检查 Key 数</th></tr>
+  </thead>
+  <tbody>
+    {% for r in runs %}
+    <tr>
+      <td><a href="/runs/{{ r.id }}">{{ r.id_short }}…</a></td>
+      <td>{{ r.provider_name }}</td>
+      <td>{{ r.status }}</td>
+      <td class="muted">{{ r.started_at }}</td>
+      <td class="muted">{{ r.finished_at or '—' }}</td>
+      <td>{{ r.duration_seconds or '—' }}</td>
+      <td>{{ r.valid_keys_found }}</td>
+      <td>{{ r.total_keys_checked }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="8" class="muted">暂无运行记录</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}仪表盘 - Harvester 管理界面{% endblock %}
+{% block content %}
+<h2>仪表盘</h2>
+
+<div class="cards">
+  <div class="card"><div class="num">{{ stats.token_total }}</div><div class="label">Token 总数</div></div>
+  <div class="card"><div class="num">{{ stats.token_enabled }}</div><div class="label">已启用 Token</div></div>
+  <div class="card"><div class="num">{{ stats.run_total }}</div><div class="label">运行次数</div></div>
+  <div class="card"><div class="num">{{ stats.valid_keys }}</div><div class="label">累计有效 Key</div></div>
+</div>
+
+<h3>调度计划</h3>
+<table>
+  <thead>
+    <tr><th>Provider</th><th>Cron 表达式</th><th>启用状态</th><th>配置文件</th></tr>
+  </thead>
+  <tbody>
+    {% for s in schedules %}
+    <tr>
+      <td>{{ s.provider_name }}</td>
+      <td><code>{{ s.cron_expression }}</code></td>
+      <td>{% if s.enabled %}<span class="tag on">启用</span>{% else %}<span class="tag off">停用</span>{% endif %}</td>
+      <td class="muted">{{ s.config_file }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="4" class="muted">暂无调度配置</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h3>最近运行记录</h3>
+<table>
+  <thead>
+    <tr><th>Run ID</th><th>Provider</th><th>状态</th><th>开始时间</th><th>有效 Key</th></tr>
+  </thead>
+  <tbody>
+    {% for r in recent_runs %}
+    <tr>
+      <td><a href="/runs/{{ r.id }}">{{ r.id[:8] }}…</a></td>
+      <td>{{ r.provider_name }}</td>
+      <td>{{ r.status }}</td>
+      <td class="muted">{{ r.started_at }}</td>
+      <td>{{ r.valid_keys_found }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="5" class="muted">暂无运行记录</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h3>最近推送记录</h3>
+<table>
+  <thead>
+    <tr><th>Provider</th><th>分组 ID</th><th>状态</th><th>推送时间</th></tr>
+  </thead>
+  <tbody>
+    {% for p in recent_pushes %}
+    <tr>
+      <td>{{ p.provider_name }}</td>
+      <td>#{{ p.group_id }}</td>
+      <td>{{ p.status }}</td>
+      <td class="muted">{{ p.pushed_at }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="4" class="muted">暂无推送记录</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}
