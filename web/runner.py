@@ -437,6 +437,19 @@ class PipelineRunner:
         creds["tokens"] = list(tokens)
         creds["sessions"] = []
 
+        # Optional outbound proxy for GitHub fetches (gather/check stages).
+        # Read from env HARVESTER_PROXY (e.g. socks5://172.23.0.1:1080 or
+        # http://host:port). Empty/absent = no proxy (direct connection).
+        # pipeline.py calls client.set_proxy(global.proxy) at startup, so the
+        # proxy applies to all GitHub HTTP traffic of this scan.
+        proxy = os.environ.get("HARVESTER_PROXY", "").strip()
+        if proxy:
+            global_section["proxy"] = proxy
+        elif "proxy" not in global_section:
+            # Absent key → loader inherits http(s)_proxy env; explicit "" would
+            # disable it. Leave absent so container env proxies still work.
+            pass
+
         # Write
         dest = self._temp_yaml_path(provider_name, run_id)
         dest.write_text(

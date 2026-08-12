@@ -24,6 +24,8 @@ services:
       # --- Storage ---
       - HARVESTER_WORKSPACE=/app/data
       - HARVESTER_DB_PATH=/app/data/harvester.db
+      # Outbound proxy for GitHub fetches (host SOCKS5, reachable via bridge gateway)
+      - HARVESTER_PROXY=\
       # --- Timezone ---
       - TZ=Asia/Shanghai
     healthcheck:

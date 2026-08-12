@@ -118,6 +118,58 @@ class TestTempYamlGeneration(unittest.TestCase):
             self.assertEqual(gh_creds["tokens"], real_tokens)
             self.assertEqual(gh_creds["sessions"], [])
 
+    def test_proxy_injected_from_env(self) -> None:
+        """When HARVESTER_PROXY is set, global.proxy is injected into the YAML."""
+        from web.runner import PipelineRunner
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workdir = Path(tmpdir)
+            source_yaml = workdir / "config-test-provider.yaml"
+            source_yaml.write_text(_SAMPLE_YAML, encoding="utf-8")
+            runtime_dir = workdir / "runtime"
+            runtime_dir.mkdir()
+
+            runner = PipelineRunner.__new__(PipelineRunner)
+            runner._workspace = str(workdir)
+            runner._init_yaml_source_dir = str(workdir)
+
+            with patch.dict(
+                os.environ,
+                {"HARVESTER_PROXY": "socks5://172.23.0.1:1080"},
+                clear=False,
+            ):
+                result_path = runner._generate_temp_yaml(
+                    "test-provider", "run-proxy-1", ["ghp_token_one"]
+                )
+            generated = yaml.safe_load(result_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                generated["global"].get("proxy"), "socks5://172.23.0.1:1080"
+            )
+
+    def test_proxy_absent_when_env_unset(self) -> None:
+        """When HARVESTER_PROXY is unset, no proxy key is forced into the YAML."""
+        from web.runner import PipelineRunner
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workdir = Path(tmpdir)
+            source_yaml = workdir / "config-test-provider.yaml"
+            source_yaml.write_text(_SAMPLE_YAML, encoding="utf-8")
+            runtime_dir = workdir / "runtime"
+            runtime_dir.mkdir()
+
+            runner = PipelineRunner.__new__(PipelineRunner)
+            runner._workspace = str(workdir)
+            runner._init_yaml_source_dir = str(workdir)
+
+            with patch.dict(os.environ, {}, clear=False):
+                # Remove HARVESTER_PROXY if a parent env has it
+                os.environ.pop("HARVESTER_PROXY", None)
+                result_path = runner._generate_temp_yaml(
+                    "test-provider", "run-noproxy-1", ["ghp_token_one"]
+                )
+            generated = yaml.safe_load(result_path.read_text(encoding="utf-8"))
+            self.assertNotIn("proxy", generated["global"])
+
 
 class TestReEntrancyPrevention(unittest.TestCase):
     """Given a PipelineRunner,
