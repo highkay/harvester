@@ -85,6 +85,9 @@ class PipelineRunner:
         self._workspace = _load_workspace()
         self._db_path = _get_db_path()
         self._yaml_source_dir = _get_yaml_source_dir()
+        # Proxy round-robin state (HARVESTER_PROXY comma-separated list)
+        self._proxy_index = 0
+        self._proxy_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Public API (async — called from FastAPI routes)
@@ -438,11 +441,12 @@ class PipelineRunner:
         creds["sessions"] = []
 
         # Optional outbound proxy for GitHub fetches (gather/check stages).
-        # Read from env HARVESTER_PROXY (e.g. socks5://172.23.0.1:1080 or
-        # http://host:port). Empty/absent = no proxy (direct connection).
+        # HARVESTER_PROXY supports a comma-separated list of proxies, e.g.
+        # "socks5://host:1080,socks5://host:1090" — one is picked per scan in
+        # round-robin fashion so concurrent scans spread across proxies.
         # pipeline.py calls client.set_proxy(global.proxy) at startup, so the
         # proxy applies to all GitHub HTTP traffic of this scan.
-        proxy = os.environ.get("HARVESTER_PROXY", "").strip()
+        proxy = self._pick_proxy()
         if proxy:
             global_section["proxy"] = proxy
         elif "proxy" not in global_section:
@@ -457,6 +461,28 @@ class PipelineRunner:
             encoding="utf-8",
         )
         return dest
+
+    def _pick_proxy(self) -> str:
+        """Pick one proxy from HARVESTER_PROXY (comma-separated), round-robin.
+
+        Returns "" when the env var is unset/empty.
+        """
+        raw = os.environ.get("HARVESTER_PROXY", "").strip()
+        if not raw:
+            return ""
+        proxies = [p.strip() for p in raw.split(",") if p.strip()]
+        if not proxies:
+            return ""
+        if len(proxies) == 1:
+            return proxies[0]
+        # Thread-safe round-robin; fall back to plain counter when the
+        # instance was created via __new__ (unit tests).
+        lock = getattr(self, "_proxy_lock", None) or threading.Lock()
+        with lock:
+            idx = getattr(self, "_proxy_index", 0)
+            proxy = proxies[idx % len(proxies)]
+            self._proxy_index = idx + 1
+        return proxy
 
     def _get_enabled_api_tokens(self) -> list[str]:
         """Read enabled API tokens from the github_tokens table (synchronous).

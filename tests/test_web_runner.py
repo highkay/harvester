@@ -170,6 +170,48 @@ class TestTempYamlGeneration(unittest.TestCase):
             generated = yaml.safe_load(result_path.read_text(encoding="utf-8"))
             self.assertNotIn("proxy", generated["global"])
 
+    def test_proxy_round_robin_cycles(self) -> None:
+        """Comma-separated HARVESTER_PROXY rotates per _pick_proxy call."""
+        from web.runner import PipelineRunner
+
+        runner = PipelineRunner.__new__(PipelineRunner)
+        runner._proxy_index = 0
+        runner._proxy_lock = __import__("threading").Lock()
+
+        proxies = [
+            "socks5://192.168.1.18:1080",
+            "socks5://192.168.1.18:1090",
+            "socks5://192.168.1.18:1091",
+        ]
+        with patch.dict(os.environ, {"HARVESTER_PROXY": ",".join(proxies)}, clear=False):
+            picks = [runner._pick_proxy() for _ in range(4)]
+
+        # First 3 calls cycle through all proxies, 4th wraps to the first
+        self.assertEqual(picks[:3], proxies)
+        self.assertEqual(picks[3], proxies[0])
+
+    def test_proxy_single_returns_itself(self) -> None:
+        """Single-proxy env always returns that proxy (no rotation state)."""
+        from web.runner import PipelineRunner
+
+        runner = PipelineRunner.__new__(PipelineRunner)
+        with patch.dict(
+            os.environ,
+            {"HARVESTER_PROXY": "socks5://192.168.1.18:1080"},
+            clear=False,
+        ):
+            self.assertEqual(runner._pick_proxy(), "socks5://192.168.1.18:1080")
+            self.assertEqual(runner._pick_proxy(), "socks5://192.168.1.18:1080")
+
+    def test_proxy_empty_env_returns_empty(self) -> None:
+        """Unset/empty HARVESTER_PROXY yields '' (no proxy)."""
+        from web.runner import PipelineRunner
+
+        runner = PipelineRunner.__new__(PipelineRunner)
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("HARVESTER_PROXY", None)
+            self.assertEqual(runner._pick_proxy(), "")
+
 
 class TestReEntrancyPrevention(unittest.TestCase):
     """Given a PipelineRunner,
