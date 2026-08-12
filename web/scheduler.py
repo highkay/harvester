@@ -75,7 +75,7 @@ async def _run_provider_job(provider_name: str) -> None:
     svc._running.add(provider_name)
     try:
         runner = _lazy_get_runner()
-        await runner.run(provider_name)
+        await runner.run_scan(provider_name)
     except ImportError:
         logger.error(
             f"PipelineRunner not available (web.runner module missing) — "

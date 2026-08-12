@@ -288,13 +288,13 @@ class TestNextRunTime(unittest.TestCase):
 class TestJobCallbackInvokesRunner(unittest.TestCase):
     """Given a mocked PipelineRunner,
     When the job callback fires for a provider,
-    Then get_runner().run() is called with provider_name.
+    Then get_runner().run_scan() is called with provider_name.
     """
 
     def test_job_callback_calls_runner(self) -> None:
         async def _scenario() -> None:
             mock_runner = MagicMock()
-            mock_runner.run = AsyncMock()
+            mock_runner.run_scan = AsyncMock()
 
             # Set up a scheduler service so _run_provider_job doesn't bail early
             from web.scheduler import SchedulerService
@@ -314,7 +314,7 @@ class TestJobCallbackInvokesRunner(unittest.TestCase):
                     await _run_provider_job("deepseek")
 
                     mock_get_runner.assert_called_once()
-                    mock_runner.run.assert_called_once_with("deepseek")
+                    mock_runner.run_scan.assert_called_once_with("deepseek")
             finally:
                 web.scheduler._scheduler_service = None
 
