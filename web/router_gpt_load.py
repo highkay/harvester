@@ -302,22 +302,30 @@ async def upsert_mapping_for_provider(
         # Determine group_name — try to use config name + group_id as label
         group_name = f"{cfg[1]}-group-{body.group_id}"
 
-        # Upsert
+        # Upsert (max_size: per-batch push cap, default 10000)
         await db.execute(
             """INSERT INTO provider_group_mapping
-               (provider_name, gpt_load_config_id, group_id, group_name)
-               VALUES (?, ?, ?, ?)
+               (provider_name, gpt_load_config_id, group_id, group_name, max_size)
+               VALUES (?, ?, ?, ?, ?)
                ON CONFLICT(provider_name) DO UPDATE SET
                gpt_load_config_id = excluded.gpt_load_config_id,
                group_id = excluded.group_id,
-               group_name = excluded.group_name""",
-            (provider_name, body.gpt_load_config_id, body.group_id, group_name),
+               group_name = excluded.group_name,
+               max_size = excluded.max_size""",
+            (
+                provider_name,
+                body.gpt_load_config_id,
+                body.group_id,
+                group_name,
+                body.max_size,
+            ),
         )
         await db.commit()
 
         # Fetch the updated row
         cursor = await db.execute(
-            "SELECT id, provider_name, gpt_load_config_id, group_id, group_name, enabled "
+            "SELECT id, provider_name, gpt_load_config_id, group_id, group_name, "
+            "max_size, enabled "
             "FROM provider_group_mapping WHERE provider_name = ?",
             (provider_name,),
         )

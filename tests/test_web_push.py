@@ -288,10 +288,25 @@ class TestPushServiceBasic(unittest.TestCase):
             self.assertIsNotNone(row["error_message"])
 
     def test_push_valid_keys_large_batch_uses_add_async(self) -> None:
-        """When keys_count > 500, POST to /api/keys/add-async instead."""
+        """When keys_count > mapping.max_size, POST to /api/keys/add-async.
+
+        The threshold is per-mapping configurable (default 10000); here the
+        mapping is set to 500 so a 501-key batch must use the async endpoint.
+        """
         db_path = _temp_db_path()
         with tempfile.TemporaryDirectory() as workspace:
             _seed_db(db_path, workspace)
+            # Lower the per-mapping batch cap to exercise the async switch
+            import sqlite3
+
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                "UPDATE provider_group_mapping SET max_size = 500 "
+                "WHERE provider_name = 'deepseek'"
+            )
+            conn.commit()
+            conn.close()
+
             keys = [f"sk-key-{i:04d}" for i in range(501)]
             _write_valid_keys(workspace, "deepseek", keys)
 
@@ -316,6 +331,31 @@ class TestPushServiceBasic(unittest.TestCase):
 
                 call_url = mock_post.call_args[0][0]
                 self.assertIn("/api/keys/add-async", call_url)
+
+    def test_push_valid_keys_default_max_size_uses_add_multiple(self) -> None:
+        """A 1000-key batch stays on add-multiple with the default 10000 cap."""
+        db_path = _temp_db_path()
+        with tempfile.TemporaryDirectory() as workspace:
+            _seed_db(db_path, workspace)
+            keys = [f"sk-key-{i:04d}" for i in range(1000)]
+            _write_valid_keys(workspace, "deepseek", keys)
+
+            from web.push import PushService
+
+            svc = PushService(db_path=db_path, workspace=workspace)
+
+            mock_response = MagicMock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = {
+                "code": 0,
+                "data": {"added_count": 1000, "ignored_count": 0},
+            }
+
+            with patch("web.push.requests.post", return_value=mock_response) as mock_post:
+                svc.push_valid_keys("deepseek", "run-test-008")
+
+                call_url = mock_post.call_args[0][0]
+                self.assertIn("/api/keys/add-multiple", call_url)
 
     def test_push_valid_keys_network_error_retried(self) -> None:
         """When network error occurs (ConnectionError), retry and succeed."""

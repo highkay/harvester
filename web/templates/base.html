@@ -68,6 +68,13 @@
     padding: 8px 16px; border-radius: 4px; cursor: pointer;
   }
   button:hover { opacity: .9; }
+  button.small { padding: 4px 10px; font-size: 12px; }
+  button.danger { background: var(--bad); }
+  button.ghost {
+    background: transparent; border: 1px solid var(--border); color: var(--muted);
+  }
+  .btn-row { display: flex; gap: 8px; }
+  .row-actions { display: flex; gap: 6px; }
   .notice {
     background: rgba(122, 162, 247, .12); border: 1px solid var(--accent);
     padding: 10px 12px; border-radius: 6px; margin-top: 12px;
@@ -86,6 +93,7 @@
   <nav>
     <a href="/" {% if page == 'dashboard' %}class="active"{% endif %}>仪表盘</a>
     <a href="/tokens" {% if page == 'tokens' %}class="active"{% endif %}>Token 管理</a>
+    <a href="/push-config" {% if page == 'push-config' %}class="active"{% endif %}>推送配置</a>
     <a href="/schedule" {% if page == 'schedule' %}class="active"{% endif %}>调度管理</a>
     <a href="/runs" {% if page == 'runs' %}class="active"{% endif %}>运行历史</a>
     <a href="/push-logs" {% if page == 'push-logs' %}class="active"{% endif %}>推送日志</a>

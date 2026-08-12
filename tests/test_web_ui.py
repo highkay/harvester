@@ -89,6 +89,22 @@ def _seed_db(db_path: str) -> None:
             ("run-bbbb-0002", "kimi", 1, 3, 10, 0, 10, "failed"),
         )
 
+        # gpt_load_config: 1 row (for push_config tests)
+        conn.execute(
+            "INSERT INTO gpt_load_config "
+            "(name, base_url, auth_key_encrypted, enabled) "
+            "VALUES (?, ?, ?, ?)",
+            ("测试实例", "http://127.0.0.1:8080", "enc-key-aaa", 1),
+        )
+
+        # provider_group_mapping: 1 row
+        conn.execute(
+            "INSERT INTO provider_group_mapping "
+            "(provider_name, gpt_load_config_id, group_id, group_name, enabled) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("deepseek", 1, 1, "测试分组", 1),
+        )
+
         # schedule_config: 2 rows
         conn.execute(
             "INSERT INTO schedule_config "
@@ -307,6 +323,123 @@ class TestPushLogsPage(WebUiPageTestBase):
         """GET /push-logs without auth redirects to login (303)."""
         resp = self.client.get("/push-logs", follow_redirects=False)
         self.assertEqual(resp.status_code, 303)
+
+
+class TestTokensPageInteractive(WebUiPageTestBase):
+    """GET /tokens — verify new interactive elements (add form, action buttons)."""
+
+    def test_tokens_page_has_add_form(self) -> None:
+        """Page must contain the add-token form with expected fields."""
+        resp = self.client.get("/tokens", headers=_auth_headers())
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("add-token-form", resp.text)
+        self.assertIn("token_type", resp.text)
+        self.assertIn("token_value", resp.text)
+        self.assertIn("添加", resp.text)
+
+    def test_tokens_page_has_action_buttons(self) -> None:
+        """Each token row must have enable/disable and delete buttons."""
+        resp = self.client.get("/tokens", headers=_auth_headers())
+        self.assertEqual(resp.status_code, 200)
+        # Enabled token (id=1) shows "停用" button
+        self.assertIn("toggleToken(1, false)", resp.text)
+        # Disabled token (id=2) shows "启用" button
+        self.assertIn("toggleToken(2, true)", resp.text)
+        # Both rows have delete buttons
+        self.assertIn("deleteToken(1)", resp.text)
+        self.assertIn("deleteToken(2)", resp.text)
+
+    def test_tokens_page_has_operations_column(self) -> None:
+        """Table header must include '操作' column."""
+        resp = self.client.get("/tokens", headers=_auth_headers())
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("操作", resp.text)
+
+    def test_tokens_page_contains_fetch_js(self) -> None:
+        """Inline JS must call fetch for POST/PATCH/DELETE."""
+        resp = self.client.get("/tokens", headers=_auth_headers())
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("fetch('/api/tokens'", resp.text)
+        self.assertIn("method: 'POST'", resp.text)
+        self.assertIn("method: 'PATCH'", resp.text)
+        self.assertIn("method: 'DELETE'", resp.text)
+
+
+class TestPushConfigPage(WebUiPageTestBase):
+    """GET /push-config — gpt-load instances + provider mappings."""
+
+    def test_push_config_page_with_bearer(self) -> None:
+        """GET /push-config returns 200 with instance table + mapping table."""
+        resp = self.client.get("/push-config", headers=_auth_headers())
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("推送配置", resp.text)
+        self.assertIn("gpt-load 实例", resp.text)
+        self.assertIn("推送目标映射", resp.text)
+
+    def test_push_config_shows_seeded_instance(self) -> None:
+        """Seeded gpt-load instance '测试实例' must appear in the page."""
+        resp = self.client.get("/push-config", headers=_auth_headers())
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("测试实例", resp.text)
+        self.assertIn("http://127.0.0.1:8080", resp.text)
+
+    def test_push_config_shows_providers(self) -> None:
+        """Providers from schedule_config must appear in the mapping table."""
+        resp = self.client.get("/push-config", headers=_auth_headers())
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("deepseek", resp.text)
+        self.assertIn("kimi", resp.text)
+
+    def test_push_config_shows_mapped_status(self) -> None:
+        """deepseek mapping has '已配置' tag."""
+        resp = self.client.get("/push-config", headers=_auth_headers())
+        self.assertEqual(resp.status_code, 200)
+        # deepseek has a mapping → 已配置
+        self.assertIn("已配置", resp.text)
+
+    def test_push_config_shows_unmapped_status(self) -> None:
+        """kimi has no mapping → should show '未配置'."""
+        resp = self.client.get("/push-config", headers=_auth_headers())
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("未配置", resp.text)
+
+    def test_push_config_has_add_instance_form(self) -> None:
+        """Page must contain the add-instance form."""
+        resp = self.client.get("/push-config", headers=_auth_headers())
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("add-instance-form", resp.text)
+        self.assertIn("inst_name", resp.text)
+        self.assertIn("inst_url", resp.text)
+        self.assertIn("inst_key", resp.text)
+
+    def test_push_config_has_mapping_selects(self) -> None:
+        """Page must have config-select and group-select dropdowns for mappings."""
+        resp = self.client.get("/push-config", headers=_auth_headers())
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("mapping-config", resp.text)
+        self.assertIn("mapping-group", resp.text)
+        self.assertIn("saveMapping(", resp.text)
+        self.assertIn("deleteMapping(", resp.text)
+
+    def test_push_config_has_delete_instance_buttons(self) -> None:
+        """Each instance row must have a delete button."""
+        resp = self.client.get("/push-config", headers=_auth_headers())
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("deleteInstance(", resp.text)
+
+    def test_push_config_contains_fetch_js(self) -> None:
+        """Inline JS must call fetch for gpt-load operations."""
+        resp = self.client.get("/push-config", headers=_auth_headers())
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("fetch('/api/gpt-load'", resp.text)
+        self.assertIn("method: 'POST'", resp.text)
+        self.assertIn("method: 'PUT'", resp.text)
+
+    def test_push_config_requires_auth(self) -> None:
+        """GET /push-config without auth redirects to login (303)."""
+        resp = self.client.get("/push-config", follow_redirects=False)
+        self.assertEqual(resp.status_code, 303)
+        self.assertEqual(resp.headers.get("location"), "/login")
 
 
 if __name__ == "__main__":

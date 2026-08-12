@@ -44,14 +44,17 @@ CREATE TABLE IF NOT EXISTS gpt_load_config (
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- provider → gpt-load group mapping
+-- provider → gpt-load group mapping (per-task push target + batch size)
 CREATE TABLE IF NOT EXISTS provider_group_mapping (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     provider_name TEXT NOT NULL UNIQUE,
     gpt_load_config_id INTEGER NOT NULL,
     group_id INTEGER NOT NULL,
     group_name TEXT NOT NULL,
-    enabled INTEGER NOT NULL DEFAULT 1
+    max_size INTEGER NOT NULL DEFAULT 10000,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 -- scan run records
@@ -137,6 +140,36 @@ async def init_db(db_path: str | None = None) -> None:
     db = await get_db(path)
     try:
         await db.executescript(_DDL)
+        await _run_migrations(db)
         await db.commit()
     finally:
         await db.close()
+
+
+# ---------------------------------------------------------------------------
+# Lightweight migrations for pre-existing databases
+# ---------------------------------------------------------------------------
+
+
+async def _run_migrations(db: aiosqlite.Connection) -> None:
+    """Apply additive column migrations to databases created by older builds.
+
+    New columns are added via ``ALTER TABLE ... ADD COLUMN`` only when
+    missing, so this is safe to re-run on every startup.
+    """
+    migrations = (
+        (
+            "provider_group_mapping",
+            "max_size",
+            "ALTER TABLE provider_group_mapping "
+            "ADD COLUMN max_size INTEGER NOT NULL DEFAULT 10000",
+        ),
+    )
+    for table, column, ddl in migrations:
+        try:
+            cursor = await db.execute(f"PRAGMA table_info({table})")
+            columns = [row["name"] for row in await cursor.fetchall()]
+        except Exception:
+            continue  # table does not exist yet — CREATE TABLE already handles it
+        if column not in columns:
+            await db.execute(ddl)

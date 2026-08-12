@@ -92,6 +92,7 @@ class MappingUpdate(BaseModel):
 
     gpt_load_config_id: int
     group_id: int
+    max_size: int = Field(default=10000, ge=1, le=1000000)
 
 
 # ---------------------------------------------------------------------------

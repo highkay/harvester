@@ -2,10 +2,30 @@
 {% block title %}Token 管理 - Harvester 管理界面{% endblock %}
 {% block content %}
 <h2>Token 管理</h2>
-<p class="muted">凭证以加密形式存储，此处仅展示脱敏信息（哈希前缀），绝不回显原文。如需添加 Token，请调用 API：<code>POST /api/tokens</code>。</p>
+<p class="muted">凭证以加密形式存储，此处仅展示脱敏信息（哈希前缀），绝不回显原文。</p>
+
+<h3>添加 Token</h3>
+<form id="add-token-form" style="max-width:380px;background:var(--panel);border:1px solid var(--border);padding:24px;border-radius:8px;">
+  <label for="token_type">类型</label>
+  <select id="token_type" style="width:100%;padding:8px 10px;border-radius:4px;border:1px solid var(--border);background:var(--bg);color:var(--fg);margin-bottom:16px;">
+    <option value="api">API Key</option>
+    <option value="session">会话</option>
+  </select>
+
+  <label for="token_value">Token 值</label>
+  <input type="password" id="token_value" placeholder="粘贴 Token 原文" required style="width:100%;padding:8px 10px;border-radius:4px;border:1px solid var(--border);background:var(--bg);color:var(--fg);margin-bottom:16px;">
+
+  <label for="label">标签</label>
+  <input type="text" id="label" placeholder="可选，便于识别" style="width:100%;padding:8px 10px;border-radius:4px;border:1px solid var(--border);background:var(--bg);color:var(--fg);margin-bottom:16px;">
+
+  <button type="submit">添加</button>
+  <div id="add-error" class="notice error" style="display:none;max-width:100%;margin-top:12px;"></div>
+</form>
+
+<h3 style="margin-top:32px;">Token 列表</h3>
 <table>
   <thead>
-    <tr><th>ID</th><th>类型</th><th>Token（脱敏）</th><th>标签</th><th>启用状态</th><th>创建时间</th></tr>
+    <tr><th>ID</th><th>类型</th><th>Token（脱敏）</th><th>标签</th><th>启用状态</th><th>创建时间</th><th>操作</th></tr>
   </thead>
   <tbody>
     {% for t in tokens %}
@@ -16,10 +36,83 @@
       <td>{{ t.label or '—' }}</td>
       <td>{% if t.enabled %}<span class="tag on">启用</span>{% else %}<span class="tag off">停用</span>{% endif %}</td>
       <td class="muted">{{ t.created_at }}</td>
+      <td>
+        <div class="row-actions">
+          {% if t.enabled %}
+          <button class="small ghost" onclick="toggleToken({{ t.id }}, false)">停用</button>
+          {% else %}
+          <button class="small ghost" onclick="toggleToken({{ t.id }}, true)">启用</button>
+          {% endif %}
+          <button class="small danger" onclick="deleteToken({{ t.id }})">删除</button>
+        </div>
+      </td>
     </tr>
     {% else %}
-    <tr><td colspan="6" class="muted">暂无 Token</td></tr>
+    <tr><td colspan="7" class="muted">暂无 Token</td></tr>
     {% endfor %}
   </tbody>
 </table>
+
+<script>
+document.getElementById('add-token-form').addEventListener('submit', async function(e) {
+  e.preventDefault();
+  var errEl = document.getElementById('add-error');
+  errEl.style.display = 'none';
+
+  var body = {
+    token_type: document.getElementById('token_type').value,
+    token_value: document.getElementById('token_value').value,
+    label: document.getElementById('label').value
+  };
+
+  try {
+    var resp = await fetch('/api/tokens', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body)
+    });
+    if (resp.ok) {
+      location.reload();
+    } else {
+      var data = await resp.json().catch(function(){ return {detail: resp.statusText}; });
+      errEl.textContent = data.detail || '添加失败';
+      errEl.style.display = 'block';
+    }
+  } catch(ex) {
+    errEl.textContent = '网络错误: ' + ex.message;
+    errEl.style.display = 'block';
+  }
+});
+
+async function toggleToken(id, enable) {
+  try {
+    var resp = await fetch('/api/tokens/' + id, {
+      method: 'PATCH',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({enabled: enable})
+    });
+    if (resp.ok) {
+      location.reload();
+    } else {
+      alert('操作失败: ' + resp.statusText);
+    }
+  } catch(ex) {
+    alert('网络错误: ' + ex.message);
+  }
+}
+
+async function deleteToken(id) {
+  if (!confirm('确定删除该 Token？')) return;
+  try {
+    var resp = await fetch('/api/tokens/' + id, {method: 'DELETE'});
+    if (resp.ok) {
+      location.reload();
+    } else {
+      alert('删除失败: ' + resp.statusText);
+    }
+  } catch(ex) {
+    alert('网络错误: ' + ex.message);
+  }
+}
+</script>
 {% endblock %}

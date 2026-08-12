@@ -27,7 +27,10 @@ logger = get_logger("web.push")
 # Constants
 # ---------------------------------------------------------------------------
 
-_MAX_KEYS_PER_PUSH: int = 500
+# Default per-batch push cap when a mapping has no explicit max_size.
+# Each mapping can override this (provider_group_mapping.max_size, default
+# 10000) via the push-config UI / PUT /api/gpt-load/mappings/{provider}.
+_DEFAULT_MAX_KEYS_PER_PUSH: int = 10000
 _MAX_RETRIES: int = 3
 _RETRY_BACKOFF_BASE: float = 1.0  # seconds
 _RETRY_BACKOFF_MULTIPLIER: float = 3.0
@@ -138,7 +141,13 @@ class PushService:
             keys_count = len(keys)
 
             # 5. Push to gpt-load (with retry)
-            push_result = self._push_keys(base_url, auth_key, mapping["group_id"], keys)
+            push_result = self._push_keys(
+                base_url,
+                auth_key,
+                mapping["group_id"],
+                keys,
+                max_size=int(mapping.get("max_size") or 10000),
+            )
 
             # 6. Write push log
             self._write_push_log(
@@ -188,13 +197,14 @@ class PushService:
     def _get_mapping(self, provider_name: str) -> dict[str, Any] | None:
         """Look up provider_group_mapping by *provider_name*.
 
-        Returns a dict with keys: gpt_load_config_id, group_id, group_name.
+        Returns a dict with keys: gpt_load_config_id, group_id, group_name,
+        max_size (per-batch key cap, default 10000).
         """
         conn = sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True)
         try:
             conn.row_factory = sqlite3.Row
             cursor = conn.execute(
-                "SELECT gpt_load_config_id, group_id, group_name "
+                "SELECT gpt_load_config_id, group_id, group_name, max_size "
                 "FROM provider_group_mapping "
                 "WHERE provider_name = ? AND enabled = 1",
                 (provider_name,),
@@ -259,8 +269,12 @@ class PushService:
         auth_key: str,
         group_id: int,
         keys: list[str],
+        max_size: int = 10000,
     ) -> dict[str, Any]:
         """POST keys to gpt-load with retry on 5xx / network errors.
+
+        Batches larger than *max_size* (per-mapping configuration, default
+        10000) use the async import endpoint.
 
         Returns:
             dict with keys: ``status`` ("success"/"failed"), ``added_count``,
@@ -268,7 +282,7 @@ class PushService:
         """
         keys_count = len(keys)
         # Large batches use async endpoint
-        if keys_count > _MAX_KEYS_PER_PUSH:
+        if keys_count > max_size:
             endpoint = "/api/keys/add-async"
         else:
             endpoint = "/api/keys/add-multiple"

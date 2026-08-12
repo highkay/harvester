@@ -57,6 +57,34 @@ def _mask_token(token_hash: str) -> str:
     return "****" + (token_hash[:8] if token_hash else "")
 
 
+def _scan_supported_providers() -> list[str]:
+    """Scan ``examples/config-*.yaml`` for every declared task name.
+
+    Returns a de-duplicated, sorted list of all supported provider task
+    types (deepseek, kimi, kimi-coding, mimo-cn, qwen-cn, ...) so the
+    push-config page can offer every task — not just the seeded ones.
+    """
+    import re
+
+    import yaml
+
+    examples_dir = Path(__file__).resolve().parent.parent / "examples"
+    providers: set[str] = set()
+    pattern = re.compile(r"^\s*-\s*name:\s*(\S+)")
+    if not examples_dir.is_dir():
+        return []
+    for cfg in sorted(examples_dir.glob("config-*.yaml")):
+        try:
+            data = yaml.safe_load(cfg.read_text(encoding="utf-8")) or {}
+        except Exception:
+            continue
+        for task in data.get("tasks") or []:
+            name = (task or {}).get("name")
+            if name:
+                providers.add(str(name).strip())
+    return sorted(providers)
+
+
 # ---------------------------------------------------------------------------
 # GET / — 仪表盘
 # ---------------------------------------------------------------------------
@@ -261,6 +289,50 @@ async def push_logs_page(request: Request, _user: bool = Depends(require_ui_sess
         request=request,
         name="push_logs.html",
         context={"page": "push-logs", "logs": rows},
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /push-config — 推送配置（gpt-load 实例 + provider→分组映射）
+# ---------------------------------------------------------------------------
+
+
+@router.get("/push-config")
+async def push_config_page(request: Request, _user: bool = Depends(require_ui_session)):
+    """推送目标配置页：gpt-load 实例列表 + 每个 provider 的目标分组映射。"""
+    db_path = resolve_db_path()
+    db = await get_db(db_path)
+    try:
+        cur = await db.execute(
+            "SELECT id, name, base_url, enabled, created_at "
+            "FROM gpt_load_config ORDER BY id"
+        )
+        configs = [dict(row) for row in await cur.fetchall()]
+
+        cur = await db.execute(
+            "SELECT id, provider_name, gpt_load_config_id, group_id, group_name, "
+            "max_size, enabled FROM provider_group_mapping ORDER BY provider_name"
+        )
+        mappings = [dict(row) for row in await cur.fetchall()]
+    finally:
+        await db.close()
+
+    # All supported task types: union of tasks declared in example configs
+    # and tasks that already have a mapping (page remains fully configurable).
+    providers = _scan_supported_providers()
+    mapped = {m["provider_name"] for m in mappings}
+    for extra in sorted(mapped - set(providers)):
+        providers.append(extra)
+
+    return templates.TemplateResponse(
+        request=request,
+        name="push_config.html",
+        context={
+            "page": "push-config",
+            "configs": configs,
+            "mappings": mappings,
+            "providers": providers,
+        },
     )
 
 
