@@ -1,6 +1,8 @@
 # Core Dependencies
 PyYAML
 requests
+# SOCKS proxy support for requests (HARVESTER_PROXY with socks5:// scheme)
+PySocks
 
 # Web Layer Dependencies
 fastapi
