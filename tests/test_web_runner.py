@@ -360,6 +360,87 @@ class TestRunRecordsLifecycle(unittest.TestCase):
 
             _run_async(run_test())
 
+    def test_execute_fires_push_hook_on_completion(self) -> None:
+        """_execute must call _on_completed after a successful scan."""
+        from web.runner import PipelineRunner
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workdir = Path(tmpdir)
+            source_yaml = workdir / "config-test-provider.yaml"
+            source_yaml.write_text(_SAMPLE_YAML, encoding="utf-8")
+
+            db_path = str(workdir / "harvester.db")
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS run_records ("
+                "id TEXT PRIMARY KEY, provider_name TEXT NOT NULL, "
+                "config_file TEXT NOT NULL, status TEXT NOT NULL, "
+                "started_at TEXT NOT NULL DEFAULT (datetime('now')), "
+                "finished_at TEXT, duration_seconds REAL, "
+                "valid_keys_found INTEGER DEFAULT 0, "
+                "total_keys_checked INTEGER DEFAULT 0, "
+                "error_message TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')))"
+            )
+            conn.commit()
+            conn.close()
+
+            runner = PipelineRunner.__new__(PipelineRunner)
+            runner._workspace = str(workdir)
+            runner._init_yaml_source_dir = str(workdir)
+            runner._db_path = db_path
+            runner._running = {}
+            runner._locks = {}
+            runner._cancel_events = {}
+
+            import yaml as _yaml
+
+            def fake_execute(provider_name: str, run_id: str) -> None:
+                # emulate _generate_temp_yaml + app.run + _update_run_sync
+                # (run_scan already inserted the record — just mark completed)
+                tmp = workdir / "runtime"
+                tmp.mkdir(exist_ok=True)
+                (tmp / f"config-{provider_name}-{run_id}.yaml").write_text(
+                    _yaml.dump({"global": {"github_credentials": {"tokens": []}}}),
+                    encoding="utf-8",
+                )
+                conn2 = sqlite3.connect(db_path)
+                conn2.execute(
+                    "UPDATE run_records SET status='completed', valid_keys_found=3 "
+                    "WHERE id=?",
+                    (run_id,),
+                )
+                conn2.commit()
+                conn2.close()
+                runner._running.pop(provider_name, None)
+                # NEW: the production _execute calls _on_completed here
+                runner._on_completed(provider_name, run_id)
+
+            runner._execute = fake_execute  # type: ignore[method-assign]
+
+            # Mock the push service so no real network call happens
+            # (_on_completed imports get_push_service from web.push internally)
+            with patch("web.push.get_push_service") as mock_get:
+                fake_svc = MagicMock()
+                mock_get.return_value = fake_svc
+
+                async def run_test() -> None:
+                    run_id = await runner.run_scan("test-provider")
+                    # _on_completed spawns a daemon thread for the push; poll
+                    # until it has been invoked (bounded wait)
+                    for _ in range(50):
+                        if fake_svc.push_valid_keys.called:
+                            break
+                        await asyncio.sleep(0.05)
+                    self.assertTrue(
+                        fake_svc.push_valid_keys.called,
+                        "push_valid_keys should be called after completion",
+                    )
+                    args = fake_svc.push_valid_keys.call_args[0]
+                    self.assertEqual(args[0], "test-provider")
+                    self.assertEqual(args[1], run_id)
+
+                _run_async(run_test())
+
 
 class TestTokenReadingFromDb(unittest.TestCase):
     """Given a DB with an encrypted API token,

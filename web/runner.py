@@ -302,6 +302,15 @@ class PipelineRunner:
                 f"run_id={run_id} valid_keys={valid_keys} duration={duration}s"
             )
 
+            # 6. Fire the push hook directly. The completion-listener path
+            # (registered above) is unreliable from worker threads — the
+            # CompletionEventManager may already be marked notified by the
+            # status polling loop, or the callback thread never runs. Pushing
+            # here, in the scan thread right after completion, guarantees the
+            # valid keys reach gpt-load. gpt-load's add-multiple is idempotent,
+            # so a duplicate push from the listener is harmless.
+            self._on_completed(provider_name, run_id)
+
         except Exception as exc:
             error_msg = f"{type(exc).__name__}: {exc}"
             logger.error(
