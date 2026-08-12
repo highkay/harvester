@@ -237,6 +237,30 @@ class SchedulerService:
             "next_run_time": str(next_run) if next_run else None,
         }
 
+    async def delete_schedule(self, provider_name: str) -> bool:
+        """Delete a provider schedule: remove DB row + APScheduler job.
+
+        Returns ``True`` if a row was deleted, ``False`` if not found.
+        """
+        db = await get_db(self._db_path)
+        try:
+            cursor = await db.execute(
+                "DELETE FROM schedule_config WHERE provider_name = ?",
+                (provider_name,),
+            )
+            await db.commit()
+            deleted = cursor.rowcount > 0
+        finally:
+            await db.close()
+
+        # Remove the APScheduler job regardless of DB result (best-effort)
+        try:
+            self._scheduler.remove_job(f"scan-{provider_name}")
+        except Exception:
+            pass
+
+        return deleted
+
     async def trigger_manual(self, provider_name: str) -> str:
         """Immediately run a provider scan (manual trigger).
 

@@ -2,24 +2,140 @@
 {% block title %}调度管理 - Harvester 管理界面{% endblock %}
 {% block content %}
 <h2>调度管理</h2>
-<p class="muted">服务启动时 APScheduler 会依据此表重建定时任务。</p>
+<p class="muted">为每个任务配置定时扫描（cron 表达式）。服务启动时 APScheduler 会依据此表重建定时任务；修改后立即生效。</p>
+
+<!-- 添加新调度 -->
+<h3>添加调度</h3>
+<div style="display:flex;gap:8px;align-items:flex-end;background:var(--panel);border:1px solid var(--border);padding:16px;border-radius:8px;max-width:720px;flex-wrap:wrap;">
+  <div style="flex:1;min-width:140px;">
+    <label for="new-provider" style="margin-bottom:4px;">任务类型</label>
+    <input type="text" id="new-provider" placeholder="例如: deepseek" list="provider-list" style="width:100%;padding:8px 10px;border-radius:4px;border:1px solid var(--border);background:var(--bg);color:var(--fg);margin-bottom:0;">
+    <datalist id="provider-list">
+      {% for p in all_providers %}<option value="{{ p }}"></option>{% endfor %}
+    </datalist>
+  </div>
+  <div style="flex:1;min-width:140px;">
+    <label for="new-cron" style="margin-bottom:4px;">Cron 表达式</label>
+    <input type="text" id="new-cron" placeholder="0 3 * * *" value="0 3 * * *" style="width:100%;padding:8px 10px;border-radius:4px;border:1px solid var(--border);background:var(--bg);color:var(--fg);margin-bottom:0;">
+  </div>
+  <div style="flex:1;min-width:180px;">
+    <label for="new-config" style="margin-bottom:4px;">配置文件</label>
+    <input type="text" id="new-config" placeholder="examples/config-deepseek.yaml" style="width:100%;padding:8px 10px;border-radius:4px;border:1px solid var(--border);background:var(--bg);color:var(--fg);margin-bottom:0;">
+  </div>
+  <button onclick="addSchedule()" style="white-space:nowrap;">添加调度</button>
+</div>
+<div id="form-error" class="notice error" style="display:none;max-width:720px;margin-top:12px;"></div>
+
+<h3>现有调度</h3>
 <table>
   <thead>
-    <tr><th>ID</th><th>Provider</th><th>Cron 表达式</th><th>启用状态</th><th>配置文件</th><th>更新时间</th></tr>
+    <tr><th>Provider</th><th>Cron 表达式</th><th>启用</th><th>配置文件</th><th>下次运行</th><th>操作</th></tr>
   </thead>
   <tbody>
     {% for s in schedules %}
-    <tr>
-      <td>{{ s.id }}</td>
-      <td>{{ s.provider_name }}</td>
-      <td><code>{{ s.cron_expression }}</code></td>
-      <td>{% if s.enabled %}<span class="tag on">启用</span>{% else %}<span class="tag off">停用</span>{% endif %}</td>
-      <td class="muted">{{ s.config_file }}</td>
-      <td class="muted">{{ s.updated_at }}</td>
+    <tr data-schedule-row="{{ s.provider_name }}">
+      <td><strong>{{ s.provider_name }}</strong></td>
+      <td><input type="text" class="schedule-cron" data-provider="{{ s.provider_name }}" value="{{ s.cron_expression }}" style="padding:4px 8px;border-radius:4px;border:1px solid var(--border);background:var(--bg);color:var(--fg);width:110px;"></td>
+      <td>
+        <label style="display:flex;align-items:center;gap:6px;margin-bottom:0;">
+          <input type="checkbox" class="schedule-enabled" data-provider="{{ s.provider_name }}" {% if s.enabled %}checked{% endif %} style="margin-bottom:0;">
+          <span class="tag {% if s.enabled %}on{% else %}off{% endif %} schedule-tag" data-provider="{{ s.provider_name }}">{% if s.enabled %}启用{% else %}停用{% endif %}</span>
+        </label>
+      </td>
+      <td class="muted" style="font-size:12px;">{{ s.config_file }}</td>
+      <td class="muted schedule-next" data-provider="{{ s.provider_name }}">{{ s.next_run_time or '—' }}</td>
+      <td>
+        <div class="row-actions">
+          <button class="small ghost" onclick="saveSchedule('{{ s.provider_name }}')">保存</button>
+          <button class="small" onclick="runSchedule('{{ s.provider_name }}')">立即运行</button>
+          <button class="small danger" onclick="deleteSchedule('{{ s.provider_name }}')">删除</button>
+        </div>
+      </td>
     </tr>
     {% else %}
-    <tr><td colspan="6" class="muted">暂无调度配置</td></tr>
+    <tr><td colspan="6" class="muted">暂无调度配置，请在上方添加</td></tr>
     {% endfor %}
   </tbody>
 </table>
+<div id="action-error" class="notice error" style="display:none;max-width:720px;margin-top:12px;"></div>
+
+<script>
+function showError(elId, msg) {
+  var el = document.getElementById(elId);
+  el.textContent = msg;
+  el.style.display = 'block';
+}
+
+function hideError(elId) {
+  document.getElementById(elId).style.display = 'none';
+}
+
+function syncTag(provider) {
+  var cb = document.querySelector('.schedule-enabled[data-provider="' + provider + '"]');
+  var tag = document.querySelector('.schedule-tag[data-provider="' + provider + '"]');
+  if (cb.checked) { tag.textContent = '启用'; tag.className = 'tag on schedule-tag'; }
+  else { tag.textContent = '停用'; tag.className = 'tag off schedule-tag'; }
+}
+
+document.querySelectorAll('.schedule-enabled').forEach(function(cb) {
+  cb.addEventListener('change', function() { syncTag(this.getAttribute('data-provider')); });
+});
+
+function getCron(provider) {
+  return document.querySelector('.schedule-cron[data-provider="' + provider + '"]').value.trim();
+}
+
+async function apiJson(url, method, body) {
+  var opts = { method: method, headers: {'Content-Type': 'application/json'} };
+  if (body !== undefined) opts.body = JSON.stringify(body);
+  var resp = await fetch(url, opts);
+  var data = null;
+  try { data = await resp.json(); } catch(e) {}
+  return { ok: resp.ok, status: resp.status, data: data };
+}
+
+async function addSchedule() {
+  hideError('form-error');
+  var provider = document.getElementById('new-provider').value.trim();
+  var cron = document.getElementById('new-cron').value.trim();
+  var config = document.getElementById('new-config').value.trim();
+  if (!provider || !cron) { showError('form-error', '请填写任务类型和 cron 表达式'); return; }
+  if (!config) config = 'examples/config-' + provider + '.yaml';
+  var r = await apiJson('/api/schedule/' + encodeURIComponent(provider), 'PUT',
+    {cron_expression: cron, enabled: true, config_file: config});
+  if (r.ok) { location.reload(); }
+  else { showError('form-error', (r.data && r.data.detail) || ('添加失败 HTTP ' + r.status)); }
+}
+
+async function saveSchedule(provider) {
+  hideError('action-error');
+  var cron = getCron(provider);
+  var enabled = document.querySelector('.schedule-enabled[data-provider="' + provider + '"]').checked;
+  var r = await apiJson('/api/schedule/' + encodeURIComponent(provider), 'PUT',
+    {cron_expression: cron, enabled: enabled});
+  if (r.ok) { location.reload(); }
+  else { showError('action-error', (r.data && r.data.detail) || ('保存失败 HTTP ' + r.status)); }
+}
+
+async function runSchedule(provider) {
+  hideError('action-error');
+  var r = await apiJson('/api/schedule/' + encodeURIComponent(provider) + '/run', 'POST');
+  if (r.ok) {
+    showError('action-error', '已触发 ' + provider + ' 扫描任务');
+    document.getElementById('action-error').className = 'notice';
+  } else if (r.status === 409) {
+    showError('action-error', provider + ' 正在运行中，请稍后再试');
+  } else {
+    showError('action-error', (r.data && r.data.detail) || ('触发失败 HTTP ' + r.status));
+  }
+}
+
+async function deleteSchedule(provider) {
+  if (!confirm('确定删除 ' + provider + ' 的调度配置？')) return;
+  hideError('action-error');
+  var r = await apiJson('/api/schedule/' + encodeURIComponent(provider), 'DELETE');
+  if (r.ok) { location.reload(); }
+  else { showError('action-error', (r.data && r.data.detail) || ('删除失败 HTTP ' + r.status)); }
+}
+</script>
 {% endblock %}

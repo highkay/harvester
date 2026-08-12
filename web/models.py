@@ -107,3 +107,4 @@ class CronUpdate(BaseModel):
 
     cron_expression: str = Field(min_length=1)
     enabled: bool
+    config_file: str = ""

@@ -97,7 +97,11 @@
     <a href="/schedule" {% if page == 'schedule' %}class="active"{% endif %}>调度管理</a>
     <a href="/runs" {% if page == 'runs' %}class="active"{% endif %}>运行历史</a>
     <a href="/push-logs" {% if page == 'push-logs' %}class="active"{% endif %}>推送日志</a>
+    {% if is_authenticated(request) %}
+    <a href="/logout">退出登录</a>
+    {% else %}
     <a href="/login" {% if page == 'login' %}class="active"{% endif %}>登录</a>
+    {% endif %}
   </nav>
 </header>
 <main>

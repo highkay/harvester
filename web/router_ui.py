@@ -28,6 +28,19 @@ router = APIRouter()
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
 
+def _is_authenticated(request: Request) -> bool:
+    """Return True when the request carries a valid session (or Bearer) auth."""
+    try:
+        get_current_user(request)
+        return True
+    except HTTPException:
+        return False
+
+
+# Expose login state to every template (nav shows 登录 vs 退出 accordingly).
+templates.env.globals["is_authenticated"] = _is_authenticated
+
+
 def require_ui_session(request: Request) -> None:
     """UI-page auth: redirect to /login when the session cookie is missing.
 
@@ -182,7 +195,7 @@ async def tokens_page(request: Request, _user: bool = Depends(require_ui_session
 
 @router.get("/schedule")
 async def schedule_page(request: Request, _user: bool = Depends(require_ui_session)):
-    """调度配置全列表。"""
+    """调度配置全列表（含编辑/删除操作）。"""
     db_path = resolve_db_path()
     db = await get_db(db_path)
     try:
@@ -194,10 +207,31 @@ async def schedule_page(request: Request, _user: bool = Depends(require_ui_sessi
     finally:
         await db.close()
 
+    # Compute next_run_time for each schedule via the live scheduler
+    from .scheduler import get_scheduler_service
+
+    svc = get_scheduler_service()
+    next_times: dict[str, str | None] = {}
+    if svc is not None:
+        for s in rows:
+            try:
+                job = svc._scheduler.get_job(f"scan-{s['provider_name']}")
+                next_times[s["provider_name"]] = (
+                    str(job.next_run_time) if job and job.next_run_time else None
+                )
+            except Exception:
+                next_times[s["provider_name"]] = None
+    for s in rows:
+        s["next_run_time"] = next_times.get(s["provider_name"])
+
     return templates.TemplateResponse(
         request=request,
         name="schedule.html",
-        context={"page": "schedule", "schedules": rows},
+        context={
+            "page": "schedule",
+            "schedules": rows,
+            "all_providers": _scan_supported_providers(),
+        },
     )
 
 
@@ -349,3 +383,16 @@ async def login_page(request: Request):
         name="login.html",
         context={"page": "login"},
     )
+
+
+# ---------------------------------------------------------------------------
+# GET /logout — 退出登录（清除会话 cookie）
+# ---------------------------------------------------------------------------
+
+
+@router.get("/logout")
+async def logout():
+    """Clear the session cookie and redirect to the login page."""
+    resp = RedirectResponse(url="/login", status_code=303)
+    resp.delete_cookie(SESSION_COOKIE_NAME, path="/")
+    return resp

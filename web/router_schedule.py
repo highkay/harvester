@@ -76,16 +76,19 @@ async def update_schedule(
 ) -> dict[str, object]:
     """Update or create a provider schedule.
 
-    Body (JSON): ``cron_expression`` (str), ``enabled`` (bool).
-    Query param: ``config_file`` (optional — defaults to existing value or empty string).
+    Body (JSON): ``cron_expression`` (str), ``enabled`` (bool),
+    ``config_file`` (str, optional — defaults to existing value).
+    Query param ``config_file`` overrides the body when provided.
     """
     svc = get_scheduler_service()
     if svc is None:
         raise HTTPException(status_code=503, detail="Scheduler not initialised")
 
-    # Resolve config_file: body override > existing row > empty string
+    # Resolve config_file: query param > body > existing row > empty string
     resolved_config = config_file
     if resolved_config is None:
+        resolved_config = body.config_file
+    if not resolved_config:
         try:
             existing = await svc.get_schedule(provider_name)
             resolved_config = str(existing.get("config_file", ""))
@@ -98,6 +101,28 @@ async def update_schedule(
         enabled=body.enabled,
         config_file=resolved_config,
     )
+
+
+# ---------------------------------------------------------------------------
+# DELETE /api/schedule/{provider_name}
+# ---------------------------------------------------------------------------
+
+
+@router.delete("/{provider_name}")
+async def delete_schedule(
+    provider_name: str,
+    _auth: None = Depends(_require_auth),
+) -> dict[str, object]:
+    """Delete a provider schedule (DB row + APScheduler job)."""
+    svc = get_scheduler_service()
+    if svc is None:
+        raise HTTPException(status_code=503, detail="Scheduler not initialised")
+    deleted = await svc.delete_schedule(provider_name)
+    if not deleted:
+        raise HTTPException(
+            status_code=404, detail=f"Schedule not found for provider: {provider_name}"
+        )
+    return {"provider_name": provider_name, "deleted": True}
 
 
 # ---------------------------------------------------------------------------
