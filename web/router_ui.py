@@ -98,6 +98,33 @@ def _scan_supported_providers() -> list[str]:
     return sorted(providers)
 
 
+def _scan_config_mapping() -> dict[str, list[str]]:
+    """Map every task name to the example config file(s) that declare it.
+
+    Returns ``{task_name: [config_file, ...]}`` — e.g.
+    ``{"kimi": ["examples/config-kimi.yaml"], "openai": ["examples/config-full.yaml", "examples/config-simple.yaml"]}``.
+    A task may appear in several configs (e.g. openai in full + simple), so
+    the value is a list; sorted for stable ordering.  Paths carry the
+    ``examples/`` prefix so they match what schedule_config stores.
+    """
+    import yaml
+
+    examples_dir = Path(__file__).resolve().parent.parent / "examples"
+    mapping: dict[str, set[str]] = {}
+    if not examples_dir.is_dir():
+        return {}
+    for cfg in sorted(examples_dir.glob("config-*.yaml")):
+        try:
+            data = yaml.safe_load(cfg.read_text(encoding="utf-8")) or {}
+        except Exception:
+            continue
+        for task in data.get("tasks") or []:
+            name = (task or {}).get("name")
+            if name:
+                mapping.setdefault(str(name).strip(), set()).add(f"examples/{cfg.name}")
+    return {name: sorted(files) for name, files in sorted(mapping.items())}
+
+
 # ---------------------------------------------------------------------------
 # GET / — 仪表盘
 # ---------------------------------------------------------------------------
@@ -231,6 +258,7 @@ async def schedule_page(request: Request, _user: bool = Depends(require_ui_sessi
             "page": "schedule",
             "schedules": rows,
             "all_providers": _scan_supported_providers(),
+            "config_mapping": _scan_config_mapping(),
         },
     )
 

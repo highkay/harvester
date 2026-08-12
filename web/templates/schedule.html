@@ -9,7 +9,7 @@
 <div style="display:flex;gap:8px;align-items:flex-end;background:var(--panel);border:1px solid var(--border);padding:16px;border-radius:8px;max-width:720px;flex-wrap:wrap;">
   <div style="flex:1;min-width:140px;">
     <label for="new-provider" style="margin-bottom:4px;">任务类型</label>
-    <input type="text" id="new-provider" placeholder="例如: deepseek" list="provider-list" style="width:100%;padding:8px 10px;border-radius:4px;border:1px solid var(--border);background:var(--bg);color:var(--fg);margin-bottom:0;">
+    <input type="text" id="new-provider" placeholder="例如: deepseek" list="provider-list" oninput="syncConfigSelect()" style="width:100%;padding:8px 10px;border-radius:4px;border:1px solid var(--border);background:var(--bg);color:var(--fg);margin-bottom:0;">
     <datalist id="provider-list">
       {% for p in all_providers %}<option value="{{ p }}"></option>{% endfor %}
     </datalist>
@@ -18,9 +18,11 @@
     <label for="new-cron" style="margin-bottom:4px;">Cron 表达式</label>
     <input type="text" id="new-cron" placeholder="0 3 * * *" value="0 3 * * *" style="width:100%;padding:8px 10px;border-radius:4px;border:1px solid var(--border);background:var(--bg);color:var(--fg);margin-bottom:0;">
   </div>
-  <div style="flex:1;min-width:180px;">
+  <div style="flex:1.4;min-width:200px;">
     <label for="new-config" style="margin-bottom:4px;">配置文件</label>
-    <input type="text" id="new-config" placeholder="examples/config-deepseek.yaml" style="width:100%;padding:8px 10px;border-radius:4px;border:1px solid var(--border);background:var(--bg);color:var(--fg);margin-bottom:0;">
+    <select id="new-config" style="width:100%;padding:8px 10px;border-radius:4px;border:1px solid var(--border);background:var(--bg);color:var(--fg);margin-bottom:0;">
+      <option value="">-- 选择配置文件 --</option>
+    </select>
   </div>
   <button onclick="addSchedule()" style="white-space:nowrap;">添加调度</button>
 </div>
@@ -42,7 +44,18 @@
           <span class="tag {% if s.enabled %}on{% else %}off{% endif %} schedule-tag" data-provider="{{ s.provider_name }}">{% if s.enabled %}启用{% else %}停用{% endif %}</span>
         </label>
       </td>
-      <td class="muted" style="font-size:12px;">{{ s.config_file }}</td>
+      <td class="muted" style="font-size:12px;">
+        <select class="schedule-config" data-provider="{{ s.provider_name }}" style="padding:4px 8px;border-radius:4px;border:1px solid var(--border);background:var(--bg);color:var(--fg);max-width:240px;">
+          {% set cfgs = config_mapping.get(s.provider_name, []) %}
+          {% if not cfgs %}{% set cfgs = [s.config_file] %}{% endif %}
+          {% for c in cfgs %}
+          <option value="{{ c }}" {% if c == s.config_file %}selected{% endif %}>{{ c }}</option>
+          {% endfor %}
+          {% if s.config_file and s.config_file not in cfgs %}
+          <option value="{{ s.config_file }}" selected>{{ s.config_file }}</option>
+          {% endif %}
+        </select>
+      </td>
       <td class="muted schedule-next" data-provider="{{ s.provider_name }}">{{ s.next_run_time or '—' }}</td>
       <td>
         <div class="row-actions">
@@ -60,6 +73,29 @@
 <div id="action-error" class="notice error" style="display:none;max-width:720px;margin-top:12px;"></div>
 
 <script>
+// task → config files mapping injected from the server
+var CONFIG_MAPPING = {{ config_mapping | tojson }};
+
+function syncConfigSelect() {
+  var provider = document.getElementById('new-provider').value.trim();
+  var sel = document.getElementById('new-config');
+  sel.innerHTML = '<option value="">-- 选择配置文件 --</option>';
+  var files = CONFIG_MAPPING[provider] || [];
+  if (files.length === 0) {
+    // fallback: conventional name even if not scanned
+    var guess = 'examples/config-' + provider + '.yaml';
+    var opt = document.createElement('option');
+    opt.value = guess; opt.textContent = guess;
+    sel.appendChild(opt);
+  } else {
+    files.forEach(function(f) {
+      var opt = document.createElement('option');
+      opt.value = f; opt.textContent = f;
+      sel.appendChild(opt);
+    });
+  }
+}
+
 function showError(elId, msg) {
   var el = document.getElementById(elId);
   el.textContent = msg;
@@ -98,9 +134,9 @@ async function addSchedule() {
   hideError('form-error');
   var provider = document.getElementById('new-provider').value.trim();
   var cron = document.getElementById('new-cron').value.trim();
-  var config = document.getElementById('new-config').value.trim();
+  var config = document.getElementById('new-config').value;
   if (!provider || !cron) { showError('form-error', '请填写任务类型和 cron 表达式'); return; }
-  if (!config) config = 'examples/config-' + provider + '.yaml';
+  if (!config) { showError('form-error', '请选择配置文件'); return; }
   var r = await apiJson('/api/schedule/' + encodeURIComponent(provider), 'PUT',
     {cron_expression: cron, enabled: true, config_file: config});
   if (r.ok) { location.reload(); }
@@ -111,8 +147,10 @@ async function saveSchedule(provider) {
   hideError('action-error');
   var cron = getCron(provider);
   var enabled = document.querySelector('.schedule-enabled[data-provider="' + provider + '"]').checked;
+  var configSel = document.querySelector('.schedule-config[data-provider="' + provider + '"]');
+  var config = configSel ? configSel.value : '';
   var r = await apiJson('/api/schedule/' + encodeURIComponent(provider), 'PUT',
-    {cron_expression: cron, enabled: enabled});
+    {cron_expression: cron, enabled: enabled, config_file: config});
   if (r.ok) { location.reload(); }
   else { showError('action-error', (r.data && r.data.detail) || ('保存失败 HTTP ' + r.status)); }
 }
