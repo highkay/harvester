@@ -246,6 +246,19 @@ class PipelineRunner:
             # 3. Run HarvesterApp
             start_time = time.time()
 
+            # HarvesterApp._setup_signal_handlers() calls signal.signal() which
+            # is only legal in the main thread. We run scans in worker threads,
+            # so neutralise signal registration here (shutdown is driven by the
+            # pipeline completion event, not OS signals).
+            import signal as _signal
+
+            def _noop_signal(signum: int, frame: object) -> None:
+                pass
+
+            _orig_signal = _signal.signal
+            if threading.current_thread() is not threading.main_thread():
+                _signal.signal = _noop_signal  # type: ignore[assignment]
+
             from main import HarvesterApp  # type: ignore[import-untyped]
 
             app = HarvesterApp(str(temp_yaml_path))
@@ -300,6 +313,13 @@ class PipelineRunner:
             )
 
         finally:
+            # Restore signal handler patch (thread-local scope ended)
+            if "signal" in dir() and "_orig_signal" in dir():
+                try:
+                    _signal.signal = _orig_signal  # type: ignore[assignment]
+                except Exception:
+                    pass
+
             # Clean up temp YAML
             if temp_yaml_path is not None and temp_yaml_path.exists():
                 try:
