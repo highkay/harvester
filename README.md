@@ -809,6 +809,61 @@ The system features a sophisticated **Query Optimization Engine** with mathemati
 
    These provider-only tasks all use the same provider result files. The Tavily preset searches both `tvly-` and `tavily-` prefixes.
 
+### 5. Web Platform (scheduled scans + gpt-load push)
+
+The repo ships a FastAPI web layer (`web_main.py` + `web/`) that wraps the CLI
+pipeline into a long-running service:
+
+- **Multi-token management** — add/remove/enable GitHub API tokens or sessions
+  via the web UI; tokens are stored AES-256-GCM encrypted (key from
+  `ENCRYPTION_KEY`).
+- **Scheduled scans** — per-provider cron schedules (default `0 3 * * *`
+  daily) via APScheduler; manual "run now" per provider; anti-overlap guard.
+- **Automatic push to gpt-load** — after a scan finishes, validated keys are
+  pushed to a gpt-load instance group (`POST /api/keys/add-multiple`,
+  idempotent dedup). Each provider's push target (instance URL + group +
+  `max_size` batch cap, default 10000) is configurable in the UI.
+- **Jinja2 admin UI** — dashboard, token management, push configuration,
+  schedule management, run history, push logs. Single shared auth key
+  (`WEB_AUTH_KEY`) with session-cookie login for the UI and Bearer tokens
+  for the API.
+
+**Environment variables** (`web/config.py`):
+
+| Variable | Default | Description |
+|---|---|---|
+| `WEB_HOST` / `WEB_PORT` | `0.0.0.0` / `8000` | Bind address / port |
+| `WEB_AUTH_KEY` | auto-generated | Admin UI + API auth key |
+| `ENCRYPTION_KEY` | auto-generated | AES-256-GCM master key for stored tokens (back it up!) |
+| `GPT_LOAD_BASE_URL` | `http://192.168.1.18:43001` | gpt-load instance base URL |
+| `GPT_LOAD_AUTH_KEY` | empty | gpt-load management auth key |
+| `HARVESTER_WORKSPACE` | `./data` | Workspace (provider results) |
+| `HARVESTER_DB_PATH` | `<workspace>/harvester.db` | SQLite DB path |
+
+**Run locally:**
+
+```bash
+pip install -r requirements.txt
+export WEB_AUTH_KEY="your-admin-key"
+export ENCRYPTION_KEY="$(openssl rand -hex 32)"
+python web_main.py
+# open http://localhost:8000, log in with WEB_AUTH_KEY
+```
+
+**Docker deployment:**
+
+```bash
+cp .env.example .env   # set WEB_AUTH_KEY / ENCRYPTION_KEY / GPT_LOAD_AUTH_KEY
+docker compose up -d   # starts on port 8000 (edit docker-compose.yml to change)
+```
+
+> **Note for restricted networks:** `pip install` inside the Docker build may
+> need a mirror (e.g. `-i https://pypi.tuna.tsinghua.edu.cn/simple`), and
+> `git pull` on the host may need a proxy — configure per your environment.
+
+The CLI entry (`python main.py`) is untouched and fully coexists with the web
+layer.
+
 ## Directory Structure
 
 ```

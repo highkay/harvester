@@ -811,6 +811,50 @@ sequenceDiagram
 
    这些 provider-only 任务使用相同的 provider 结果文件。Tavily 预设会搜索 `tvly-` 和 `tavily-` 两种前缀。
 
+### 5. Web 平台（定时扫描 + gpt-load 自动推送）
+
+仓库附带 FastAPI Web 层（`web_main.py` + `web/`），把 CLI 流水线包装为常驻服务：
+
+- **多 Token 管理** — 通过 Web 界面添加/删除/启停 GitHub API Token 或会话；Token 以 AES-256-GCM 加密存储（主密钥来自 `ENCRYPTION_KEY`）。
+- **定时扫描** — 每个 provider 独立的 cron 调度（默认每日 `0 3 * * *`，APScheduler 驱动）；支持页面"立即运行"；防重叠锁。
+- **自动推送到 gpt-load** — 扫描完成后，验证通过的 key 自动推送到 gpt-load 实例的对应分组（`POST /api/keys/add-multiple`，幂等去重）。每个任务的推送目标（实例地址 + 分组 + `max_size` 单批上限，默认 10000）均可在页面配置。
+- **Jinja2 管理界面** — 仪表盘、Token 管理、推送配置、调度管理、运行历史、推送日志。单一共享认证密钥（`WEB_AUTH_KEY`）：界面用会话 cookie 登录，API 用 Bearer Token。
+
+**环境变量**（`web/config.py`）：
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `WEB_HOST` / `WEB_PORT` | `0.0.0.0` / `8000` | 监听地址 / 端口 |
+| `WEB_AUTH_KEY` | 自动生成 | 管理界面 + API 认证密钥 |
+| `ENCRYPTION_KEY` | 自动生成 | Token 加密主密钥（务必备份！） |
+| `GPT_LOAD_BASE_URL` | `http://192.168.1.18:43001` | gpt-load 实例地址 |
+| `GPT_LOAD_AUTH_KEY` | 空 | gpt-load 管理凭据 |
+| `HARVESTER_WORKSPACE` | `./data` | 工作目录（provider 结果） |
+| `HARVESTER_DB_PATH` | `<workspace>/harvester.db` | SQLite 数据库路径 |
+
+**本地运行：**
+
+```bash
+pip install -r requirements.txt
+export WEB_AUTH_KEY="your-admin-key"
+export ENCRYPTION_KEY="$(openssl rand -hex 32)"
+python web_main.py
+# 打开 http://localhost:8000，用 WEB_AUTH_KEY 登录
+```
+
+**Docker 部署：**
+
+```bash
+cp .env.example .env   # 设置 WEB_AUTH_KEY / ENCRYPTION_KEY / GPT_LOAD_AUTH_KEY
+docker compose up -d   # 默认端口 8000（可改 docker-compose.yml）
+```
+
+> **受限网络提示：** Docker 构建时 `pip install` 可能需要镜像源（如
+> `-i https://pypi.tuna.tsinghua.edu.cn/simple`）；宿主机 `git pull` 可能
+> 需要代理，请按实际环境配置。
+
+CLI 入口（`python main.py`）保持不变，与 Web 层完全共存。
+
 ## 目录结构
 
 ```
