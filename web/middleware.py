@@ -58,6 +58,54 @@ def authenticate_bearer(request: Request, expected_token: str) -> bool:
     return True
 
 
+# Session cookie name used by the web UI login flow.
+SESSION_COOKIE_NAME = "harvester_session"
+
+
+def authenticate_session(request: Request, expected_token: str) -> bool:
+    """Validate the web-UI session cookie.
+
+    The cookie carries the same pre-shared auth key as the Bearer token;
+    it is set by ``POST /api/auth/login`` (httpOnly) so browser-based
+    page navigation works without manually attaching headers.
+
+    Args:
+        request: The FastAPI request object.
+        expected_token: The expected token value to compare against.
+
+    Returns:
+        ``True`` if the cookie matches.
+
+    Raises:
+        HTTPException(401): If the cookie is missing or does not match.
+    """
+    provided = request.cookies.get(SESSION_COOKIE_NAME)
+    if not provided:
+        raise HTTPException(
+            status_code=401, detail="Not logged in — visit /login first"
+        )
+    if not secrets.compare_digest(provided, expected_token):
+        raise HTTPException(status_code=401, detail="Invalid session")
+    return True
+
+
+def authenticate_either(request: Request, expected_token: str) -> bool:
+    """Accept either a valid Bearer header or a valid session cookie.
+
+    Used by ``get_current_user`` so that API clients may authenticate
+    with ``Authorization: Bearer <key>`` while browsers authenticate via
+    the ``harvester_session`` cookie set at login.
+
+    Returns ``True`` on success, otherwise raises ``HTTPException(401)``
+    with a message explaining which channel failed.
+    """
+    auth_header = request.headers.get("Authorization")
+    if auth_header:
+        return authenticate_bearer(request, expected_token)
+
+    return authenticate_session(request, expected_token)
+
+
 # ---------------------------------------------------------------------------
 # Rate limiter
 # ---------------------------------------------------------------------------

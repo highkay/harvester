@@ -155,6 +155,44 @@ class TestLoginPage(WebUiPageTestBase):
         self.assertIn("auth_key", resp.text)
 
 
+# ---------------------------------------------------------------------------
+# Test session-cookie auth flow (browser-style login)
+# ---------------------------------------------------------------------------
+
+
+class TestSessionCookieFlow(WebUiPageTestBase):
+    """Browser login sets a session cookie that unlocks UI pages."""
+
+    def test_login_sets_session_cookie(self) -> None:
+        """POST /api/auth/login sets the harvester_session cookie."""
+        resp = self.client.post(
+            "/api/auth/login", json={"auth_key": _TEST_AUTH_KEY}
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("harvester_session", resp.cookies)
+
+    def test_ui_page_accessible_with_session_cookie(self) -> None:
+        """GET / with the session cookie returns 200 (no Bearer needed)."""
+        login = self.client.post(
+            "/api/auth/login", json={"auth_key": _TEST_AUTH_KEY}
+        )
+        cookie = login.cookies.get("harvester_session")
+        resp = self.client.get("/", cookies={"harvester_session": cookie})
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("仪表盘", resp.text)
+
+    def test_ui_page_without_auth_redirects_to_login(self) -> None:
+        """GET / without any credential redirects to /login (303)."""
+        resp = self.client.get("/", follow_redirects=False)
+        self.assertEqual(resp.status_code, 303)
+        self.assertEqual(resp.headers.get("location"), "/login")
+
+    def test_api_still_requires_bearer_without_cookie(self) -> None:
+        """API endpoints do NOT accept the UI redirect — 401 without auth."""
+        resp = self.client.get("/api/tokens")
+        self.assertEqual(resp.status_code, 401)
+
+
 class TestDashboardPage(WebUiPageTestBase):
     """GET / — dashboard with stats and recent tables."""
 
@@ -167,9 +205,9 @@ class TestDashboardPage(WebUiPageTestBase):
         self.assertIn("deepseek", resp.text)  # seeded schedule row
 
     def test_dashboard_requires_auth(self) -> None:
-        """GET / without Bearer returns 401."""
-        resp = self.client.get("/")
-        self.assertEqual(resp.status_code, 401)
+        """GET / without auth redirects to login (303)."""
+        resp = self.client.get("/", follow_redirects=False)
+        self.assertEqual(resp.status_code, 303)
 
 
 class TestTokensPage(WebUiPageTestBase):
@@ -192,9 +230,9 @@ class TestTokensPage(WebUiPageTestBase):
         self.assertNotIn("enc-secret-B", resp.text)
 
     def test_tokens_page_requires_auth(self) -> None:
-        """GET /tokens without Bearer returns 401 (auth enforcement)."""
-        resp = self.client.get("/tokens")
-        self.assertEqual(resp.status_code, 401)
+        """GET /tokens without auth redirects to login (303)."""
+        resp = self.client.get("/tokens", follow_redirects=False)
+        self.assertEqual(resp.status_code, 303)
 
 
 class TestSchedulePage(WebUiPageTestBase):
@@ -209,9 +247,9 @@ class TestSchedulePage(WebUiPageTestBase):
         self.assertIn("config-deepseek.yaml", resp.text)
 
     def test_schedule_page_requires_auth(self) -> None:
-        """GET /schedule without Bearer returns 401."""
-        resp = self.client.get("/schedule")
-        self.assertEqual(resp.status_code, 401)
+        """GET /schedule without auth redirects to login (303)."""
+        resp = self.client.get("/schedule", follow_redirects=False)
+        self.assertEqual(resp.status_code, 303)
 
 
 class TestRunsPage(WebUiPageTestBase):
@@ -227,9 +265,9 @@ class TestRunsPage(WebUiPageTestBase):
         self.assertIn("run-aaaa", resp.text)  # truncated run id
 
     def test_runs_page_requires_auth(self) -> None:
-        """GET /runs without Bearer returns 401."""
-        resp = self.client.get("/runs")
-        self.assertEqual(resp.status_code, 401)
+        """GET /runs without auth redirects to login (303)."""
+        resp = self.client.get("/runs", follow_redirects=False)
+        self.assertEqual(resp.status_code, 303)
 
 
 class TestRunDetailPage(WebUiPageTestBase):
@@ -249,9 +287,9 @@ class TestRunDetailPage(WebUiPageTestBase):
         self.assertEqual(resp.status_code, 404)
 
     def test_run_detail_requires_auth(self) -> None:
-        """GET /runs/{id} without Bearer returns 401."""
-        resp = self.client.get("/runs/run-aaaa-0001")
-        self.assertEqual(resp.status_code, 401)
+        """GET /runs/{id} without auth redirects to login (303)."""
+        resp = self.client.get("/runs/run-aaaa-0001", follow_redirects=False)
+        self.assertEqual(resp.status_code, 303)
 
 
 class TestPushLogsPage(WebUiPageTestBase):
@@ -266,9 +304,9 @@ class TestPushLogsPage(WebUiPageTestBase):
         self.assertIn("success", resp.text)
 
     def test_push_logs_page_requires_auth(self) -> None:
-        """GET /push-logs without Bearer returns 401."""
-        resp = self.client.get("/push-logs")
-        self.assertEqual(resp.status_code, 401)
+        """GET /push-logs without auth redirects to login (303)."""
+        resp = self.client.get("/push-logs", follow_redirects=False)
+        self.assertEqual(resp.status_code, 303)
 
 
 if __name__ == "__main__":

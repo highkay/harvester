@@ -12,11 +12,11 @@ from __future__ import annotations
 
 import secrets
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from .deps import get_settings
-from .middleware import RateLimiter
+from .middleware import RateLimiter, SESSION_COOKIE_NAME
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -44,12 +44,13 @@ class LoginRequest(BaseModel):
 
 
 @router.post("/login")
-async def login(request: Request, body: LoginRequest) -> dict[str, str]:
+async def login(request: Request, response: Response, body: LoginRequest) -> dict[str, str]:
     """Authenticate with the pre-shared auth key.
 
-    On success, returns the Bearer token to be used for subsequent
-    ``/api/*`` requests.  On failure, returns 401.  Rate-limited at
-    5 attempts per 60 seconds per client IP.
+    On success, returns the Bearer token for API clients AND sets the
+    ``harvester_session`` httpOnly cookie so browser navigation to the
+    web UI works without manually attaching headers.  On failure,
+    returns 401.  Rate-limited at 5 attempts per 60 seconds per IP.
 
     Example request body:
 
@@ -71,5 +72,15 @@ async def login(request: Request, body: LoginRequest) -> dict[str, str]:
     # Constant-time comparison against the configured auth key
     if not secrets.compare_digest(body.auth_key, settings.web_auth_key):
         raise HTTPException(status_code=401, detail="Invalid authentication key")
+
+    # Set the UI session cookie (httpOnly, path-scoped to the app root)
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=settings.web_auth_key,
+        httponly=True,
+        samesite="lax",
+        max_age=7 * 24 * 3600,  # 7 days
+        path="/",
+    )
 
     return {"token": settings.web_auth_key}

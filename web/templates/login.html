@@ -2,7 +2,7 @@
 {% block title %}登录 - Harvester 管理界面{% endblock %}
 {% block content %}
 <h2>登录</h2>
-<p class="muted">输入预共享的认证密钥（WEB_AUTH_KEY）以获取访问令牌。令牌需在请求头中携带：<code>Authorization: Bearer &lt;token&gt;</code>。</p>
+<p class="muted">输入预共享的认证密钥（WEB_AUTH_KEY）登录管理界面。API 调用仍可使用 <code>Authorization: Bearer &lt;token&gt;</code> 请求头。</p>
 
 <form id="login-form">
   <label for="auth_key">认证密钥（auth_key）</label>
@@ -26,10 +26,9 @@ document.getElementById("login-form").addEventListener("submit", async function 
       body: JSON.stringify({ auth_key: key }),
     });
     if (resp.ok) {
-      const data = await resp.json();
       box.className = "notice";
-      box.textContent = "登录成功！访问令牌：\n" + data.token +
-        "\n\n调用受保护页面/接口时请携带请求头：\nAuthorization: Bearer <token>";
+      box.textContent = "登录成功，正在跳转…";
+      window.location.href = "/";
     } else {
       box.className = "notice error";
       box.textContent = "认证失败（HTTP " + resp.status + "），请检查 WEB_AUTH_KEY 是否正确。";

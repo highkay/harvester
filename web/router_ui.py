@@ -3,7 +3,7 @@
 """Jinja2 管理界面路由 — 纯服务端渲染页面（Wave 3 T7）。
 
 提供仪表盘、Token 管理、调度管理、运行历史、运行详情、推送日志与登录
-页面。除登录外所有页面均要求 Bearer 认证（``Depends(get_current_user)``）。
+页面。除登录外所有页面均要求 Bearer 认证（``Depends(require_ui_session)``）。
 数据由服务端直查 SQLite（``web.db``），模板不依赖任何前端框架；
 Token 等敏感字段一律脱敏展示，绝不回显加密原文。
 """
@@ -13,17 +13,43 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from tools.logger import get_logger
 
 from .db import get_db, resolve_db_path
-from .deps import get_current_user
+from .deps import get_current_user, get_settings
+from .middleware import SESSION_COOKIE_NAME, authenticate_session
 
 logger = get_logger("web.router_ui")
 
 router = APIRouter()
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
+
+
+def require_ui_session(request: Request) -> None:
+    """UI-page auth: redirect to /login when the session cookie is missing.
+
+    Unlike ``get_current_user`` (which raises 401 JSON for API clients),
+    browser page navigation should land on the login page instead of
+    showing a raw JSON error.  Bearer-header clients are also accepted,
+    so API tooling can still fetch rendered pages.
+    """
+    # Bearer header present → delegate to the normal auth dependency
+    if request.headers.get("Authorization"):
+        get_current_user(request)
+        return
+
+    settings = get_settings()
+    try:
+        authenticate_session(request, settings.web_auth_key)
+    except HTTPException:
+        raise HTTPException(
+            status_code=303,
+            detail="Please log in first",
+            headers={"Location": "/login"},
+        )
 
 
 def _mask_token(token_hash: str) -> str:
@@ -37,7 +63,7 @@ def _mask_token(token_hash: str) -> str:
 
 
 @router.get("/")
-async def dashboard(request: Request, _user: bool = Depends(get_current_user)):
+async def dashboard(request: Request, _user: bool = Depends(require_ui_session)):
     """仪表盘：统计卡 + 调度表 + 最近运行/推送记录。"""
     db_path = resolve_db_path()
     db = await get_db(db_path)
@@ -97,7 +123,7 @@ async def dashboard(request: Request, _user: bool = Depends(get_current_user)):
 
 
 @router.get("/tokens")
-async def tokens_page(request: Request, _user: bool = Depends(get_current_user)):
+async def tokens_page(request: Request, _user: bool = Depends(require_ui_session)):
     """Token 全列表：仅展示 id / 类型 / 脱敏值 / 标签 / 启用状态。"""
     db_path = resolve_db_path()
     db = await get_db(db_path)
@@ -127,7 +153,7 @@ async def tokens_page(request: Request, _user: bool = Depends(get_current_user))
 
 
 @router.get("/schedule")
-async def schedule_page(request: Request, _user: bool = Depends(get_current_user)):
+async def schedule_page(request: Request, _user: bool = Depends(require_ui_session)):
     """调度配置全列表。"""
     db_path = resolve_db_path()
     db = await get_db(db_path)
@@ -153,7 +179,7 @@ async def schedule_page(request: Request, _user: bool = Depends(get_current_user
 
 
 @router.get("/runs")
-async def runs_page(request: Request, _user: bool = Depends(get_current_user)):
+async def runs_page(request: Request, _user: bool = Depends(require_ui_session)):
     """运行记录全列表（run_id 截断展示）。"""
     db_path = resolve_db_path()
     db = await get_db(db_path)
@@ -184,7 +210,7 @@ async def runs_page(request: Request, _user: bool = Depends(get_current_user)):
 
 @router.get("/runs/{run_id}")
 async def run_detail_page(
-    run_id: str, request: Request, _user: bool = Depends(get_current_user)
+    run_id: str, request: Request, _user: bool = Depends(require_ui_session)
 ):
     """单条运行记录详情。"""
     db_path = resolve_db_path()
@@ -217,7 +243,7 @@ async def run_detail_page(
 
 
 @router.get("/push-logs")
-async def push_logs_page(request: Request, _user: bool = Depends(get_current_user)):
+async def push_logs_page(request: Request, _user: bool = Depends(require_ui_session)):
     """推送记录全列表。"""
     db_path = resolve_db_path()
     db = await get_db(db_path)

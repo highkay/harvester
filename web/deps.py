@@ -15,7 +15,7 @@ from fastapi import HTTPException, Request
 from tools.logger import get_logger
 
 from .config import WebSettings
-from .middleware import authenticate_bearer
+from .middleware import authenticate_either
 
 logger = get_logger("web.deps")
 
@@ -40,13 +40,17 @@ def get_settings() -> WebSettings:
 
 
 def get_current_user(request: Request) -> bool:
-    """Validate the Bearer token in the ``Authorization`` header.
+    """Validate authentication via Bearer header OR session cookie.
 
     Called via ``Depends(get_current_user)`` on protected endpoints.
     FastAPI auto-injects the ``Request`` object.
 
-    Returns ``True`` if the token is valid, otherwise raises
+    - API clients authenticate with ``Authorization: Bearer <web_auth_key>``.
+    - Browser UI authenticates with the ``harvester_session`` cookie set
+      by ``POST /api/auth/login``.
+
+    Returns ``True`` if either channel is valid, otherwise raises
     ``HTTPException(401)``.
     """
     settings = get_settings()
-    return authenticate_bearer(request, settings.web_auth_key)
+    return authenticate_either(request, settings.web_auth_key)
