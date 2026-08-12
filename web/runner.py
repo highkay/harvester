@@ -446,6 +446,9 @@ class PipelineRunner:
         # round-robin fashion so concurrent scans spread across proxies.
         # pipeline.py calls client.set_proxy(global.proxy) at startup, so the
         # proxy applies to all GitHub HTTP traffic of this scan.
+        # NOTE: source configs (config-*.yaml) often carry `proxy: ""` to
+        # disable env-proxy inheritance — an explicit picked proxy must
+        # override that key, otherwise the scan silently runs without it.
         proxy = self._pick_proxy()
         if proxy:
             global_section["proxy"] = proxy
