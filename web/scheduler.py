@@ -31,10 +31,20 @@ logger = get_logger("web.scheduler")
 # ---------------------------------------------------------------------------
 
 _DEFAULT_SCHEDULES: tuple[tuple[str, str, str], ...] = (
-    ("deepseek", "0 3 * * *", "examples/config-deepseek.yaml"),
-    ("kimi", "0 3 * * *", "examples/config-kimi.yaml"),
-    ("mimo-cn", "0 3 * * *", "examples/config-mimo.yaml"),
-    ("qwen-cn", "0 3 * * *", "examples/config-qwen.yaml"),
+    # High-churn "sk-…" providers: GitHub-leaked keys are revoked within hours,
+    # so scan every 4 hours. The four providers are staggered 15 minutes apart
+    # so the GitHub search burst does not land on the same minute. Evidence:
+    # kimi gained 82 valid keys in a ~2.7-hour same-day window (data-kimi
+    # backups 20260810-155759 → 20260810-183753).
+    ("deepseek", "0 */4 * * *", "examples/config-deepseek.yaml"),
+    ("kimi", "15 */4 * * *", "examples/config-kimi.yaml"),
+    ("mimo-cn", "30 */4 * * *", "examples/config-mimo.yaml"),
+    ("qwen-cn", "45 */4 * * *", "examples/config-qwen.yaml"),
+    # Medium-churn providers — every 6 hours.
+    ("glm", "0 */6 * * *", "examples/config-glm.yaml"),
+    ("modelscope", "20 */6 * * *", "examples/config-modelscope.yaml"),
+    # Tavily keys survive longer (usage-audit based) — every 6 hours.
+    ("tavily", "40 */6 * * *", "examples/config-tavily.yaml"),
 )
 
 
@@ -338,7 +348,9 @@ async def _seed_default_schedules(db_path: str) -> None:
                     (provider_name, cron, config_file),
                 )
             await db.commit()
-            logger.info("Inserted 4 default schedule_config rows")
+            logger.info(
+                f"Inserted {len(_DEFAULT_SCHEDULES)} default schedule_config rows"
+            )
     finally:
         await db.close()
 

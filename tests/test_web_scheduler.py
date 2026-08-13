@@ -54,13 +54,32 @@ class TestCronValidation(unittest.TestCase):
 class TestSeedData(unittest.TestCase):
     """Given an empty schedule_config table,
     When init_scheduler is called,
-    Then 4 default provider schedules are inserted.
+    Then 7 default provider schedules are inserted.
     """
 
-    _EXPECTED_PROVIDERS = frozenset({"deepseek", "kimi", "mimo-cn", "qwen-cn"})
-    _DEFAULT_CRON = "0 3 * * *"
+    _EXPECTED_PROVIDERS = frozenset(
+        {"deepseek", "kimi", "mimo-cn", "qwen-cn", "glm", "modelscope", "tavily"}
+    )
+    _EXPECTED_CRONS = {
+        "deepseek": "0 */4 * * *",
+        "kimi": "15 */4 * * *",
+        "mimo-cn": "30 */4 * * *",
+        "qwen-cn": "45 */4 * * *",
+        "glm": "0 */6 * * *",
+        "modelscope": "20 */6 * * *",
+        "tavily": "40 */6 * * *",
+    }
+    _EXPECTED_CONFIG_FILES = {
+        "deepseek": "examples/config-deepseek.yaml",
+        "kimi": "examples/config-kimi.yaml",
+        "mimo-cn": "examples/config-mimo.yaml",
+        "qwen-cn": "examples/config-qwen.yaml",
+        "glm": "examples/config-glm.yaml",
+        "modelscope": "examples/config-modelscope.yaml",
+        "tavily": "examples/config-tavily.yaml",
+    }
 
-    def test_seeds_four_defaults_on_empty_table(self) -> None:
+    def test_seeds_defaults_on_empty_table(self) -> None:
         from web.db import init_db, get_db
 
         async def _scenario() -> None:
@@ -83,7 +102,7 @@ class TestSeedData(unittest.TestCase):
                 settings = _make_settings(db_path)
                 svc = await init_scheduler(settings)
 
-                # -- Then: 4 default rows inserted --
+                # -- Then: 7 default rows inserted --
                 db2 = await get_db(db_path)
                 cursor2 = await db2.execute(
                     "SELECT provider_name, cron_expression, enabled, config_file "
@@ -92,25 +111,31 @@ class TestSeedData(unittest.TestCase):
                 rows = await cursor2.fetchall()
                 await db2.close()
 
-                self.assertEqual(len(rows), 4, f"Expected 4 rows, got {len(rows)}")
+                self.assertEqual(
+                    len(rows),
+                    len(self._EXPECTED_PROVIDERS),
+                    f"Expected {len(self._EXPECTED_PROVIDERS)} rows, got {len(rows)}",
+                )
 
                 providers = {r[0] for r in rows}
-                self.assertTrue(
-                    self._EXPECTED_PROVIDERS.issubset(providers),
-                    f"Missing providers: {self._EXPECTED_PROVIDERS - providers}",
+                self.assertEqual(
+                    providers,
+                    self._EXPECTED_PROVIDERS,
+                    f"Provider set mismatch: {providers ^ self._EXPECTED_PROVIDERS}",
                 )
 
                 for r in rows:
-                    self.assertEqual(r[1], self._DEFAULT_CRON,
-                                     f"Provider {r[0]} cron mismatch")
+                    self.assertEqual(
+                        r[1],
+                        self._EXPECTED_CRONS[r[0]],
+                        f"Provider {r[0]} cron mismatch",
+                    )
                     self.assertEqual(r[2], 1, f"Provider {r[0]} should be enabled")
-
-                # Verify expected config_file paths
-                config_files = {r[0]: r[3] for r in rows}
-                self.assertEqual(config_files["deepseek"], "examples/config-deepseek.yaml")
-                self.assertEqual(config_files["kimi"], "examples/config-kimi.yaml")
-                self.assertEqual(config_files["mimo-cn"], "examples/config-mimo.yaml")
-                self.assertEqual(config_files["qwen-cn"], "examples/config-qwen.yaml")
+                    self.assertEqual(
+                        r[3],
+                        self._EXPECTED_CONFIG_FILES[r[0]],
+                        f"Provider {r[0]} config_file mismatch",
+                    )
 
                 # -- Clean up --
                 if svc is not None:
