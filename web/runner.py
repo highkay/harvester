@@ -320,7 +320,12 @@ class PipelineRunner:
             # here, in the scan thread right after completion, guarantees the
             # valid keys reach gpt-load. gpt-load's add-multiple is idempotent,
             # so a duplicate push from the listener is harmless.
-            self._on_completed(provider_name, run_id)
+            #
+            # A single config file can define multiple regional tasks (e.g.
+            # config-mimo.yaml -> mimo-cn + mimo-sg), each writing its own
+            # valid-keys.txt. Push every task, not just the schedule's
+            # provider_name, so secondary regions reach gpt-load too.
+            self._push_completed_tasks(provider_name, run_id, temp_yaml_path)
 
         except Exception as exc:
             error_msg = f"{type(exc).__name__}: {exc}"
@@ -426,6 +431,46 @@ class PipelineRunner:
                 f"run_id={run_id} error={exc}"
             )
 
+    def _task_names_from_config(self, config_path: Path) -> list[str]:
+        """Return the names of every task defined in a config YAML.
+
+        A single config file can hold multiple regional tasks (e.g.
+        ``config-mimo.yaml`` defines both ``mimo-cn`` and ``mimo-sg``), each
+        writing its own ``valid-keys.txt``. Returns an empty list on any
+        parse/read error or when no ``tasks`` list is present.
+        """
+        try:
+            raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError):
+            return []
+        if not isinstance(raw, dict):
+            return []
+        tasks = raw.get("tasks")
+        if not isinstance(tasks, list):
+            return []
+        return [
+            str(t["name"])
+            for t in tasks
+            if isinstance(t, dict) and t.get("name")
+        ]
+
+    def _push_completed_tasks(
+        self,
+        provider_name: str,
+        run_id: str,
+        config_path: Path | None,
+    ) -> None:
+        """Fire the push hook for every task in the completed scan's config.
+
+        The scan runs the whole config file (all regional tasks), so the push
+        must fire once per task — not just for the schedule's ``provider_name``.
+        Falls back to ``provider_name`` when the config is unavailable or
+        defines no tasks.
+        """
+        task_names = self._task_names_from_config(config_path) if config_path else []
+        for name in task_names or [provider_name]:
+            self._on_completed(name, run_id)
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -525,6 +570,12 @@ class PipelineRunner:
             # Absent key → loader inherits http(s)_proxy env; explicit "" would
             # disable it. Leave absent so container env proxies still work.
             pass
+
+        # Force the workspace to the runner's own (HARVESTER_WORKSPACE). The
+        # source configs carry per-provider workspaces like "./data-mimo" for
+        # standalone CLI runs; without this override, the web scan would write
+        # results to an ephemeral dir the push service never reads.
+        global_section["workspace"] = str(self._workspace)
 
         # Write
         dest = self._temp_yaml_path(provider_name, run_id)

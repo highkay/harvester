@@ -664,3 +664,164 @@ class TestCancelRun(unittest.TestCase):
                 self.assertIsNotNone(run["finished_at"])
 
             _run_async(run_test())
+
+
+# ---------------------------------------------------------------------------
+# Regional-task push fix (TDD: RED phase)
+# ---------------------------------------------------------------------------
+
+
+_MULTI_TASK_YAML = """\
+global:
+  workspace: "./data-mimo"
+  github_credentials:
+    sessions: []
+    tokens:
+      - "placeholder"
+    strategy: "round_robin"
+
+pipeline:
+  threads:
+    search: 1
+    gather: 2
+    check: 1
+    inspect: 1
+
+persistence:
+  auto_restore: false
+
+tasks:
+  - name: mimo-cn
+    enabled: true
+    provider_type: mimo
+    use_api: true
+    max_pages: 10
+    api:
+      base_url: https://token-plan-cn.xiaomimimo.com/v1
+    patterns:
+      key_pattern: "sk-[0-9A-Za-z_-]{20,}"
+    conditions:
+      - query: '"test"'
+  - name: mimo-sg
+    enabled: true
+    provider_type: mimo
+    use_api: true
+    max_pages: 10
+    api:
+      base_url: https://token-plan-sgp.xiaomimimo.com/v1
+    patterns:
+      key_pattern: "sk-[0-9A-Za-z_-]{20,}"
+    conditions:
+      - query: '"test"'
+"""
+
+
+class TestTaskNamesFromConfig(unittest.TestCase):
+    """Given a config YAML,
+    When _task_names_from_config is called,
+    Then it returns the names of every task defined in the file.
+    """
+
+    def test_multi_task_returns_all_names(self) -> None:
+        from web.runner import PipelineRunner
+
+        runner = PipelineRunner.__new__(PipelineRunner)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p = Path(tmpdir) / "config-mimo.yaml"
+            p.write_text(_MULTI_TASK_YAML, encoding="utf-8")
+            self.assertEqual(
+                runner._task_names_from_config(p), ["mimo-cn", "mimo-sg"]
+            )
+
+    def test_no_tasks_returns_empty(self) -> None:
+        from web.runner import PipelineRunner
+
+        runner = PipelineRunner.__new__(PipelineRunner)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p = Path(tmpdir) / "config-empty.yaml"
+            p.write_text("global:\n  workspace: ./data\n", encoding="utf-8")
+            self.assertEqual(runner._task_names_from_config(p), [])
+
+    def test_malformed_yaml_returns_empty(self) -> None:
+        from web.runner import PipelineRunner
+
+        runner = PipelineRunner.__new__(PipelineRunner)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p = Path(tmpdir) / "config-bad.yaml"
+            p.write_text("{{{ not valid yaml", encoding="utf-8")
+            self.assertEqual(runner._task_names_from_config(p), [])
+
+    def test_missing_file_returns_empty(self) -> None:
+        from web.runner import PipelineRunner
+
+        runner = PipelineRunner.__new__(PipelineRunner)
+        self.assertEqual(
+            runner._task_names_from_config(Path("/nonexistent/nope.yaml")), []
+        )
+
+
+class TestPushCompletedTasks(unittest.TestCase):
+    """Given a completed scan,
+    When _push_completed_tasks is called,
+    Then _on_completed fires once per task in the config, or falls back
+    to the schedule's provider name when no config is available.
+    """
+
+    def test_pushes_each_task_name(self) -> None:
+        from web.runner import PipelineRunner
+
+        runner = PipelineRunner.__new__(PipelineRunner)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p = Path(tmpdir) / "config-mimo.yaml"
+            p.write_text(_MULTI_TASK_YAML, encoding="utf-8")
+
+            with patch.object(runner, "_on_completed") as mock_hook:
+                runner._push_completed_tasks("mimo-cn", "run-1", p)
+
+            calls = [c.args for c in mock_hook.call_args_list]
+            self.assertEqual(
+                calls, [("mimo-cn", "run-1"), ("mimo-sg", "run-1")]
+            )
+
+    def test_falls_back_to_provider_when_no_config(self) -> None:
+        from web.runner import PipelineRunner
+
+        runner = PipelineRunner.__new__(PipelineRunner)
+        with patch.object(runner, "_on_completed") as mock_hook:
+            runner._push_completed_tasks("mimo-cn", "run-1", None)
+
+        mock_hook.assert_called_once_with("mimo-cn", "run-1")
+
+
+class TestWorkspaceOverride(unittest.TestCase):
+    """Given a source config with a per-provider workspace (e.g. ./data-mimo),
+    When _generate_temp_yaml is called,
+    Then global.workspace is forced to the runner's HARVESTER_WORKSPACE so
+    results land on the mounted volume that PushService reads from.
+    """
+
+    def test_workspace_forced_to_runner_workspace(self) -> None:
+        from web.runner import PipelineRunner
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workdir = Path(tmpdir)
+            source_yaml = workdir / "config-test-provider.yaml"
+            source_yaml.write_text(_SAMPLE_YAML, encoding="utf-8")
+            runtime_dir = workdir / "runtime"
+            runtime_dir.mkdir()
+
+            runner = PipelineRunner.__new__(PipelineRunner)
+            runner._workspace = str(workdir)
+            runner._init_yaml_source_dir = str(workdir)
+
+            with patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("HARVESTER_PROXY", None)
+                result_path = runner._generate_temp_yaml(
+                    "test-provider", "run-ws-1", ["ghp_token_one"]
+                )
+            generated = yaml.safe_load(result_path.read_text(encoding="utf-8"))
+            # _SAMPLE_YAML declares workspace "./data-test"; the runner must
+            # overwrite it with its own workspace (HARVESTER_WORKSPACE).
+            self.assertEqual(
+                generated["global"]["workspace"], str(workdir)
+            )
