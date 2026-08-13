@@ -823,6 +823,9 @@ pipeline into a long-running service:
   pushed to a gpt-load instance group (`POST /api/keys/add-multiple`,
   idempotent dedup). Each provider's push target (instance URL + group +
   `max_size` batch cap, default 10000) is configurable in the UI.
+- **Automatic push to TavilyProxyManager** — after each tavily scan completes,
+  validated keys are auto-pushed to TavilyProxyManager (requires both
+  `TAVILY_PROXY_BASE_URL` and `TAVILY_PROXY_AUTH_KEY` to be set).
 - **Jinja2 admin UI** — dashboard, token management, push configuration,
   schedule management, run history, push logs. Single shared auth key
   (`WEB_AUTH_KEY`) with session-cookie login for the UI and Bearer tokens
@@ -837,6 +840,8 @@ pipeline into a long-running service:
 | `ENCRYPTION_KEY` | auto-generated | AES-256-GCM master key for stored tokens (back it up!) |
 | `GPT_LOAD_BASE_URL` | `http://192.168.1.18:43001` | gpt-load instance base URL |
 | `GPT_LOAD_AUTH_KEY` | empty | gpt-load management auth key |
+| `TAVILY_PROXY_BASE_URL` | empty | TavilyProxyManager instance address |
+| `TAVILY_PROXY_AUTH_KEY` | empty | Master key for that TavilyProxyManager instance |
 | `HARVESTER_WORKSPACE` | `./data` | Workspace (provider results) |
 | `HARVESTER_DB_PATH` | `<workspace>/harvester.db` | SQLite DB path |
 

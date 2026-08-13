@@ -818,6 +818,7 @@ sequenceDiagram
 - **多 Token 管理** — 通过 Web 界面添加/删除/启停 GitHub API Token 或会话；Token 以 AES-256-GCM 加密存储（主密钥来自 `ENCRYPTION_KEY`）。
 - **定时扫描** — 每个 provider 独立的 cron 调度（默认每日 `0 3 * * *`，APScheduler 驱动）；支持页面"立即运行"；防重叠锁。
 - **自动推送到 gpt-load** — 扫描完成后，验证通过的 key 自动推送到 gpt-load 实例的对应分组（`POST /api/keys/add-multiple`，幂等去重）。每个任务的推送目标（实例地址 + 分组 + `max_size` 单批上限，默认 10000）均可在页面配置。
+- **自动推送到 TavilyProxyManager** — 每次 tavily 扫描完成后，验证通过的 key 自动推送到 TavilyProxyManager（需同时设置 `TAVILY_PROXY_BASE_URL` 与 `TAVILY_PROXY_AUTH_KEY`）。
 - **Jinja2 管理界面** — 仪表盘、Token 管理、推送配置、调度管理、运行历史、推送日志。单一共享认证密钥（`WEB_AUTH_KEY`）：界面用会话 cookie 登录，API 用 Bearer Token。
 
 **环境变量**（`web/config.py`）：
@@ -829,6 +830,8 @@ sequenceDiagram
 | `ENCRYPTION_KEY` | 自动生成 | Token 加密主密钥（务必备份！） |
 | `GPT_LOAD_BASE_URL` | `http://192.168.1.18:43001` | gpt-load 实例地址 |
 | `GPT_LOAD_AUTH_KEY` | 空 | gpt-load 管理凭据 |
+| `TAVILY_PROXY_BASE_URL` | 空 | TavilyProxyManager 实例地址 |
+| `TAVILY_PROXY_AUTH_KEY` | 空 | 该 TavilyProxyManager 实例的 Master Key |
 | `HARVESTER_WORKSPACE` | `./data` | 工作目录（provider 结果） |
 | `HARVESTER_DB_PATH` | `<workspace>/harvester.db` | SQLite 数据库路径 |
 
