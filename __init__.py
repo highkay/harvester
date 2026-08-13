@@ -88,7 +88,6 @@ from storage import (
     AtomicFileWriter,
     ResultManager,
     SnapshotManager,
-    TaskRecoveryStrategy,
 )
 
 # Utilities and tools
@@ -141,7 +140,6 @@ __all__ = [
     "create_worker_manager",
     # Storage
     "ResultManager",
-    "TaskRecoveryStrategy",
     "AtomicFileWriter",
     "SnapshotManager",
     # State management
