@@ -314,7 +314,40 @@ class TestJobCallbackInvokesRunner(unittest.TestCase):
                     await _run_provider_job("deepseek")
 
                     mock_get_runner.assert_called_once()
-                    mock_runner.run_scan.assert_called_once_with("deepseek")
+                    mock_runner.run_scan.assert_called_once_with("deepseek", None)
+            finally:
+                web.scheduler._scheduler_service = None
+
+        _run_async(_scenario())
+
+    def test_job_callback_passes_config_file_to_runner(self) -> None:
+        """Given a mocked runner,
+        When _run_provider_job fires with an explicit config_file,
+        Then run_scan is called with (provider_name, config_file).
+        """
+        async def _scenario() -> None:
+            mock_runner = MagicMock()
+            mock_runner.run_scan = AsyncMock()
+
+            from web.scheduler import SchedulerService
+
+            mock_scheduler = MagicMock()
+            svc = SchedulerService(scheduler=mock_scheduler, db_path=":memory:")
+
+            import web.scheduler
+            web.scheduler._scheduler_service = svc
+
+            try:
+                with patch(
+                    "web.scheduler._lazy_get_runner", return_value=mock_runner
+                ):
+                    from web.scheduler import _run_provider_job
+
+                    await _run_provider_job("mimo-cn", "examples/config-mimo.yaml")
+
+                    mock_runner.run_scan.assert_called_once_with(
+                        "mimo-cn", "examples/config-mimo.yaml"
+                    )
             finally:
                 web.scheduler._scheduler_service = None
 
@@ -340,6 +373,102 @@ class TestJobCallbackInvokesRunner(unittest.TestCase):
                     await _run_provider_job("deepseek")
             finally:
                 web.scheduler._scheduler_service = None
+
+        _run_async(_scenario())
+
+
+# ---------------------------------------------------------------------------
+# Test 6: config_file threading through scheduler jobs
+# ---------------------------------------------------------------------------
+
+
+class TestConfigFileThreading(unittest.TestCase):
+    """Given schedule rows carrying config_file,
+    When update_schedule / trigger_manual run,
+    Then config_file is threaded into the job args and the job call.
+    """
+
+    _SCHEDULE_TABLE_DDL = (
+        "CREATE TABLE IF NOT EXISTS schedule_config ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "provider_name TEXT NOT NULL UNIQUE, "
+        "cron_expression TEXT NOT NULL DEFAULT '0 3 * * *', "
+        "enabled INTEGER NOT NULL DEFAULT 1, "
+        "config_file TEXT NOT NULL, "
+        "created_at TEXT NOT NULL DEFAULT (datetime('now')), "
+        "updated_at TEXT NOT NULL DEFAULT (datetime('now'))"
+        ")"
+    )
+
+    def test_update_schedule_passes_config_file_in_job_args(self) -> None:
+        """update_schedule must add the job with args=(provider, config_file)."""
+        async def _scenario() -> None:
+            from web.scheduler import SchedulerService
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                db_path = f"{tmpdir}/test.db"
+                conn = sqlite3.connect(db_path)
+                conn.execute(self._SCHEDULE_TABLE_DDL)
+                conn.commit()
+                conn.close()
+
+                mock_scheduler = MagicMock()
+                mock_scheduler.get_job.return_value = None
+                svc = SchedulerService(scheduler=mock_scheduler, db_path=db_path)
+
+                await svc.update_schedule(
+                    provider_name="mimo-cn",
+                    cron_expression="0 3 * * *",
+                    enabled=True,
+                    config_file="examples/config-mimo.yaml",
+                )
+
+                mock_scheduler.add_job.assert_called_once()
+                self.assertEqual(
+                    mock_scheduler.add_job.call_args.kwargs["args"],
+                    ("mimo-cn", "examples/config-mimo.yaml"),
+                )
+
+        _run_async(_scenario())
+
+    def test_trigger_manual_passes_config_file_to_job(self) -> None:
+        """trigger_manual must read config_file from schedule_config and pass
+        it to _run_provider_job."""
+        async def _scenario() -> None:
+            from web.scheduler import SchedulerService
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                db_path = f"{tmpdir}/test.db"
+                conn = sqlite3.connect(db_path)
+                conn.execute(self._SCHEDULE_TABLE_DDL)
+                conn.execute(
+                    "INSERT INTO schedule_config "
+                    "(provider_name, cron_expression, enabled, config_file) "
+                    "VALUES (?, ?, ?, ?)",
+                    ("deepseek", "0 3 * * *", 1, "examples/config-deepseek.yaml"),
+                )
+                conn.commit()
+                conn.close()
+
+                mock_scheduler = MagicMock()
+                mock_scheduler.get_job.return_value = MagicMock()
+                svc = SchedulerService(scheduler=mock_scheduler, db_path=db_path)
+
+                # trigger_manual fires asyncio.create_task — patch create_task
+                # to close the created coroutine while patching the job itself
+                # with AsyncMock so no real background scan starts.
+                def _close_coro(coro: object) -> None:
+                    if hasattr(coro, "close"):
+                        coro.close()
+
+                with patch("asyncio.create_task", side_effect=_close_coro), patch(
+                    "web.scheduler._run_provider_job", new_callable=AsyncMock
+                ) as mock_job:
+                    result = await svc.trigger_manual("deepseek")
+                    self.assertEqual(result, "triggered")
+                    mock_job.assert_called_once_with(
+                        "deepseek", "examples/config-deepseek.yaml"
+                    )
 
         _run_async(_scenario())
 

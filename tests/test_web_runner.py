@@ -259,7 +259,9 @@ class TestReEntrancyPrevention(unittest.TestCase):
             runner._cancel_events = {}
 
             # Mock _execute to sleep (simulate long-running scan)
-            def slow_execute(provider_name: str, run_id: str) -> None:
+            def slow_execute(
+                provider_name: str, run_id: str, config_file: str | None = None
+            ) -> None:
                 time.sleep(0.5)
 
             runner._execute = slow_execute  # type: ignore[method-assign]
@@ -325,7 +327,9 @@ class TestRunRecordsLifecycle(unittest.TestCase):
             runner._cancel_events = {}
 
             # Override _execute to simulate successful completion
-            def success_execute(provider_name: str, run_id: str) -> None:
+            def success_execute(
+                provider_name: str, run_id: str, config_file: str | None = None
+            ) -> None:
                 # Simulate successful scan
                 conn_local = sqlite3.connect(db_path)
                 try:
@@ -394,7 +398,9 @@ class TestRunRecordsLifecycle(unittest.TestCase):
 
             import yaml as _yaml
 
-            def fake_execute(provider_name: str, run_id: str) -> None:
+            def fake_execute(
+                provider_name: str, run_id: str, config_file: str | None = None
+            ) -> None:
                 # emulate _generate_temp_yaml + app.run + _update_run_sync
                 # (run_scan already inserted the record — just mark completed)
                 tmp = workdir / "runtime"
@@ -440,6 +446,103 @@ class TestRunRecordsLifecycle(unittest.TestCase):
                     self.assertEqual(args[1], run_id)
 
                 _run_async(run_test())
+
+
+class TestConfigFileResolution(unittest.TestCase):
+    """Given a PipelineRunner with _init_yaml_source_dir pointing at an
+    examples dir, When _resolve_source_yaml is given an explicit config_file,
+    Then it resolves against the parent of the examples dir; When called with
+    only a provider name, Then it keeps the config-{provider}.yaml convention.
+    """
+
+    def test_resolve_source_yaml_with_explicit_config_file(self) -> None:
+        from web.runner import PipelineRunner
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workdir = Path(tmpdir)
+            runner = PipelineRunner.__new__(PipelineRunner)
+            runner._init_yaml_source_dir = str(workdir / "examples")
+
+            resolved = runner._resolve_source_yaml(
+                "mimo-cn", "examples/config-mimo.yaml"
+            )
+            self.assertEqual(
+                resolved, workdir / "examples" / "config-mimo.yaml"
+            )
+
+    def test_resolve_source_yaml_defaults_to_provider_convention(self) -> None:
+        from web.runner import PipelineRunner
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workdir = Path(tmpdir)
+            runner = PipelineRunner.__new__(PipelineRunner)
+            runner._init_yaml_source_dir = str(workdir / "examples")
+
+            resolved = runner._resolve_source_yaml("deepseek")
+            self.assertEqual(
+                resolved, workdir / "examples" / "config-deepseek.yaml"
+            )
+
+    def test_run_scan_with_config_file_inserts_record(self) -> None:
+        """Given a real examples/config-mimo.yaml under workdir/examples,
+        When run_scan is called with config_file='examples/config-mimo.yaml',
+        Then it does not raise and inserts a run record."""
+        from web.runner import PipelineRunner
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workdir = Path(tmpdir)
+            examples_dir = workdir / "examples"
+            examples_dir.mkdir()
+            (examples_dir / "config-mimo.yaml").write_text(
+                _SAMPLE_YAML, encoding="utf-8"
+            )
+
+            db_path = str(workdir / "harvester.db")
+            conn = sqlite3.connect(db_path)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS run_records (
+                    id TEXT PRIMARY KEY,
+                    provider_name TEXT NOT NULL,
+                    config_file TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN ('running','completed','failed','cancelled')),
+                    started_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    finished_at TEXT,
+                    duration_seconds REAL,
+                    valid_keys_found INTEGER DEFAULT 0,
+                    total_keys_checked INTEGER DEFAULT 0,
+                    error_message TEXT,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )"""
+            )
+            conn.commit()
+            conn.close()
+
+            runner = PipelineRunner.__new__(PipelineRunner)
+            runner._workspace = str(workdir)
+            runner._init_yaml_source_dir = str(examples_dir)
+            runner._db_path = db_path
+            runner._running = {}
+            runner._locks = {}
+            runner._cancel_events = {}
+
+            def noop_execute(
+                provider_name: str, run_id: str, config_file: str | None = None
+            ) -> None:
+                runner._running.pop(provider_name, None)
+
+            runner._execute = noop_execute  # type: ignore[method-assign]
+
+            async def run_test() -> None:
+                run_id = await runner.run_scan(
+                    "mimo-cn", "examples/config-mimo.yaml"
+                )
+                runs = await runner.list_runs()
+                self.assertEqual(len(runs), 1)
+                self.assertEqual(runs[0]["id"], run_id)
+                self.assertEqual(runs[0]["provider_name"], "mimo-cn")
+
+            _run_async(run_test())
 
 
 class TestTokenReadingFromDb(unittest.TestCase):

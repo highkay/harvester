@@ -55,8 +55,14 @@ def _lazy_get_runner() -> Any:
 # ---------------------------------------------------------------------------
 
 
-async def _run_provider_job(provider_name: str) -> None:
+async def _run_provider_job(
+    provider_name: str, config_file: str | None = None
+) -> None:
     """Execute a scheduled scan for *provider_name*.
+
+    *config_file* is the source config YAML from ``schedule_config`` (None
+    when unknown, e.g. for providers whose task name matches the default
+    ``config-{provider_name}.yaml`` convention).
 
     Uses a re-entrancy guard via ``SchedulerService._running`` to skip if the
     same provider is already executing via the scheduler or a manual trigger.
@@ -75,7 +81,7 @@ async def _run_provider_job(provider_name: str) -> None:
     svc._running.add(provider_name)
     try:
         runner = _lazy_get_runner()
-        await runner.run_scan(provider_name)
+        await runner.run_scan(provider_name, config_file)
     except ImportError:
         logger.error(
             f"PipelineRunner not available (web.runner module missing) — "
@@ -217,7 +223,7 @@ class SchedulerService:
                 _run_provider_job,
                 CronTrigger.from_crontab(cron_expression),
                 id=job_id,
-                args=(provider_name,),
+                args=(provider_name, config_file),
                 replace_existing=True,
             )
         else:
@@ -273,25 +279,28 @@ class SchedulerService:
                 detail=f"Provider {provider_name} is already running",
             )
 
-        # Verify the provider exists in schedule_config
+        # Verify the provider exists in schedule_config (and read its
+        # source config YAML so the manual run resolves the right file)
         db = await get_db(self._db_path)
         try:
             cursor = await db.execute(
-                "SELECT 1 FROM schedule_config WHERE provider_name = ?",
+                "SELECT config_file FROM schedule_config WHERE provider_name = ?",
                 (provider_name,),
             )
-            exists = await cursor.fetchone()
+            row = await cursor.fetchone()
         finally:
             await db.close()
 
-        if exists is None:
+        if row is None:
             raise HTTPException(
                 status_code=404,
                 detail=f"Schedule not found for provider: {provider_name}",
             )
 
+        config_file: str | None = row["config_file"]
+
         # Fire and forget — the re-entrancy guard in _run_provider_job handles it
-        asyncio.create_task(_run_provider_job(provider_name))
+        asyncio.create_task(_run_provider_job(provider_name, config_file))
         return "triggered"
 
     def is_running(self, provider_name: str) -> bool:
@@ -383,7 +392,7 @@ async def init_scheduler(settings: object) -> SchedulerService:
                 _run_provider_job,
                 CronTrigger.from_crontab(cron),
                 id=f"scan-{provider}",
-                args=(provider,),
+                args=(provider, row["config_file"]),
                 replace_existing=True,
             )
             logger.info(f"Scheduled {provider} with cron '{cron}'")

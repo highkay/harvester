@@ -93,8 +93,14 @@ class PipelineRunner:
     # Public API (async — called from FastAPI routes)
     # ------------------------------------------------------------------
 
-    async def run_scan(self, provider_name: str) -> str:
+    async def run_scan(
+        self, provider_name: str, config_file: str | None = None
+    ) -> str:
         """Start a scan for *provider_name* in a background thread.
+
+        *config_file* optionally names the source config YAML (from
+        ``schedule_config``); when None, the ``config-{provider_name}.yaml``
+        convention is used.
 
         Returns the generated *run_id* (UUID4 string).
 
@@ -103,7 +109,7 @@ class PipelineRunner:
             HTTPException(409): provider is already running.
         """
         # --- Validate provider has a config template ---
-        source_yaml = self._resolve_source_yaml(provider_name)
+        source_yaml = self._resolve_source_yaml(provider_name, config_file)
         if not source_yaml.exists():
             raise ValueError(
                 f"No example config for provider '{provider_name}': "
@@ -138,7 +144,7 @@ class PipelineRunner:
         # --- Submit to background thread ---
         t = threading.Thread(
             target=self._execute,
-            args=(provider_name, run_id),
+            args=(provider_name, run_id, config_file),
             daemon=True,
             name=f"harvester-{provider_name}-{run_id[:8]}",
         )
@@ -219,7 +225,12 @@ class PipelineRunner:
     # Background execution (runs in thread — synchronous)
     # ------------------------------------------------------------------
 
-    def _execute(self, provider_name: str, run_id: str) -> None:
+    def _execute(
+        self,
+        provider_name: str,
+        run_id: str,
+        config_file: str | None = None,
+    ) -> None:
         """Run the full HarvesterApp scan in this thread.
 
         This method is **blocking** and must run in a background thread.
@@ -239,7 +250,7 @@ class PipelineRunner:
 
             # 2. Generate temporary YAML with injected tokens
             temp_yaml_path = self._generate_temp_yaml(
-                provider_name, run_id, tokens
+                provider_name, run_id, tokens, config_file=config_file
             )
             logger.info(
                 f"Temp YAML created: {temp_yaml_path} "
@@ -395,13 +406,27 @@ class PipelineRunner:
             self._locks[provider_name] = threading.Lock()
         return self._locks[provider_name]
 
-    def _resolve_source_yaml(self, provider_name: str) -> Path:
-        """Return the path to the source config YAML for *provider_name*."""
+    def _resolve_source_yaml(
+        self, provider_name: str, config_file: str | None = None
+    ) -> Path:
+        """Return the path to the source config YAML for *provider_name*.
+
+        When *config_file* is given (e.g. from ``schedule_config``), it is
+        resolved relative to the repo root (the parent of the examples dir);
+        absolute paths are used as-is.  Otherwise the
+        ``config-{provider_name}.yaml`` convention under the examples dir
+        is used.
+        """
         source_dir = (
             Path(self._init_yaml_source_dir)
             if self._init_yaml_source_dir
             else self._yaml_source_dir
         )
+        if config_file:
+            p = Path(config_file)
+            if not p.is_absolute():
+                return source_dir.parent / p
+            return p
         return source_dir / f"config-{provider_name}.yaml"
 
     def _temp_yaml_path(self, provider_name: str, run_id: str) -> Path:
@@ -412,18 +437,23 @@ class PipelineRunner:
         return runtime_dir / f"config-{provider_name}-{run_id}.yaml"
 
     def _generate_temp_yaml(
-        self, provider_name: str, run_id: str, tokens: list[str]
+        self,
+        provider_name: str,
+        run_id: str,
+        tokens: list[str],
+        config_file: str | None = None,
     ) -> Path:
         """Copy source YAML → temp YAML, injecting real GitHub tokens.
 
-        - Reads ``examples/config-{provider_name}.yaml``
+        - Reads ``examples/config-{provider_name}.yaml`` (or *config_file*
+          when given)
         - Replaces ``global.github_credentials.tokens`` with *tokens*
         - Sets ``global.github_credentials.sessions`` to empty list
         - Writes to ``{workspace}/runtime/config-{provider_name}-{run_id}.yaml``
 
         Returns the path to the generated temp YAML.
         """
-        source = self._resolve_source_yaml(provider_name)
+        source = self._resolve_source_yaml(provider_name, config_file)
         if not source.exists():
             raise ValueError(
                 f"Source config not found: {source}"
