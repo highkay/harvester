@@ -263,7 +263,7 @@ class VertexProvider(AIBaseProvider):
             params=params,
             retries=self._get_retries(default=2),
             timeout=self._get_timeout(default=10),
-            use_proxy=False,
+            use_proxy=self._get_use_proxy(),
         )
         return self._judge(code=code, message=message)
 
@@ -302,7 +302,7 @@ class VertexProvider(AIBaseProvider):
                 if not headers:
                     continue
 
-                content = http_get(url=url, headers=headers, interval=1, use_proxy=False)
+                content = http_get(url=url, headers=headers, interval=1, use_proxy=self._get_use_proxy())
                 if not content:
                     continue
 
@@ -340,7 +340,7 @@ class VertexProvider(AIBaseProvider):
                 url = f"{base_url}/v1/projects/{project}/locations/{location}/models"
                 headers = self._get_headers(token=token)
                 if headers:
-                    content = http_get(url=url, headers=headers, interval=1, use_proxy=False)
+                    content = http_get(url=url, headers=headers, interval=1, use_proxy=self._get_use_proxy())
                     if content:
                         data = json.loads(content)
                         models = data.get("models", [])

@@ -81,7 +81,7 @@ class TavilyProvider(AIBaseProvider):
         code, message = 0, ""
         for attempt in range(max(1, retries)):
             try:
-                with request("GET", url, headers=headers, timeout=timeout, use_proxy=False) as response:
+                with request("GET", url, headers=headers, timeout=timeout, use_proxy=self._get_use_proxy()) as response:
                     return self._judge_usage(response.status_code, response.text)
             except requests.exceptions.HTTPError as e:
                 code = http_error_status(e)
@@ -176,7 +176,7 @@ class TavilyProvider(AIBaseProvider):
                 retries=self._get_retries(default=2),
                 interval=1,
                 timeout=self._get_timeout(default=10),
-                use_proxy=False,
+                use_proxy=self._get_use_proxy(),
             )
         except Exception as e:
             logger.debug(f"Inspect Tavily usage failed: {e}")

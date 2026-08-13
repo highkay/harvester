@@ -84,6 +84,7 @@ tasks:
       api_version: ""
       timeout: 30
       retries: 3
+      use_proxy: false  # domestic endpoint — connect directly
     patterns:
       key_pattern: "[0-9a-f]{32}\\.[0-9a-f]{32}"
       address_pattern: ""

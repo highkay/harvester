@@ -86,7 +86,7 @@ class GooeyAIProvider(AIBaseProvider):
             params=params,
             retries=self._get_retries(default=2),
             timeout=self._get_timeout(default=10),
-            use_proxy=False,
+            use_proxy=self._get_use_proxy(),
         )
         return self._judge(code=code, message=message)
 

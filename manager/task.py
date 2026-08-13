@@ -130,6 +130,8 @@ class ProviderFactory:
         if type(api_config.retries) is int and api_config.retries > 0:
             kwargs["retries"] = api_config.retries
 
+        kwargs["use_proxy"] = bool(api_config.use_proxy)
+
         return ProviderRegistry.create(provider_type, conditions=conditions, **kwargs)
 
 

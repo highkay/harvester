@@ -214,7 +214,7 @@ class BedrockProvider(AIBaseProvider):
 
         try:
             if method == "GET":
-                response = http_get(url=url, headers=headers, retries=self._get_retries(default=2), timeout=timeout, use_proxy=False)
+                response = http_get(url=url, headers=headers, retries=self._get_retries(default=2), timeout=timeout, use_proxy=self._get_use_proxy())
                 if response:
                     return 200, response
                 else:
@@ -227,7 +227,7 @@ class BedrockProvider(AIBaseProvider):
                         data=payload.encode("utf-8"),
                         headers=headers,
                         timeout=timeout,
-                        use_proxy=False,
+                        use_proxy=self._get_use_proxy(),
                     ) as response:
                         return response.status_code, response.text
                 except requests.exceptions.HTTPError as e:

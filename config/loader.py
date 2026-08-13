@@ -384,6 +384,7 @@ class ConfigLoader:
             api_version=api_data.get("api_version", ""),
             timeout=api_data.get("timeout", 30),
             retries=api_data.get("retries", 3),
+            use_proxy=api_data.get("use_proxy", True),
         )
 
         # Parse patterns

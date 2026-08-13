@@ -88,7 +88,7 @@ class AnthropicProvider(AIBaseProvider):
 
             while attempt < retries:
                 try:
-                    with request("GET", url, headers=headers, timeout=timeout, use_proxy=False) as response:
+                    with request("GET", url, headers=headers, timeout=timeout, use_proxy=self._get_use_proxy()) as response:
                         content = response.text
                         success = True
                         break
@@ -176,7 +176,7 @@ class AnthropicProvider(AIBaseProvider):
                 params=params,
                 interval=1,
                 timeout=self._get_timeout(default=10),
-                use_proxy=False,
+                use_proxy=self._get_use_proxy(),
             )
             if not content:
                 break

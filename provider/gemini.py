@@ -110,7 +110,7 @@ class GeminiProvider(AIBaseProvider):
                     headers=self._get_headers(token=token),
                     params={"pageSize": 1},
                     timeout=timeout,
-                    use_proxy=False,
+                    use_proxy=self._get_use_proxy(),
                 ) as response:
                     return self._judge_models(response.status_code, response.text)
             except requests.exceptions.HTTPError as e:
@@ -163,7 +163,7 @@ class GeminiProvider(AIBaseProvider):
 
         base_url = trim(address) or self._base_url
         url = urllib.parse.urljoin(base_url, self.model_path)
-        content = http_get(url=url, headers=self._get_headers(token=token), interval=1, use_proxy=False)
+        content = http_get(url=url, headers=self._get_headers(token=token), interval=1, use_proxy=self._get_use_proxy())
         if not content:
             return []
 

@@ -210,6 +210,15 @@ class AIBaseProvider(IProvider):
     def _get_timeout(self, default: int) -> int:
         return self.extras.get("timeout", max(default, 0))
 
+    def _get_use_proxy(self, default: bool = True) -> bool:
+        """Whether provider validation requests should route through the outbound proxy.
+
+        Read from the task api config (extras).  Domestic endpoints set
+        use_proxy: false to connect directly; international endpoints keep the
+        default (proxy).
+        """
+        return bool(self.extras.get("use_proxy", default))
+
     def check(self, token: str, address: str = "", endpoint: str = "", model: str = "") -> CheckResult:
         """Check if token is valid."""
         url, regex = trim(address), r"^https?://([\w\-_]+\.[\w\-_]+)+"
@@ -232,7 +241,7 @@ class AIBaseProvider(IProvider):
             model=model,
             retries=self._get_retries(default=2),
             timeout=self._get_timeout(default=10),
-            use_proxy=False,
+            use_proxy=self._get_use_proxy(),
         )
         return self._judge(code=code, message=message)
 

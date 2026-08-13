@@ -87,6 +87,7 @@ tasks:
       api_version: ""
       timeout: 30
       retries: 3
+      use_proxy: false  # domestic endpoint — connect directly
     patterns:
       key_pattern: "sk-[0-9A-Za-z_-]{20,}"
       address_pattern: ""
@@ -138,6 +139,7 @@ tasks:
       api_version: ""
       timeout: 30
       retries: 3
+      use_proxy: true  # international endpoint — route through proxy
     patterns:
       key_pattern: "sk-[0-9A-Za-z_-]{20,}"
       address_pattern: ""

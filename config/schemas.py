@@ -381,6 +381,7 @@ class ApiConfig:
     api_version: str = ""
     timeout: int = 30
     retries: int = 3
+    use_proxy: bool = True
 
 
 @dataclass
