@@ -178,6 +178,21 @@ class TestKimiProviderCheck(unittest.TestCase):
 
         self.assertTrue(result.available)
 
+    def test_check_requests_bypass_proxy(self):
+        # Provider validation must never be routed through the GitHub SOCKS5
+        # proxy: every outbound request carries use_proxy=False.
+        with mock.patch(
+            "provider.kimi.request",
+            side_effect=[FakeResponse(200, MODELS_RESPONSE), FakeResponse(200, COMPLETION_OK)],
+        ) as req_mock:
+            result = self.provider.check(token="sk-withbalance")
+
+        self.assertTrue(result.available)
+        calls = req_mock.call_args_list
+        self.assertEqual(len(calls), 2)
+        for call in calls:
+            self.assertIs(call.kwargs.get("use_proxy"), False)
+
 
 class TestKimiProviderInspect(unittest.TestCase):
     def setUp(self):

@@ -139,7 +139,7 @@ class OpenAILikeProvider(AIBaseProvider):
         if not url:
             return []
 
-        content = http_get(url=url, headers=headers, interval=1)
+        content = http_get(url=url, headers=headers, interval=1, use_proxy=False)
         if not content:
             return []
 

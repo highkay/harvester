@@ -48,6 +48,11 @@ def _new_session(proxy: str = "") -> requests.Session:
     return session
 
 
+# Direct (never proxied) session for provider API validation.
+# Never mutated by set_proxy(); the proxy is for GitHub fetches only.
+_DIRECT_SESSION = _new_session()
+
+
 def _remount_edge_adapter() -> None:
     """Re-attach edge routing after session recreation."""
     try:
@@ -231,9 +236,10 @@ def should_skip_known_links() -> bool:
     return bool(_SKIP_KNOWN_LINKS and _LINK_INDEX is not None and _LINK_INDEX.enabled)
 
 
-def request(method: str, url: str, timeout: float = 10, **kwargs: Any) -> requests.Response:
+def request(method: str, url: str, timeout: float = 10, use_proxy: bool = True, **kwargs: Any) -> requests.Response:
     """Send a request through the configured global session."""
-    response = _HTTP_SESSION.request(method=method, url=url, timeout=max(1, timeout), **kwargs)
+    session = _HTTP_SESSION if use_proxy else _DIRECT_SESSION
+    response = session.request(method=method, url=url, timeout=max(1, timeout), **kwargs)
     response.raise_for_status()
     return response
 
@@ -771,6 +777,7 @@ def http_get(
     retries: int = 3,
     interval: float = 1.0,
     timeout: float = 10,
+    use_proxy: bool = True,
 ) -> str:
     """HTTP GET request with configurable retry handling
 
@@ -815,7 +822,7 @@ def http_get(
             encoded_url += f"{separator}{data}"
 
         with managed_network(
-            request("GET", encoded_url, headers=headers, timeout=timeout), "http_connection"
+            request("GET", encoded_url, headers=headers, timeout=timeout, use_proxy=use_proxy), "http_connection"
         ) as response:
             # Handle response
             content = response.content
@@ -870,7 +877,13 @@ def http_get(
 
 
 def chat(
-    url: str, headers: Dict, model: str = "", params: Optional[Dict] = None, retries: int = 2, timeout: int = 10
+    url: str,
+    headers: Dict,
+    model: str = "",
+    params: Optional[Dict] = None,
+    retries: int = 2,
+    timeout: int = 10,
+    use_proxy: bool = True,
 ) -> Tuple[int, str]:
     """Make chat API request with retry logic."""
 
@@ -912,7 +925,7 @@ def chat(
 
     while attempt < retries:
         try:
-            with request("POST", url, data=payload, headers=headers, timeout=timeout) as response:
+            with request("POST", url, data=payload, headers=headers, timeout=timeout, use_proxy=use_proxy) as response:
                 code = response.status_code
                 message = response.text
                 break

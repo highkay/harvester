@@ -90,7 +90,7 @@ class KimiProvider(OpenAILikeProvider):
         code, message = 0, ""
         for attempt in range(max(1, retries)):
             try:
-                with request("POST", url, data=payload, headers=headers, timeout=timeout) as response:
+                with request("POST", url, data=payload, headers=headers, timeout=timeout, use_proxy=False) as response:
                     code = response.status_code
                     message = response.text
                     break
@@ -134,7 +134,7 @@ class KimiProvider(OpenAILikeProvider):
         code, message = 0, ""
         for attempt in range(max(1, retries)):
             try:
-                with request("GET", url, headers=headers, timeout=timeout) as response:
+                with request("GET", url, headers=headers, timeout=timeout, use_proxy=False) as response:
                     return self._judge_models(response.status_code, response.text)
             except requests.exceptions.HTTPError as e:
                 code = http_error_status(e)

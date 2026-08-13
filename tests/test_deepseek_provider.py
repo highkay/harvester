@@ -200,6 +200,20 @@ class TestDeepSeekProviderCheck(unittest.TestCase):
         self.assertEqual(payload["model"], "deepseek-v4-flash")
         self.assertIn("messages", payload)
 
+    def test_check_requests_bypass_proxy(self):
+        # Provider validation must never be routed through the GitHub SOCKS5
+        # proxy: every outbound request carries use_proxy=False.
+        with _patch_request_sequence(
+            FakeResponse(200, MODELS_RESPONSE),
+            FakeResponse(200, COMPLETION_OK),
+        ) as req_mock:
+            self.provider.check(token="sk-abcdefghijklmnopqrstuvwxyz123456")
+
+        calls = req_mock.call_args_list
+        self.assertEqual(len(calls), 2)
+        for call in calls:
+            self.assertIs(call.kwargs.get("use_proxy"), False)
+
 
 class TestDeepSeekProviderInspect(unittest.TestCase):
     def setUp(self):

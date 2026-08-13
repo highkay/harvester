@@ -232,6 +232,7 @@ class AIBaseProvider(IProvider):
             model=model,
             retries=self._get_retries(default=2),
             timeout=self._get_timeout(default=10),
+            use_proxy=False,
         )
         return self._judge(code=code, message=message)
 

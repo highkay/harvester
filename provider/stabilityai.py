@@ -100,6 +100,7 @@ class StabilityAIProvider(AIBaseProvider):
                         },
                         files=multipart_files,
                         timeout=self._get_timeout(default=15),
+                        use_proxy=False,
                     )
                     code = response.status_code
                     message = response.text

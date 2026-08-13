@@ -62,7 +62,7 @@ class OpenRouterProvider(OpenAILikeProvider):
         code, message = 0, ""
         for attempt in range(max(1, retries)):
             try:
-                with request("GET", url, headers=headers, timeout=timeout) as response:
+                with request("GET", url, headers=headers, timeout=timeout, use_proxy=False) as response:
                     return self._judge_key_info(response.status_code, response.text)
             except requests.exceptions.HTTPError as e:
                 code = http_error_status(e)
