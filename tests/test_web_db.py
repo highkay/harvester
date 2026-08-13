@@ -9,7 +9,7 @@ import sqlite3
 import tempfile
 import unittest
 
-from web.db import get_db, init_db
+from web.db import get_db, init_db, reconcile_running_runs
 
 
 def _run_async(coro):
@@ -168,3 +168,75 @@ class TestDatabaseInsertRead(unittest.TestCase):
                 await db.close()
 
             _run_async(_scenario())
+
+
+class TestReconcileRunningRuns(unittest.TestCase):
+    """Given an initialized database containing run_records,
+    When reconcile_running_runs is called,
+    Then 'running' rows are marked failed and other rows are untouched.
+    """
+
+    def test_reconcile_marks_running_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = f"{tmpdir}/test.db"
+
+            async def _scenario() -> int:
+                await init_db(db_path)
+                db = await get_db(db_path)
+                await db.execute(
+                    "INSERT INTO run_records (id, provider_name, config_file, status) "
+                    "VALUES (?, ?, ?, ?)",
+                    ("a", "deepseek", "x.yaml", "running"),
+                )
+                await db.execute(
+                    "INSERT INTO run_records (id, provider_name, config_file, status) "
+                    "VALUES (?, ?, ?, ?)",
+                    ("b", "deepseek", "x.yaml", "completed"),
+                )
+                await db.commit()
+                await db.close()
+
+                return await reconcile_running_runs(db_path)
+
+            reconciled = _run_async(_scenario())
+            self.assertEqual(reconciled, 1)
+
+            # Independent verification via synchronous sqlite3
+            conn = sqlite3.connect(db_path)
+            row_a = conn.execute(
+                "SELECT status, finished_at, error_message "
+                "FROM run_records WHERE id = 'a'"
+            ).fetchone()
+            row_b = conn.execute(
+                "SELECT status, finished_at FROM run_records WHERE id = 'b'"
+            ).fetchone()
+            conn.close()
+
+            assert row_a is not None
+            self.assertEqual(row_a[0], "failed")
+            self.assertIsNotNone(row_a[1])
+            self.assertEqual(row_a[2], "interrupted by service restart")
+
+            assert row_b is not None
+            self.assertEqual(row_b[0], "completed")
+            self.assertIsNone(row_b[1])
+
+    def test_reconcile_no_running_returns_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = f"{tmpdir}/test.db"
+
+            async def _scenario() -> int:
+                await init_db(db_path)
+                db = await get_db(db_path)
+                for run_id, status in (("a", "completed"), ("b", "failed")):
+                    await db.execute(
+                        "INSERT INTO run_records "
+                        "(id, provider_name, config_file, status) VALUES (?, ?, ?, ?)",
+                        (run_id, "deepseek", "x.yaml", status),
+                    )
+                await db.commit()
+                await db.close()
+
+                return await reconcile_running_runs(db_path)
+
+            self.assertEqual(_run_async(_scenario()), 0)

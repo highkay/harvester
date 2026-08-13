@@ -65,6 +65,14 @@ async def _lifespan(app: FastAPI):  # type: ignore[type-arg]
     else:
         logger.info("Skipping init_db — module not installed")
 
+    try:
+        from web.db import reconcile_running_runs  # type: ignore[import-untyped]
+        reconciled = await reconcile_running_runs(settings.db_path)
+        if reconciled:
+            logger.info(f"Reconciled {reconciled} interrupted run(s) as failed")
+    except Exception as exc:
+        logger.warning(f"run reconciliation skipped: {exc}")
+
     if init_scheduler is not None:
         await init_scheduler(settings)
     else:

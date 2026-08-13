@@ -146,6 +146,23 @@ async def init_db(db_path: str | None = None) -> None:
         await db.close()
 
 
+async def reconcile_running_runs(db_path: str | None = None) -> int:
+    """Mark rows left in 'running' by a dead process as failed. Returns rowcount."""
+    path = db_path if db_path is not None else resolve_db_path()
+    db = await get_db(path)
+    try:
+        cursor = await db.execute(
+            "UPDATE run_records SET status='failed', "
+            "finished_at=datetime('now'), "
+            "error_message='interrupted by service restart' "
+            "WHERE status='running'"
+        )
+        await db.commit()
+        return cursor.rowcount
+    finally:
+        await db.close()
+
+
 # ---------------------------------------------------------------------------
 # Lightweight migrations for pre-existing databases
 # ---------------------------------------------------------------------------
