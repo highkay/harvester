@@ -396,6 +396,36 @@ class PipelineRunner:
                 f"run_id={run_id} error={exc}"
             )
 
+        # Tavily push — symmetric to the gpt-load block above. Only fires for
+        # tavily scans; env gating lives inside TavilyPushService (it no-ops
+        # when TAVILY_PROXY_BASE_URL / TAVILY_PROXY_AUTH_KEY are unset).
+        try:
+            from web.tavily_push import get_tavily_push_service  # type: ignore[import-untyped,unused-ignore]
+
+            if provider_name == "tavily":
+                tavily_push_service = get_tavily_push_service()
+                # Run push in a new thread to avoid blocking the completion callback
+                t = threading.Thread(
+                    target=tavily_push_service.push_valid_keys,
+                    args=(provider_name, run_id),
+                    daemon=True,
+                )
+                t.start()
+                logger.info(
+                    f"Tavily push triggered: "
+                    f"provider={provider_name} run_id={run_id}"
+                )
+        except ImportError:
+            logger.info(
+                f"Tavily push service not available: "
+                f"provider={provider_name} run_id={run_id}"
+            )
+        except Exception as exc:
+            logger.error(
+                f"Tavily push hook error: provider={provider_name} "
+                f"run_id={run_id} error={exc}"
+            )
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
