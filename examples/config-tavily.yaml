@@ -1,9 +1,9 @@
 # Tavily-only scan configuration
 # Wide GitHub collection + API validation/inspect profile.
-# Results are written to ./data-tavily/providers/tavily/*.txt
+# Results are written to ./data/providers/tavily/*.txt
 
 global:
-  workspace: "./data-tavily"
+  workspace: "./data"
   max_retries_requeued: 3
   proxy: ""
   # ohmygh/gx-inspired transport: edge IP pool, cache, link index, text-match
