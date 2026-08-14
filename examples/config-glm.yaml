@@ -67,7 +67,7 @@ tasks:
     provider_type: glm
     use_api: true
     max_pages: 1000
-    search_types: [code, issues, commits]
+    search_types: [code]
     stages:
       search: true
       gather: true
@@ -121,7 +121,7 @@ tasks:
     provider_type: glm
     use_api: true
     max_pages: 1000
-    search_types: [code, issues, commits]
+    search_types: [code]
     stages:
       search: true
       gather: true
