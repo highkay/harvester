@@ -53,13 +53,19 @@ class _SyncThread:
 _REAL_IMPORT = builtins.__import__
 
 
-def _import_failing_bootstrap(name: str, *args: object, **kwargs: object):
+def _import_failing_bootstrap(
+    name: str,
+    globals: dict | None = None,
+    locals: dict | None = None,
+    fromlist: tuple = (),
+    level: int = 0,
+):
     """__import__ replacement simulating web.self_bootstrap_push being missing."""
     if name == "web.self_bootstrap_push" or name.startswith(
         "web.self_bootstrap_push."
     ):
         raise ImportError("simulated: web.self_bootstrap_push not available")
-    return _REAL_IMPORT(name, *args, **kwargs)
+    return _REAL_IMPORT(name, globals, locals, fromlist, level)
 
 
 # ---------------------------------------------------------------------------
