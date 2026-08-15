@@ -897,7 +897,8 @@ harvester/
 │   └── config-tavily.yaml      # 只跑 Tavily 的 provider 扫描
    │   ├── config-deepseek.yaml    # 只跑 DeepSeek 的 provider 扫描
    │   ├── config-kimi.yaml        # 只跑 Kimi(Moonshot) 的 provider 扫描
-   │   └── config-glm.yaml         # 只跑 GLM(智谱) 的 provider 扫描
+   │   ├── config-glm.yaml         # 只跑 GLM(智谱) 的 provider 扫描
+   │   └── config-github.yaml      # GitHub token 自举扫描
 ├── manager/          # 任务和资源管理
 │   ├── base.py       # 基础管理类
 │   ├── pipeline.py   # 流水线管理

@@ -45,6 +45,9 @@ _DEFAULT_SCHEDULES: tuple[tuple[str, str, str], ...] = (
     ("modelscope", "20 */6 * * *", "examples/config-modelscope.yaml"),
     # Tavily keys survive longer (usage-audit based) — every 6 hours.
     ("tavily", "40 */6 * * *", "examples/config-tavily.yaml"),
+    # GitHub token self-bootstrap — scan every 6 hours so the instance's own
+    # token pool keeps growing; staggered at :50 to avoid the 0/20/40 burst.
+    ("github", "50 */6 * * *", "examples/config-github.yaml"),
 )
 
 

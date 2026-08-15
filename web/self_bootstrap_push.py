@@ -120,6 +120,19 @@ class SelfBootstrapPushService:
                 )
                 return
 
+            # 1b. ENCRYPTION_KEY guard — without a stable key, every token
+            # imported now becomes permanently undecryptable after the next
+            # process restart (web.crypto falls back to a one-time key). The
+            # rows survive but log decrypt failures on every later scan. Warn
+            # loudly instead of silently building an unrecoverable pool.
+            if not os.environ.get("ENCRYPTION_KEY"):
+                logger.warning(
+                    "Self-bootstrap: ENCRYPTION_KEY is not set — imported tokens "
+                    "will be encrypted with a one-time in-process key and become "
+                    "unrecoverable after restart. Set ENCRYPTION_KEY (back it up) "
+                    "before relying on self-bootstrap."
+                )
+
             # 2. Idempotency guard — prevents _on_completed double-fire
             with self._lock:
                 if run_id in self._seen_run_ids:

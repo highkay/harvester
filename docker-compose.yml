@@ -24,6 +24,8 @@ services:
       # --- Tavily push service ---
       - TAVILY_PROXY_BASE_URL=${TAVILY_PROXY_BASE_URL:-}
       - TAVILY_PROXY_AUTH_KEY=${TAVILY_PROXY_AUTH_KEY:-}
+      # --- GitHub self-bootstrap (default enabled; set 0 to disable) ---
+      - HARVESTER_SELF_BOOTSTRAP=${HARVESTER_SELF_BOOTSTRAP:-1}
       # --- Storage ---
       - HARVESTER_WORKSPACE=/app/data
       - HARVESTER_DB_PATH=/app/data/harvester.db

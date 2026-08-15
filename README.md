@@ -912,7 +912,8 @@ harvester/
 │   └── config-tavily.yaml      # Tavily-only provider scan
    │   ├── config-deepseek.yaml    # DeepSeek-only provider scan
    │   ├── config-kimi.yaml        # Kimi (Moonshot)-only provider scan
-   │   └── config-glm.yaml         # GLM (Zhipu)-only provider scan
+   │   ├── config-glm.yaml         # GLM (Zhipu)-only provider scan
+   │   └── config-github.yaml      # GitHub token self-bootstrap scan
 ├── manager/          # Task and resource management
 │   ├── base.py       # Base management classes
 │   ├── pipeline.py   # Pipeline management

@@ -54,11 +54,11 @@ class TestCronValidation(unittest.TestCase):
 class TestSeedData(unittest.TestCase):
     """Given an empty schedule_config table,
     When init_scheduler is called,
-    Then 7 default provider schedules are inserted.
+    Then 8 default provider schedules are inserted.
     """
 
     _EXPECTED_PROVIDERS = frozenset(
-        {"deepseek", "kimi", "mimo-cn", "qwen-cn", "glm", "modelscope", "tavily"}
+        {"deepseek", "kimi", "mimo-cn", "qwen-cn", "glm", "modelscope", "tavily", "github"}
     )
     _EXPECTED_CRONS = {
         "deepseek": "0 */4 * * *",
@@ -68,6 +68,7 @@ class TestSeedData(unittest.TestCase):
         "glm": "0 */6 * * *",
         "modelscope": "20 */6 * * *",
         "tavily": "40 */6 * * *",
+        "github": "50 */6 * * *",
     }
     _EXPECTED_CONFIG_FILES = {
         "deepseek": "examples/config-deepseek.yaml",
@@ -77,6 +78,7 @@ class TestSeedData(unittest.TestCase):
         "glm": "examples/config-glm.yaml",
         "modelscope": "examples/config-modelscope.yaml",
         "tavily": "examples/config-tavily.yaml",
+        "github": "examples/config-github.yaml",
     }
 
     def test_seeds_defaults_on_empty_table(self) -> None:
