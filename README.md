@@ -874,6 +874,38 @@ docker compose up -d   # starts on port 8000 (edit docker-compose.yml to change)
 > need a mirror (e.g. `-i https://pypi.tuna.tsinghua.edu.cn/simple`), and
 > `git pull` on the host may need a proxy — configure per your environment.
 
+### Production deployment (harvester is hosted on the fnos NAS)
+
+The production instance runs on the `fnos` NAS (`admin@fnos`, port `8002`), not
+on a laptop. The workstation copy (`F:\git\harvester`) is the dev/backup
+environment (`http://127.0.0.1:8000`).
+
+| Environment | Where | URL / Port | Repo dir |
+|---|---|---|---|
+| **Production** | `admin@fnos` (SSH) | `http://<fnos-ip>:8002` | `/home/admin/harvester` |
+| **Dev / backup** | this workstation | `http://127.0.0.1:8000` | `F:\git\harvester` |
+
+Deploy to production:
+
+```bash
+ssh admin@fnos
+cd /home/admin/harvester
+git fetch origin && git log --oneline origin/main..HEAD  # review local-only commits first
+git pull origin main                                      # then bring in remote
+docker compose up -d --build                              # rebuild + restart
+curl -s http://localhost:8002/health                      # expect {"status":"ok"}
+```
+
+fnos commonly keeps local commits ahead of `origin/main` (reverts, port/volume
+tweaks) and edits `Dockerfile.web` / `docker-compose.yml` locally — review
+`git log origin/main..HEAD` and `git status` before pulling so the update
+preserves intentional changes. Production `.env` (`/home/admin/harvester/.env`)
+holds `WEB_AUTH_KEY`, `ENCRYPTION_KEY` (back it up — rotating it makes stored
+tokens undecryptable), and push credentials. The github self-bootstrap
+(`HARVESTER_SELF_BOOTSTRAP`, default on) requires the github feature commit to
+be deployed to fnos and, if you want to disable it in the container, the env
+var passed through `docker-compose.yml`.
+
 The CLI entry (`python main.py`) is untouched and fully coexists with the web
 layer.
 

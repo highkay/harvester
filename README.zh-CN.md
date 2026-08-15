@@ -860,6 +860,35 @@ docker compose up -d   # 默认端口 8000（可改 docker-compose.yml）
 > `-i https://pypi.tuna.tsinghua.edu.cn/simple`）；宿主机 `git pull` 可能
 > 需要代理，请按实际环境配置。
 
+### 生产部署（线上实例在 fnos NAS 上）
+
+生产实例部署在 `fnos` NAS（`admin@fnos`，端口 `8002`），不是部署在笔记本上。
+本工作区（`F:\git\harvester`）是开发/备份环境（`http://127.0.0.1:8000`）。
+
+| 环境 | 位置 | URL / 端口 | 仓库目录 |
+|---|---|---|---|
+| **生产** | `admin@fnos`（SSH） | `http://<fnos-ip>:8002` | `/home/admin/harvester` |
+| **开发 / 备份** | 本工作区 | `http://127.0.0.1:8000` | `F:\git\harvester` |
+
+部署到生产：
+
+```bash
+ssh admin@fnos
+cd /home/admin/harvester
+git fetch origin && git log --oneline origin/main..HEAD  # 先检查本地独有提交
+git pull origin main                                      # 再拉取远端
+docker compose up -d --build                              # 重建并重启
+curl -s http://localhost:8002/health                      # 期望 {"status":"ok"}
+```
+
+fnos 上常有领先于 `origin/main` 的本地提交（revert、端口/卷调整），并会本地
+修改 `Dockerfile.web` / `docker-compose.yml` —— pull 前先看
+`git log origin/main..HEAD` 和 `git status`，避免覆盖有意的本地改动。生产的
+`.env`（`/home/admin/harvester/.env`）存放 `WEB_AUTH_KEY`、`ENCRYPTION_KEY`
+（务必备份——轮换会使已存 token 无法解密）以及推送凭据。github 自举
+（`HARVESTER_SELF_BOOTSTRAP`，默认开启）需要先把 github 功能提交部署到 fnos；
+若要在容器内关闭它，还需在 `docker-compose.yml` 中透传该环境变量。
+
 CLI 入口（`python main.py`）保持不变，与 Web 层完全共存。
 
 ## 目录结构
