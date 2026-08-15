@@ -11,6 +11,7 @@ from .bedrock import BedrockProvider
 from .cerebras import CerebrasProvider
 from .doubao import DoubaoProvider
 from .gemini import GeminiProvider
+from .github import GitHubTokenProvider
 from .glm import GLMProvider
 from .gooeyai import GooeyAIProvider
 from .grok import GrokProvider
@@ -54,4 +55,5 @@ __all__ = [
     "StabilityAIProvider",
     "TavilyProvider",
     "VertexProvider",
+    "GitHubTokenProvider",
 ]
