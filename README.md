@@ -58,6 +58,7 @@ The system aims to build a **universal data acquisition framework** primarily ta
 | Xiaomi MiMo | `mimo` | `tp-...` / `sk-...` API keys | `GET /models` | Default base URL: `https://token-plan-cn.xiaomimimo.com/v1` (CN); regional clusters per task (`token-plan-sgp.xiaomimimo.com/v1` for Singapore) |
 | Alibaba Qwen (DashScope) | `qwen` | `sk-...` API keys | `GET /models` + chat probe | Default base URL: `https://dashscope.aliyuncs.com/compatible-mode/v1` (CN); `dashscope-intl.aliyuncs.com` for international; zero-balance is HTTP 400 + `code: Arrearage` (mapped to no-quota) |
 | ModelScope (魔搭) | `modelscope` | `MODELSCOPE_API_KEY` / `MODELSCOPE_SDK_TOKEN` tokens (no fixed prefix) | Chat completion probe (models list is public, not gated) | Default base URL: `https://api-inference.modelscope.cn/v1`; single CN endpoint |
+| GitHub API token (self-bootstrap) | `github` | `ghp_` / `gho_` / `ghu_` / `ghs_` / `ghr_` / `github_pat_` API tokens | `GET /user` Bearer auth | Default base URL `https://api.github.com`; valid tokens are auto-imported into the web instance's own token pool (self-bootstrap) after a `github` scan |
 
 ## Architecture
 
@@ -740,6 +741,7 @@ The system features a sophisticated **Query Optimization Engine** with mathemati
    > - [`examples/config-groq.yaml`](examples/config-groq.yaml) - Groq-only scan that writes provider result files
    > - [`examples/config-openrouter.yaml`](examples/config-openrouter.yaml) - OpenRouter-only scan that writes provider result files
    > - [`examples/config-tavily.yaml`](examples/config-tavily.yaml) - Tavily-only scan that writes provider result files
+   > - [`examples/config-github.yaml`](examples/config-github.yaml) - GitHub token scan that writes provider result files (validated tokens self-bootstrap into the web token store)
 > - [`examples/config-deepseek.yaml`](examples/config-deepseek.yaml) - DeepSeek-only scan that writes provider result files
 > - [`examples/config-kimi.yaml`](examples/config-kimi.yaml) - Kimi (Moonshot)-only scan that writes provider result files
 > - [`examples/config-glm.yaml`](examples/config-glm.yaml) - GLM (Zhipu)-only scan that writes provider result files
@@ -793,7 +795,7 @@ The system features a sophisticated **Query Optimization Engine** with mathemati
    To run one provider-only config and audit the result files:
 
    ```powershell
-   $provider = "cerebras"  # nvidia, cerebras, groq, openrouter, tavily, deepseek, kimi, glm
+   $provider = "cerebras"  # github, nvidia, cerebras, groq, openrouter, tavily, deepseek, kimi, glm
    $config = "examples\config-$provider.yaml"
    $env:GITHUB_TOKENS = "ghp_xxx"
    python main.py --validate -c $config
@@ -826,6 +828,11 @@ pipeline into a long-running service:
 - **Automatic push to TavilyProxyManager** — after each tavily scan completes,
   validated keys are auto-pushed to TavilyProxyManager (requires both
   `TAVILY_PROXY_BASE_URL` and `TAVILY_PROXY_AUTH_KEY` to be set).
+- **Self-bootstrap** — after a `github` scan completes, validated GitHub API
+  tokens are automatically imported into this instance's own token store
+  (`label='harvester-bootstrap'`) so the instance grows its own search
+  credential pool. The first scan still needs at least one seed token (env
+  `GITHUB_TOKENS` or via the Token API).
 - **Jinja2 admin UI** — dashboard, token management, push configuration,
   schedule management, run history, push logs. Single shared auth key
   (`WEB_AUTH_KEY`) with session-cookie login for the UI and Bearer tokens
@@ -844,6 +851,7 @@ pipeline into a long-running service:
 | `TAVILY_PROXY_AUTH_KEY` | empty | Master key for that TavilyProxyManager instance |
 | `HARVESTER_WORKSPACE` | `./data` | Workspace (provider results) |
 | `HARVESTER_DB_PATH` | `<workspace>/harvester.db` | SQLite DB path |
+| `HARVESTER_SELF_BOOTSTRAP` | `1` | Auto-import validated GitHub tokens into this instance's token store after a github scan (self-bootstrap; set 0 to disable) |
 
 **Run locally:**
 

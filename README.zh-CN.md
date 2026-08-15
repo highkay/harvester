@@ -58,6 +58,7 @@
 | 小米 MiMo | `mimo` | `tp-...` / `sk-...` API Key | `GET /models` | 默认 base URL: `https://token-plan-cn.xiaomimimo.com/v1`（大陆集群）；按 task 区分区域集群（新加坡为 `token-plan-sgp.xiaomimimo.com/v1`） |
 | 阿里云 Qwen（百炼） | `qwen` | `sk-...` API Key | `GET /models` + chat 探针 | 默认 base URL: `https://dashscope.aliyuncs.com/compatible-mode/v1`（国内）；国际为 `dashscope-intl.aliyuncs.com`；欠费为 HTTP 400 + `code: Arrearage`（映射到 no-quota） |
 | 魔搭 ModelScope | `modelscope` | `MODELSCOPE_API_KEY` / `MODELSCOPE_SDK_TOKEN`（无固定前缀） | chat 探针（models 列表公开、不设鉴权门） | 默认 base URL: `https://api-inference.modelscope.cn/v1`；单一国内端点 |
+| GitHub API Token（自举） | `github` | `ghp_` / `gho_` / `ghu_` / `ghs_` / `ghr_` / `github_pat_` API Token | `GET /user` Bearer 校验 | 默认 base URL `https://api.github.com`；`github` 扫描后，验证通过的 token 会自动导入 Web 实例自身的 token 池（自举 self-bootstrap） |
 
 ## 项目架构
 
@@ -742,6 +743,7 @@ sequenceDiagram
    > - [`examples/config-groq.yaml`](examples/config-groq.yaml) - 只跑 Groq 并输出 provider 结果文件
    > - [`examples/config-openrouter.yaml`](examples/config-openrouter.yaml) - 只跑 OpenRouter 并输出 provider 结果文件
    > - [`examples/config-tavily.yaml`](examples/config-tavily.yaml) - 只跑 Tavily 并输出 provider 结果文件
+   > - [`examples/config-github.yaml`](examples/config-github.yaml) - 只跑 GitHub token 扫描并输出 provider 结果文件（验证通过的 token 自动自举导入 Web token 存储）
 > - [`examples/config-deepseek.yaml`](examples/config-deepseek.yaml) - 只跑 DeepSeek 并输出 provider 结果文件
 > - [`examples/config-kimi.yaml`](examples/config-kimi.yaml) - 只跑 Kimi(Moonshot) 并输出 provider 结果文件
 > - [`examples/config-glm.yaml`](examples/config-glm.yaml) - 只跑 GLM(智谱) 并输出 provider 结果文件
@@ -795,7 +797,7 @@ sequenceDiagram
    只跑一个 provider-only 配置，并审计输出结果文件：
 
    ```powershell
-   $provider = "cerebras"  # nvidia, cerebras, groq, openrouter, tavily, deepseek, kimi, glm
+   $provider = "cerebras"  # github, nvidia, cerebras, groq, openrouter, tavily, deepseek, kimi, glm
    $config = "examples\config-$provider.yaml"
    $env:GITHUB_TOKENS = "ghp_xxx"
    python main.py --validate -c $config
@@ -819,6 +821,7 @@ sequenceDiagram
 - **定时扫描** — 每个 provider 独立的 cron 调度（默认每日 `0 3 * * *`，APScheduler 驱动）；支持页面"立即运行"；防重叠锁。
 - **自动推送到 gpt-load** — 扫描完成后，验证通过的 key 自动推送到 gpt-load 实例的对应分组（`POST /api/keys/add-multiple`，幂等去重）。每个任务的推送目标（实例地址 + 分组 + `max_size` 单批上限，默认 10000）均可在页面配置。
 - **自动推送到 TavilyProxyManager** — 每次 tavily 扫描完成后，验证通过的 key 自动推送到 TavilyProxyManager（需同时设置 `TAVILY_PROXY_BASE_URL` 与 `TAVILY_PROXY_AUTH_KEY`）。
+- **自举 Self-bootstrap** — `github` 扫描完成后，验证通过的 GitHub API token 会自动导入本实例自身的 token 存储（`label='harvester-bootstrap'`），让实例逐步扩充自己的搜索凭据池。首次扫描仍需至少一个种子 token（环境变量 `GITHUB_TOKENS` 或通过 Token API 提供）。
 - **Jinja2 管理界面** — 仪表盘、Token 管理、推送配置、调度管理、运行历史、推送日志。单一共享认证密钥（`WEB_AUTH_KEY`）：界面用会话 cookie 登录，API 用 Bearer Token。
 
 **环境变量**（`web/config.py`）：
@@ -834,6 +837,7 @@ sequenceDiagram
 | `TAVILY_PROXY_AUTH_KEY` | 空 | 该 TavilyProxyManager 实例的 Master Key |
 | `HARVESTER_WORKSPACE` | `./data` | 工作目录（provider 结果） |
 | `HARVESTER_DB_PATH` | `<workspace>/harvester.db` | SQLite 数据库路径 |
+| `HARVESTER_SELF_BOOTSTRAP` | `1` | `github` 扫描后把验证通过的 GitHub token 自动导入本实例的 token 存储（自举；设为 `0` 关闭） |
 
 **本地运行：**
 
