@@ -431,6 +431,36 @@ class PipelineRunner:
                 f"run_id={run_id} error={exc}"
             )
 
+        # Self-bootstrap — symmetric to the tavily block above. Only fires for
+        # github scans; env gating lives inside SelfBootstrapPushService (it
+        # no-ops when HARVESTER_SELF_BOOTSTRAP=0).
+        try:
+            from web.self_bootstrap_push import get_self_bootstrap_push_service  # type: ignore[import-untyped,unused-ignore]
+
+            if provider_name == "github":
+                bootstrap_service = get_self_bootstrap_push_service()
+                # Run push in a new thread to avoid blocking the completion callback
+                t = threading.Thread(
+                    target=bootstrap_service.push_valid_keys,
+                    args=(provider_name, run_id),
+                    daemon=True,
+                )
+                t.start()
+                logger.info(
+                    f"Self-bootstrap push triggered: "
+                    f"provider={provider_name} run_id={run_id}"
+                )
+        except ImportError:
+            logger.info(
+                f"Self-bootstrap push service not available: "
+                f"provider={provider_name} run_id={run_id}"
+            )
+        except Exception as exc:
+            logger.error(
+                f"Self-bootstrap push hook error: provider={provider_name} "
+                f"run_id={run_id} error={exc}"
+            )
+
     def _task_names_from_config(self, config_path: Path) -> list[str]:
         """Return the names of every task defined in a config YAML.
 
