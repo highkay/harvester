@@ -97,6 +97,18 @@ CREATE TABLE IF NOT EXISTS schedule_config (
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- per-run newly-added valid keys (masked + hashed only, never plaintext)
+CREATE TABLE IF NOT EXISTS run_new_keys (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL,
+    provider_name TEXT NOT NULL,
+    task_name TEXT NOT NULL,
+    key_hash TEXT NOT NULL,
+    token_masked TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(run_id, key_hash)
+);
 """
 
 

@@ -59,6 +59,46 @@ class TestDatabaseInit(unittest.TestCase):
             _run_async(init_db(db_path))
             _run_async(init_db(db_path))  # Must not raise
 
+    def test_init_db_creates_run_new_keys_table(self) -> None:
+        """Given an initialized database,
+        When we look for the run_new_keys table,
+        Then it exists and rejects duplicate (run_id, key_hash) rows.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = f"{tmpdir}/test.db"
+
+            _run_async(init_db(db_path))
+
+            # Independent synchronous sqlite3 check
+            conn = sqlite3.connect(db_path)
+            try:
+                row = conn.execute(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type='table' AND name='run_new_keys'"
+                ).fetchone()
+                self.assertIsNotNone(
+                    row, "run_new_keys table was not created by init_db"
+                )
+
+                # Functional proof of the composite UNIQUE(run_id, key_hash) constraint
+                conn.execute(
+                    "INSERT INTO run_new_keys "
+                    "(run_id, provider_name, task_name, key_hash, token_masked) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    ("run-1", "openai", "openai", "hash_a", "sk-***abc"),
+                )
+                conn.commit()
+                with self.assertRaises(sqlite3.IntegrityError):
+                    conn.execute(
+                        "INSERT INTO run_new_keys "
+                        "(run_id, provider_name, task_name, key_hash, token_masked) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        ("run-1", "openai", "openai", "hash_a", "sk-***abc"),
+                    )
+                    conn.commit()
+            finally:
+                conn.close()
+
 
 class TestDatabaseInsertRead(unittest.TestCase):
     """Given an initialized database,
