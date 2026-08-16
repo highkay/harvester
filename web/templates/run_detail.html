@@ -18,4 +18,23 @@
     <tr><th>创建时间</th><td>{{ run.created_at }}</td></tr>
   </tbody>
 </table>
+
+<h3>本轮新增 Key</h3>
+<table>
+  <thead>
+    <tr><th>Provider</th><th>Task</th><th>脱敏 Key</th><th>时间</th></tr>
+  </thead>
+  <tbody>
+    {% for n in new_keys %}
+    <tr>
+      <td>{{ n.provider_name }}</td>
+      <td>{{ n.task_name }}</td>
+      <td><code>{{ n.token_masked }}</code></td>
+      <td class="muted">{{ n.created_at }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="4" class="muted">本轮暂无新增 Key</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
 {% endblock %}

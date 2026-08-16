@@ -67,4 +67,24 @@
     {% endfor %}
   </tbody>
 </table>
+
+<h3>最近新增 Key</h3>
+<table>
+  <thead>
+    <tr><th>Run ID</th><th>Provider</th><th>Task</th><th>脱敏 Key</th><th>时间</th></tr>
+  </thead>
+  <tbody>
+    {% for n in new_keys %}
+    <tr>
+      <td><a href="/runs/{{ n.run_id }}">{{ n.run_id[:8] }}…</a></td>
+      <td>{{ n.provider_name }}</td>
+      <td>{{ n.task_name }}</td>
+      <td><code>{{ n.token_masked }}</code></td>
+      <td class="muted">{{ n.created_at }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="5" class="muted">暂无新增</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
 {% endblock %}

@@ -10,6 +10,7 @@ Then the correct status code and Chinese page content are returned.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import sqlite3
 import tempfile
@@ -18,6 +19,7 @@ import unittest
 from fastapi.testclient import TestClient
 
 from web.db import init_db as _init_db_async
+from web.models import mask_token
 
 
 def _run_async(coro):
@@ -144,6 +146,43 @@ def _make_client(db_path: str) -> TestClient:
 
 def _auth_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {_TEST_AUTH_KEY}"}
+
+
+# DDL stays inline in tests until the feature lands in web/db.py `_DDL`.
+_RUN_NEW_KEYS_DDL = """
+CREATE TABLE IF NOT EXISTS run_new_keys (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL,
+    provider_name TEXT NOT NULL,
+    task_name TEXT NOT NULL,
+    key_hash TEXT NOT NULL,
+    token_masked TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(run_id, key_hash)
+);
+"""
+
+
+def _seed_run_new_keys(
+    db_path: str, rows: list[tuple[str, str, str, str, str, str]]
+) -> None:
+    """Create the (not-yet-schema'd) run_new_keys table and insert *rows*.
+
+    Rows are (run_id, provider_name, task_name, key_hash, token_masked,
+    created_at) tuples. Pass an empty list to seed the empty state.
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(_RUN_NEW_KEYS_DDL)
+        conn.executemany(
+            "INSERT INTO run_new_keys "
+            "(run_id, provider_name, task_name, key_hash, token_masked, "
+            "created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            rows,
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -440,6 +479,53 @@ class TestPushConfigPage(WebUiPageTestBase):
         resp = self.client.get("/push-config", follow_redirects=False)
         self.assertEqual(resp.status_code, 303)
         self.assertEqual(resp.headers.get("location"), "/login")
+
+
+class TestRunNewKeysSection(WebUiPageTestBase):
+    """'最近新增 Key' section on dashboard and run detail (run_new_keys).
+
+    RED tests: the feature (context key `new_keys`, template section) does
+    not exist yet, so every content assertion below must fail.
+    """
+
+    _TOKEN = "sk-proj-1234567890abcdef"
+
+    @staticmethod
+    def _key_hash(token: str) -> str:
+        """Stable key_hash for run_new_keys (sha256 of the token)."""
+        return hashlib.sha256(token.encode()).hexdigest()
+
+    def _new_key_row(self, run_id: str) -> tuple[str, str, str, str, str, str]:
+        return (
+            run_id,
+            "github",
+            "github",
+            self._key_hash(self._TOKEN),
+            mask_token(self._TOKEN),
+            "2026-01-01 00:00:00",
+        )
+
+    def test_dashboard_shows_new_keys_section(self) -> None:
+        """GET / must render '最近新增 Key' header and the masked token."""
+        _seed_run_new_keys(self._db_path, [self._new_key_row("run-aaaa-0001")])
+        resp = self.client.get("/", headers=_auth_headers())
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("最近新增 Key", resp.text)
+        self.assertIn(mask_token(self._TOKEN), resp.text)
+
+    def test_dashboard_empty_state_when_no_new_keys(self) -> None:
+        """GET / must render '暂无新增' when run_new_keys has no rows."""
+        _seed_run_new_keys(self._db_path, [])
+        resp = self.client.get("/", headers=_auth_headers())
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("暂无新增", resp.text)
+
+    def test_run_detail_shows_new_keys(self) -> None:
+        """GET /runs/{run_id} must render the run's newly added masked key."""
+        _seed_run_new_keys(self._db_path, [self._new_key_row("run-aaaa-0001")])
+        resp = self.client.get("/runs/run-aaaa-0001", headers=_auth_headers())
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn(mask_token(self._TOKEN), resp.text)
 
 
 if __name__ == "__main__":

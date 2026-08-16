@@ -164,6 +164,12 @@ async def dashboard(request: Request, _user: bool = Depends(require_ui_session))
             "FROM push_logs ORDER BY pushed_at DESC LIMIT 5"
         )
         recent_pushes = [dict(row) for row in await cur.fetchall()]
+
+        cur = await db.execute(
+            "SELECT run_id, provider_name, task_name, token_masked, created_at "
+            "FROM run_new_keys ORDER BY id DESC LIMIT 20"
+        )
+        new_keys = [dict(row) for row in await cur.fetchall()]
     finally:
         await db.close()
 
@@ -181,6 +187,7 @@ async def dashboard(request: Request, _user: bool = Depends(require_ui_session))
             "schedules": schedules,
             "recent_runs": recent_runs,
             "recent_pushes": recent_pushes,
+            "new_keys": new_keys,
         },
     )
 
@@ -314,6 +321,12 @@ async def run_detail_page(
             (run_id,),
         )
         row = await cur.fetchone()
+        cur = await db.execute(
+            "SELECT provider_name, task_name, token_masked, created_at "
+            "FROM run_new_keys WHERE run_id = ? ORDER BY id",
+            (run_id,),
+        )
+        new_keys = [dict(row) for row in await cur.fetchall()]
     finally:
         await db.close()
 
@@ -323,7 +336,7 @@ async def run_detail_page(
     return templates.TemplateResponse(
         request=request,
         name="run_detail.html",
-        context={"page": "runs", "run": dict(row)},
+        context={"page": "runs", "run": dict(row), "new_keys": new_keys},
     )
 
 
