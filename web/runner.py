@@ -26,7 +26,8 @@ import yaml
 
 from tools.logger import get_logger
 
-from .crypto import decrypt_str
+from .crypto import _get_crypto, decrypt_str
+from .models import mask_token
 
 logger = get_logger("web.runner")
 
@@ -293,6 +294,14 @@ class PipelineRunner:
                 app.shutdown_event.set()
                 raise RuntimeError("Run cancelled before start")
 
+            # Snapshot already-known valid keys for each task in this config
+            # BEFORE running, so the per-run delta (post − pre) identifies
+            # only the keys newly added by THIS run.
+            task_names = self._task_names_from_config(temp_yaml_path) or [
+                provider_name
+            ]
+            before_keys = self._snapshot_valid_keys(task_names)
+
             # Block until pipeline completes
             app.run()
 
@@ -313,7 +322,25 @@ class PipelineRunner:
                 f"run_id={run_id} valid_keys={valid_keys} duration={duration}s"
             )
 
-            # 6. Fire the push hook directly. The completion-listener path
+            # 6. Record newly-added valid keys (delta since scan start) for
+            # the dashboard. Best-effort — a capture failure must never fail
+            # or affect the run outcome.
+            try:
+                after_keys = self._snapshot_valid_keys(task_names)
+                new_count = self._record_new_keys(
+                    run_id, provider_name, before_keys, after_keys
+                )
+                if new_count:
+                    logger.info(
+                        f"Captured {new_count} new valid key(s): "
+                        f"provider={provider_name} run_id={run_id}"
+                    )
+            except Exception as exc:
+                logger.warning(
+                    f"New-key capture failed: run_id={run_id} error={exc}"
+                )
+
+            # 7. Fire the push hook directly. The completion-listener path
             # (registered above) is unreliable from worker threads — the
             # CompletionEventManager may already be marked notified by the
             # status polling loop, or the callback thread never runs. Pushing
@@ -699,6 +726,94 @@ class PipelineRunner:
             pass
 
         return 0
+
+    def _snapshot_valid_keys(
+        self, task_names: list[str]
+    ) -> dict[str, set[str]]:
+        """Read each task's ``valid-keys.txt`` into a set of non-empty lines.
+
+        Path: ``{workspace}/providers/{task_name}/valid-keys.txt``. Missing
+        directory/file → empty set. Only the named tasks are read, so
+        ``backup-*`` and stray folders under providers are never touched.
+        """
+        providers_dir = Path(self._workspace) / "providers"
+        snapshots: dict[str, set[str]] = {}
+        for name in task_names:
+            keys_path = providers_dir / name / "valid-keys.txt"
+            keys: set[str] = set()
+            try:
+                if keys_path.exists():
+                    for line in keys_path.read_text(
+                        encoding="utf-8"
+                    ).splitlines():
+                        stripped = line.strip()
+                        if stripped:
+                            keys.add(stripped)
+            except OSError:
+                pass
+            snapshots[name] = keys
+        return snapshots
+
+    def _diff_new_keys(
+        self,
+        before: dict[str, set[str]],
+        after: dict[str, set[str]],
+    ) -> dict[str, list[str]]:
+        """Return per-task newly-added keys (``after - before``), sorted."""
+        diff: dict[str, list[str]] = {}
+        for task, after_keys in after.items():
+            new_keys = sorted(after_keys - before.get(task, set()))
+            if new_keys:
+                diff[task] = new_keys
+        return diff
+
+    def _record_new_keys(
+        self,
+        run_id: str,
+        provider_name: str,
+        before: dict[str, set[str]],
+        after: dict[str, set[str]],
+    ) -> int:
+        """Persist newly-added valid keys (masked + hashed only).
+
+        Never stores plaintext. Dedups via ``UNIQUE(run_id, key_hash)``.
+        Never raises — returns the inserted count (0 on any error).
+        """
+        diff = self._diff_new_keys(before, after)
+        if not diff:
+            return 0
+        inserted = 0
+        try:
+            conn = sqlite3.connect(self._db_path)
+            try:
+                for task, keys in diff.items():
+                    for key in keys:
+                        try:
+                            conn.execute(
+                                "INSERT INTO run_new_keys "
+                                "(run_id, provider_name, task_name, "
+                                " key_hash, token_masked) VALUES (?, ?, ?, ?, ?)",
+                                (
+                                    run_id,
+                                    provider_name,
+                                    task,
+                                    _get_crypto().hash_token(key),
+                                    mask_token(key),
+                                ),
+                            )
+                            inserted += 1
+                        except sqlite3.IntegrityError:
+                            logger.info(
+                                f"run_new_keys: duplicate skipped "
+                                f"(run_id={run_id} task={task})"
+                            )
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception as exc:
+            logger.warning(f"run_new_keys capture failed: {exc}")
+            return 0
+        return inserted
 
     def _update_run_sync(
         self,
