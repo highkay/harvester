@@ -746,10 +746,10 @@ class PipelineRunner:
                     for line in keys_path.read_text(
                         encoding="utf-8"
                     ).splitlines():
-                        stripped = line.strip()
+                        stripped = line.strip().lstrip("\ufeff")
                         if stripped:
                             keys.add(stripped)
-            except OSError:
+            except (OSError, UnicodeDecodeError):
                 pass
             snapshots[name] = keys
         return snapshots

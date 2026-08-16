@@ -192,6 +192,24 @@ class TestPipelineRunnerNewKeys(unittest.TestCase):
                 runner._snapshot_valid_keys(["nope"]), {"nope": set()}
             )
 
+    def test_snapshot_tolerates_non_utf8_bytes(self) -> None:
+        """Given a valid-keys.txt containing invalid UTF-8 bytes,
+        When the task is snapshotted,
+        Then the snapshot must not raise (empty set for that task).
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workdir = Path(tmpdir)
+            github_dir = workdir / "providers" / "github"
+            github_dir.mkdir(parents=True)
+            (github_dir / "valid-keys.txt").write_bytes(
+                b"ghp_ok111111111111\n\xff\xfe\x80\nghp_ok222222222222\n"
+            )
+            runner = _make_runner(workdir, str(workdir / "harvester.db"))
+
+            snapshot = runner._snapshot_valid_keys(["github"])
+
+            self.assertEqual(snapshot, {"github": set()})
+
     # --------------------------------------------------------------
     # _record_new_keys — persist newly-added keys (never plaintext)
     # --------------------------------------------------------------
