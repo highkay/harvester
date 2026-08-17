@@ -67,9 +67,57 @@ update preserves intentional local changes (reverts, port/volume tweaks).
   token store first (`POST /api/tokens`), else scans fail at the runner gate
   ("No enabled API tokens found").
 
+## Feature: hf search backend (search_type "hf")
+
+- `search/hf.py` — unauthenticated HuggingFace Hub backend: dataset-name
+  keyword search → recursive tree enumeration → text-ish file whitelist
+  filter → raw `resolve/main/` URLs handed to the GATHER stage. Self-throttled
+  (0.7 s/req), TTL discovery cache (600 s).
+- Dispatch: `search/client.py` `search_with_count` routes `search_type == "hf"`
+  before the GitHub path (GitHub behavior untouched). `config/schemas.py`
+  `ALLOWED_SEARCH_TYPES` includes `"hf"`.
+- `stage/definition.py` SearchStage: hf branches run BEFORE the GitHub
+  credential gate (the source is anonymous).
+- Preset: `examples/config-hf.yaml`; tests: `tests/test_search_hf.py`.
+- Known limits: tree first page only (Link-header cursor not followed);
+  whitelist = text suffixes + key-ish filename hints (binary junk filtered);
+  dataset-name matching is noisy. Measured yield ≈ 0 real keys — keep as a
+  low-frequency secondary source; do NOT invest further in it.
+
+## Data-source exploration findings (2026-08, evidence-backed)
+
+- **Staleness law**: leaked AI keys get revoked within hours (recurring repo
+  fact: kimi gained 82 valid keys in a ~2.7 h window). Any SNAPSHOT code
+  index (grep.app, Sourcegraph, searchcode) therefore yields ~0 valid keys —
+  measured 2026-08: grep.app 143 candidates across 8 queries, 0 valid. Do not
+  re-propose snapshot-index sources; yield comes from REALTIME search (GitHub
+  API) × frequency, not from adding sources.
+- **Telegram public-share channels** (`t.me/s/{channel}` HTML preview pages,
+  no auth) are the only assessed source with GitHub-like freshness for
+  publicly announced keys (mechanism proven by snscrape/aggregator OSS). Needs
+  a curated channel list — NOT implemented.
+- **Shodan (passive only)**: anonymous keyword search works (filters/paging
+  require login). Fingerprint inventory works — measured: sub2api banner
+  `Server: sub2api-reasoning-proxy/1.0`, new-api `405` panel responses.
+  Plaintext tokens in indexed banners are RARE (`sk-ant-`: 1 global hit).
+  NOT implemented.
+- **Validation endpoint traps** (apply to any future provider work):
+  - OpenRouter `GET /v1/models` is PUBLIC → false positives; use
+    `GET /api/v1/key` (Bearer) as `provider/openrouter.py` does.
+  - Gemini invalid keys return 400 — read the body error code.
+  - Groq `/openai/v1/models` may not gate auth — follow with an authed
+    chat probe.
+- **Boundary (do not cross)**: default credentials documented in gateway
+  projects (one-api/new-api `root/123456` panel lineage, CLIProxyAPI
+  placeholders, sub2api auto-generated admin password) are "change before
+  deploy" defaults, not public authorization. Do not build default-credential
+  login/call against third-party instances; passive mapping (Shodan inventory
+  records) and publicly announced keys only.
+
 ## Tests & conventions
 
-- Run: `python -m unittest discover -s tests` (322 tests, some skipped).
+- Run: `python -m unittest discover -s tests` (351 tests, 8 skipped; count
+  grows — the historical "322" figure is stale).
 - New files must pass `ruff check` and `pyright` (repo has pre-existing lint
   debt elsewhere — leave it).
 - Provider pattern: mirror `provider/openrouter.py` / `provider/kimi.py`.

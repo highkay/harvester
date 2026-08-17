@@ -36,8 +36,10 @@ The system aims to build a **universal data acquisition framework** primarily ta
 | ----------- | ------------- | --------------------------------------- |
 | GitHub API  | ✅ Implemented | Full API integration with rate limiting |
 | GitHub Web  | ✅ Implemented | Web scraping with intelligent parsing   |
+| HuggingFace Hub | ✅ Implemented (low yield) | Dataset-file discovery via `search_types: [hf]`; preset `examples/config-hf.yaml` |
+| Shodan      | 🔍 Verified (passive only) | Anonymous keyword search works for passive inventory/banner regex; plaintext keys are rare in banners; backend not implemented |
+| grep.app / Sourcegraph | ❌ Rejected | Snapshot code indexes: leaked keys are revoked within hours, so stale indexes yield ~0 valid keys (measured 2026-08) |
 | FOFA        | 🚧 Planned     | Cyberspace asset discovery integration  |
-| Shodan      | 🚧 Planned     | IoT and network device enumeration      |
 | Custom APIs | 🚧 Planned     | Generic REST/GraphQL API adapter        |
 
 ### Current AI Provider Scan Presets
@@ -745,6 +747,7 @@ The system features a sophisticated **Query Optimization Engine** with mathemati
 > - [`examples/config-deepseek.yaml`](examples/config-deepseek.yaml) - DeepSeek-only scan that writes provider result files
 > - [`examples/config-kimi.yaml`](examples/config-kimi.yaml) - Kimi (Moonshot)-only scan that writes provider result files
 > - [`examples/config-glm.yaml`](examples/config-glm.yaml) - GLM (Zhipu)-only scan that writes provider result files
+> - [`examples/config-hf.yaml`](examples/config-hf.yaml) - HuggingFace Hub dataset-file scan (low-yield secondary source) that writes provider result files
 
    The `tasks` section is the core of the configuration, defining what providers to search and how to process them. Refer to the basic configuration example above for a complete tasks configuration.
 
@@ -945,6 +948,7 @@ harvester/
    │   ├── config-deepseek.yaml    # DeepSeek-only provider scan
    │   ├── config-kimi.yaml        # Kimi (Moonshot)-only provider scan
    │   ├── config-glm.yaml         # GLM (Zhipu)-only provider scan
+   │   ├── config-hf.yaml          # HuggingFace Hub dataset-file scan (low yield)
    │   └── config-github.yaml      # GitHub token self-bootstrap scan
 ├── manager/          # Task and resource management
 │   ├── base.py       # Base management classes
