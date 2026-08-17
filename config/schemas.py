@@ -407,8 +407,9 @@ class StorageConfig:
     plan: str = ""
 
 
-# Supported GitHub search result types (code is the primary key-discovery path)
-ALLOWED_SEARCH_TYPES = frozenset({"code", "issues", "commits"})
+# Supported search types: GitHub result kinds (code is the primary
+# key-discovery path) plus the HuggingFace Hub dataset-file backend (hf)
+ALLOWED_SEARCH_TYPES = frozenset({"code", "issues", "commits", "hf"})
 
 
 @dataclass

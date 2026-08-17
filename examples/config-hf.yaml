@@ -1,0 +1,102 @@
+# HuggingFace Hub dataset scan configuration
+# Searches HF Hub datasets by keyword, then regexes small candidate files
+# (.env dumps, configs, notebooks) for OpenAI-family API keys (sk-... covers
+# sk-, sk-proj- and sk-ant- candidates) and validates hits against the
+# OpenAI API. The search itself is unauthenticated (self-throttled); the
+# github credentials below only bootstrap the pipeline's task-creation gate.
+# Results are written to ./data/providers/openai/*.txt
+#
+# Note: HF dataset search matches dataset names (single keywords work best,
+# e.g. "apikey", "openai", "colab"); multi-word phrases rarely match.
+
+global:
+  workspace: "./data"
+  max_retries_requeued: 3
+  proxy: ""
+  github_credentials:
+    sessions:
+      - "your_github_session_here"
+    tokens:
+      - "your_github_token_here"
+    strategy: "round_robin"
+  user_agents:
+    - "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
+
+pipeline:
+  threads:
+    search: 1
+    gather: 4
+    check: 2
+    inspect: 1
+  queue_sizes:
+    search: 100000
+    gather: 200000
+    check: 500000
+    inspect: 1000000
+
+monitoring:
+  update_interval: 2.0
+  error_threshold: 0.1
+  queue_threshold: 1000000
+  memory_threshold: 1073741824
+  response_threshold: 5.0
+
+persistence:
+  batch_size: 1
+  save_interval: 5
+  queue_interval: 60
+  snapshot_interval: 300
+  auto_restore: true
+  shutdown_timeout: 30
+  format: txt
+
+ratelimits:
+  github_api:
+    base_rate: 0.15
+    burst_limit: 3
+    adaptive: true
+  openai:
+    base_rate: 0.2
+    burst_limit: 2
+    adaptive: true
+
+tasks:
+  - name: openai
+    enabled: true
+    provider_type: openai
+    use_api: true # required so the search-type fan-out accepts "hf"
+    max_pages: 1000
+    search_types: [hf]
+    stages:
+      search: true
+      gather: true
+      check: true
+      inspect: true
+    api:
+      base_url: https://api.openai.com
+      completion_path: /v1/chat/completions
+      model_path: /v1/models
+      default_model: gpt-4o-mini
+      auth_key: Authorization
+      extra_headers: {}
+      api_version: ""
+      timeout: 30
+      retries: 3
+    patterns:
+      key_pattern: "sk-[0-9A-Za-z_-]{20,}"
+      address_pattern: ""
+      endpoint_pattern: ""
+      model_pattern: ""
+    conditions:
+      - query: "apikey"
+      - query: "apikeys"
+      - query: "openai"
+      - query: "colab"
+      - query: "secrets"
+    rate_limit:
+      base_rate: 0.2
+      burst_limit: 2
+      adaptive: true
+    storage:
+      directory: ""
+      plan: ""

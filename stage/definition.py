@@ -179,6 +179,12 @@ class SearchStage(BasePipelineStage):
 
     def _execute_first_page_search(self, task: SearchTask) -> Tuple[List[str], str, int]:
         """Execute first page search and get total count in single request"""
+        search_type = getattr(task, "search_type", "code") or "code"
+        if search_type == "hf":
+            # HuggingFace Hub search is unauthenticated: no credential gate
+            results, total, content = self._execute_hf_search(task)
+            return results, content, total
+
         while True:
             # Get auth via injected provider
             if task.use_api:
@@ -215,8 +221,25 @@ class SearchStage(BasePipelineStage):
 
         return query
 
+    def _execute_hf_search(self, task: SearchTask) -> Tuple[List[str], int, str]:
+        """Search HuggingFace Hub: no GitHub credentials, no dork preprocessing"""
+        peer_page = API_RESULTS_PER_PAGE if task.use_api else WEB_RESULTS_PER_PAGE
+        return client.search_with_count(
+            query=task.query,
+            session="",
+            page=task.page,
+            with_api=task.use_api,
+            peer_page=peer_page,
+            search_type="hf",
+        )
+
     def _execute_page_search(self, task: SearchTask) -> Tuple[List[str], str]:
         """Execute subsequent page search in single request"""
+        search_type = getattr(task, "search_type", "code") or "code"
+        if search_type == "hf":
+            results, _, content = self._execute_hf_search(task)
+            return results, content
+
         while True:
             # Get auth via injected provider
             if task.use_api:

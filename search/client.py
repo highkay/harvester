@@ -1194,6 +1194,13 @@ def search_with_count(
     Unified search interface that returns results, total count, and content.
     Returns: (results_list, total_count, content)
     """
+    if trim(search_type).lower() == "hf":
+        # HuggingFace Hub backend: unauthenticated, owns its own throttling
+        from search.hf import search_hf  # lazy import to avoid a module cycle
+
+        results, content, total = search_hf(query=query, page=page, peer_page=peer_page)
+        return results, total, content
+
     keywords = urllib.parse.quote_plus(query)
     if with_api:
         return search_api_with_count(keywords, session, page, peer_page, search_type=search_type)
