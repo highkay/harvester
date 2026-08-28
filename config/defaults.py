@@ -423,8 +423,8 @@ def get_default_config() -> Dict[str, Any]:
                         "query": '"serpapi.com" "api_key"',
                         "patterns": {
                             "key_pattern": (
-                                r'(?i)(?:(?:serpapi[_-]?(?:api[_-]?key|key)|'
-                                r'serp_api_key|api[_-]?key)["\'\]]{0,2}\s*[:=]\s*'
+                                r'(?i)(?:(?:SERPAPI_API_KEY|SERPAPI_KEY|SERP_API_KEY|'
+                                r'serpapi[_-]?(?:api[_-]?key|key))["\'\]]{0,2}\s*[:=]\s*'
                                 r'["\']?|search[.]json[?]api_key=)([0-9a-fA-F]{32})'
                             ),
                         },
@@ -433,8 +433,8 @@ def get_default_config() -> Dict[str, Any]:
                         "query": '"serpapi.com" "api_key="',
                         "patterns": {
                             "key_pattern": (
-                                r'(?i)(?:(?:serpapi[_-]?(?:api[_-]?key|key)|'
-                                r'serp_api_key|api[_-]?key)["\'\]]{0,2}\s*[:=]\s*'
+                                r'(?i)(?:(?:SERPAPI_API_KEY|SERPAPI_KEY|SERP_API_KEY|'
+                                r'serpapi[_-]?(?:api[_-]?key|key))["\'\]]{0,2}\s*[:=]\s*'
                                 r'["\']?|search[.]json[?]api_key=)([0-9a-fA-F]{32})'
                             ),
                         },
@@ -443,8 +443,8 @@ def get_default_config() -> Dict[str, Any]:
                         "query": '"serpapi.com/search.json"',
                         "patterns": {
                             "key_pattern": (
-                                r'(?i)(?:(?:serpapi[_-]?(?:api[_-]?key|key)|'
-                                r'serp_api_key|api[_-]?key)["\'\]]{0,2}\s*[:=]\s*'
+                                r'(?i)(?:(?:SERPAPI_API_KEY|SERPAPI_KEY|SERP_API_KEY|'
+                                r'serpapi[_-]?(?:api[_-]?key|key))["\'\]]{0,2}\s*[:=]\s*'
                                 r'["\']?|search[.]json[?]api_key=)([0-9a-fA-F]{32})'
                             ),
                         },
@@ -453,8 +453,8 @@ def get_default_config() -> Dict[str, Any]:
                         "query": '"search.json?api_key="',
                         "patterns": {
                             "key_pattern": (
-                                r'(?i)(?:(?:serpapi[_-]?(?:api[_-]?key|key)|'
-                                r'serp_api_key|api[_-]?key)["\'\]]{0,2}\s*[:=]\s*'
+                                r'(?i)(?:(?:SERPAPI_API_KEY|SERPAPI_KEY|SERP_API_KEY|'
+                                r'serpapi[_-]?(?:api[_-]?key|key))["\'\]]{0,2}\s*[:=]\s*'
                                 r'["\']?|search[.]json[?]api_key=)([0-9a-fA-F]{32})'
                             ),
                         },
@@ -463,8 +463,8 @@ def get_default_config() -> Dict[str, Any]:
                         "query": '"serpapi.com" "SERPAPI"',
                         "patterns": {
                             "key_pattern": (
-                                r'(?i)(?:(?:serpapi[_-]?(?:api[_-]?key|key)|'
-                                r'serp_api_key|api[_-]?key)["\'\]]{0,2}\s*[:=]\s*'
+                                r'(?i)(?:(?:SERPAPI_API_KEY|SERPAPI_KEY|SERP_API_KEY|'
+                                r'serpapi[_-]?(?:api[_-]?key|key))["\'\]]{0,2}\s*[:=]\s*'
                                 r'["\']?|search[.]json[?]api_key=)([0-9a-fA-F]{32})'
                             ),
                         },
@@ -473,8 +473,8 @@ def get_default_config() -> Dict[str, Any]:
                         "query": '"serpapi.com" language:Python',
                         "patterns": {
                             "key_pattern": (
-                                r'(?i)(?:(?:serpapi[_-]?(?:api[_-]?key|key)|'
-                                r'serp_api_key|api[_-]?key)["\'\]]{0,2}\s*[:=]\s*'
+                                r'(?i)(?:(?:SERPAPI_API_KEY|SERPAPI_KEY|SERP_API_KEY|'
+                                r'serpapi[_-]?(?:api[_-]?key|key))["\'\]]{0,2}\s*[:=]\s*'
                                 r'["\']?|search[.]json[?]api_key=)([0-9a-fA-F]{32})'
                             ),
                         },
@@ -483,8 +483,8 @@ def get_default_config() -> Dict[str, Any]:
                         "query": '"serpapi.com" extension:env',
                         "patterns": {
                             "key_pattern": (
-                                r'(?i)(?:(?:serpapi[_-]?(?:api[_-]?key|key)|'
-                                r'serp_api_key|api[_-]?key)["\'\]]{0,2}\s*[:=]\s*'
+                                r'(?i)(?:(?:SERPAPI_API_KEY|SERPAPI_KEY|SERP_API_KEY|'
+                                r'serpapi[_-]?(?:api[_-]?key|key))["\'\]]{0,2}\s*[:=]\s*'
                                 r'["\']?|search[.]json[?]api_key=)([0-9a-fA-F]{32})'
                             ),
                         },
@@ -493,8 +493,8 @@ def get_default_config() -> Dict[str, Any]:
                         "query": '"serpapi.com" extension:yaml',
                         "patterns": {
                             "key_pattern": (
-                                r'(?i)(?:(?:serpapi[_-]?(?:api[_-]?key|key)|'
-                                r'serp_api_key|api[_-]?key)["\'\]]{0,2}\s*[:=]\s*'
+                                r'(?i)(?:(?:SERPAPI_API_KEY|SERPAPI_KEY|SERP_API_KEY|'
+                                r'serpapi[_-]?(?:api[_-]?key|key))["\'\]]{0,2}\s*[:=]\s*'
                                 r'["\']?|search[.]json[?]api_key=)([0-9a-fA-F]{32})'
                             ),
                         },
