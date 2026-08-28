@@ -123,6 +123,8 @@ update preserves intentional local changes (reverts, port/volume tweaks).
 - `provider/serpapi.py` — `SerpapiProvider` (registered as `"serpapi"`, mirror
   of `provider/tavily.py`). Validates via SerpApi Account API
   (`account.json?api_key=`); 401 → INVALID_KEY, 200 with account JSON →
+  success (bare 200 without account fields → UNKNOWN, guarding against the
+  search.json-style open endpoint). Keys are prefix-less 32-char hex.
 - Extraction (in `examples/config-serpapi.yaml` + `config/defaults.py`
   preset): context-anchored — env-name assignments (`SERPAPI_API_KEY` /
   `SERPAPI_KEY` / `SERP_API_KEY` / `serpapi[_-]?...key`) at task level, plus a
