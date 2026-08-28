@@ -26,6 +26,7 @@ from .openai_like import OpenAILikeProvider
 from .openrouter import OpenRouterProvider
 from .qianfan import QianFanProvider
 from .qwen import QwenProvider
+from .serpapi import SerpapiProvider
 from .stabilityai import StabilityAIProvider
 from .tavily import TavilyProvider
 from .vertex import VertexProvider
@@ -55,5 +56,6 @@ __all__ = [
     "StabilityAIProvider",
     "TavilyProvider",
     "VertexProvider",
+    "SerpapiProvider",
     "GitHubTokenProvider",
 ]
