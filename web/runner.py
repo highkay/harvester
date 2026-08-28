@@ -488,6 +488,34 @@ class PipelineRunner:
                 f"run_id={run_id} error={exc}"
             )
 
+        # Serpapi push — symmetric to the tavily block above. Only fires for
+        # serpapi scans; env gating lives inside SerpapiPushService (it no-ops
+        # when SERPAPI_PROXY_BASE_URL / SERPAPI_PROXY_AUTH_KEY are unset).
+        try:
+            from web.serpapi_push import get_serpapi_push_service  # type: ignore[import-untyped,unused-ignore]
+
+            if provider_name == "serpapi":
+                serpapi_push_service = get_serpapi_push_service()
+                # Run push in a new thread to avoid blocking the completion callback
+                t = threading.Thread(
+                    target=serpapi_push_service.push_valid_keys,
+                    args=(provider_name, run_id),
+                    daemon=True,
+                )
+                t.start()
+                logger.info(
+                    f"Serpapi push triggered: provider={provider_name} run_id={run_id}"
+                )
+        except ImportError:
+            logger.info(
+                f"Serpapi push service not available: provider={provider_name} run_id={run_id}"
+            )
+        except Exception as exc:
+            logger.error(
+                f"Serpapi push hook error: provider={provider_name} "
+                f"run_id={run_id} error={exc}"
+            )
+
     def _task_names_from_config(self, config_path: Path) -> list[str]:
         """Return the names of every task defined in a config YAML.
 
