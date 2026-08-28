@@ -52,6 +52,7 @@
 | Grok Web/SSO | `grok` | `grok.com` / `x.ai` token 赋值和 session cookie 痕迹 | 浏览器上下文手动验证 | 默认刻意不扫描 `xai-` API Key 前缀 |
 | Gemini | `gemini` | `AIza...` API Key | `generativelanguage.googleapis.com/v1beta/models` | 使用 `x-goog-api-key` |
 | Tavily | `tavily` | `tvly-...` / `tavily-...` API Key | `/usage` 元数据 | 使用 `Authorization: Bearer`；inspect 会记录用量审计字段 |
+| SerpApi | `serpapi` | `SERPAPI_API_KEY` / `SERPAPI_KEY` / `SERP_API_KEY` 赋值（无前缀 32 位十六进制 Key） | `GET /account.json?api_key=`（Account API） | inspect 记录账户/套餐审计（回显的 `api_key` 字段会被丢弃）；`search.json` 不带 key 也返回 200，故不用它做验证 |
 | DeepSeek | `deepseek` | `sk-...` API Key | `GET /models` 鉴权门 + 最小 chat completion 探针（`max_tokens=1`，用于识别 402） | 默认 base URL: `https://api.deepseek.com`；401 body 可能不是 JSON；余额不足的 Key 计入 `no-quota-keys.txt` |
 | Kimi / Moonshot | `kimi` | `sk-...` API Key | `GET /v1/models` | 默认 base URL: `https://api.moonshot.cn/v1`；额度不足计入 `no-quota-keys.txt` |
 | GLM / 智谱 | `glm` | `{id}.{secret}` 点分格式 API Key | Chat completion 探针（`glm-4.7-flash`） | 默认 base URL: `https://open.bigmodel.cn/api/paas/v4`；无 `/models` 端点，因此跳过 inspect |
@@ -532,6 +533,7 @@ sequenceDiagram
 - **Google Gemini**
 - **Google Vertex AI**
 - **Tavily**
+- **SerpApi**
 - **DeepSeek**
 - **Kimi / 月之暗面(Moonshot AI)**
 - **GLM / 智谱(BigModel)**
@@ -743,6 +745,7 @@ sequenceDiagram
    > - [`examples/config-groq.yaml`](examples/config-groq.yaml) - 只跑 Groq 并输出 provider 结果文件
    > - [`examples/config-openrouter.yaml`](examples/config-openrouter.yaml) - 只跑 OpenRouter 并输出 provider 结果文件
    > - [`examples/config-tavily.yaml`](examples/config-tavily.yaml) - 只跑 Tavily 并输出 provider 结果文件
+   > - [`examples/config-serpapi.yaml`](examples/config-serpapi.yaml) - 只跑 SerpApi 并输出 provider 结果文件
    > - [`examples/config-github.yaml`](examples/config-github.yaml) - 只跑 GitHub token 扫描并输出 provider 结果文件（验证通过的 token 自动自举导入 Web token 存储）
 > - [`examples/config-deepseek.yaml`](examples/config-deepseek.yaml) - 只跑 DeepSeek 并输出 provider 结果文件
 > - [`examples/config-kimi.yaml`](examples/config-kimi.yaml) - 只跑 Kimi(Moonshot) 并输出 provider 结果文件
@@ -753,7 +756,7 @@ sequenceDiagram
    #### 主要配置选项
 
 - **`name`**: 任务的唯一标识符
-- **`provider_type`**: 决定验证方法（`openai`、`openai_like`、`anthropic`、`gemini`、`cerebras`、`openrouter`、`groq`、`grok`、`tavily`、`deepseek`、`kimi`、`glm` 等）
+- **`provider_type`**: 决定验证方法（`openai`、`openai_like`、`anthropic`、`gemini`、`cerebras`、`openrouter`、`groq`、`grok`、`tavily`、`serpapi`、`deepseek`、`kimi`、`glm` 等）
 - **`use_api` / `max_pages`**: 选择 GitHub API 或 Web 搜索，并限制每个查询最多翻几页。provider 配置统一写 `max_pages: 1000`；GitHub API 执行时仍会封顶为 10 页、每页 100 条，所以单个 API query 达到 GitHub 的 1000 条结果窗口上限。Web 搜索会直接使用配置的页数上限。
 - **`search_types`**: 可选，按 condition 展开的 GitHub 搜索类型列表，默认 `[code]`。支持 `code` / `issues` / `commits`。非 code 类型需要 `use_api: true`（Web HTML 解析仅支持 code）。
 - **`global.github_transport`**: 可选，参考 ohmygh/gx 的传输增强——`api.github.com` 边缘 IP 池（经 `hosts.ohmygh.com` + SNI 绕过 DNS 污染；后台校验不阻塞启动）、DoH 回退、ETag/TTL 响应缓存、本地链接索引（`index.skip_known_links` 可跳过已采集 URL 的 gather）、`text_match` 片段就地抽 key，以及基于 `X-RateLimit-*` 的 search/core 额度跟踪。设置了 `global.proxy` 时默认关闭边缘路由（除非 `prefer_over_proxy: true`）。**不会**把搜索主路径交给 `gx` CLI（gx 仅匿名只读，无法做需认证的 code search）。
@@ -765,9 +768,10 @@ sequenceDiagram
 
    #### Provider 特殊说明
 
-   - 内置预设使用 `provider_type: cerebras`、`openrouter`、`groq`、`grok`、`gemini` 和 `tavily`。NVIDIA NIM 使用 `provider_type: openai_like` 和它的 OpenAI 兼容端点。
+   - 内置预设使用 `provider_type: cerebras`、`openrouter`、`groq`、`grok`、`gemini`、`tavily` 和 `serpapi`。NVIDIA NIM 使用 `provider_type: openai_like` 和它的 OpenAI 兼容端点。
 - provider-only 配置统一使用 GitHub API 搜索（`use_api: true`）并设置 `max_pages: 1000`；运行时会按 GitHub API 的 10 页 / 1000 条结果窗口封顶。
 - `tavily` 预设会通过 GitHub API 搜索扫描 `tvly-...` / `tavily-...` Key（`max_pages: 1000`，API 执行封顶 10 页），并用 Tavily `/usage` 接口完成验证和用量审计。
+- `serpapi` 预设会通过 GitHub API 搜索扫描 `SERPAPI_API_KEY` / `SERPAPI_KEY` / `SERP_API_KEY` 赋值（上下文锚定提取，无前缀 32 位十六进制 Key），并用 SerpApi 免费的 `account.json` Account API 完成验证和账户/套餐审计。
    - `grok` 预设扫描 Grok Web/SSO token 赋值和 session cookie 痕迹，默认刻意不扫描 `xai-` API Key 前缀。
    - Grok Web/SSO 发现项需要浏览器上下文手动验证，因此预期会进入 `wait-check-keys.txt`，而不是 `valid-keys.txt`。
    - `cf_clearance` 属于 Cloudflare 状态，不是 Grok 凭据，因此不会被 Grok 匹配规则收集。
@@ -797,7 +801,7 @@ sequenceDiagram
    只跑一个 provider-only 配置，并审计输出结果文件：
 
    ```powershell
-   $provider = "cerebras"  # github, nvidia, cerebras, groq, openrouter, tavily, deepseek, kimi, glm
+   $provider = "cerebras"  # github, nvidia, cerebras, groq, openrouter, tavily, serpapi, deepseek, kimi, glm
    $config = "examples\config-$provider.yaml"
    $env:GITHUB_TOKENS = "ghp_xxx"
    python main.py --validate -c $config
@@ -821,6 +825,7 @@ sequenceDiagram
 - **定时扫描** — 每个 provider 独立的 cron 调度（默认每日 `0 3 * * *`，APScheduler 驱动）；支持页面"立即运行"；防重叠锁。
 - **自动推送到 gpt-load** — 扫描完成后，验证通过的 key 自动推送到 gpt-load 实例的对应分组（`POST /api/keys/add-multiple`，幂等去重）。每个任务的推送目标（实例地址 + 分组 + `max_size` 单批上限，默认 10000）均可在页面配置。
 - **自动推送到 TavilyProxyManager** — 每次 tavily 扫描完成后，验证通过的 key 自动推送到 TavilyProxyManager（需同时设置 `TAVILY_PROXY_BASE_URL` 与 `TAVILY_PROXY_AUTH_KEY`）。
+- **自动推送到 SerpApi key 池** — 每次 serpapi 扫描完成后，验证通过的 key 自动推送到配置好的 key 池服务（需同时设置 `SERPAPI_PROXY_BASE_URL` 与 `SERPAPI_PROXY_AUTH_KEY`；池端点实现与 TavilyProxyManager 相同的 `POST {base}/api/keys` 契约）。
 - **自举 Self-bootstrap** — `github` 扫描完成后，验证通过的 GitHub API token 会自动导入本实例自身的 token 存储（`label='harvester-bootstrap'`），让实例逐步扩充自己的搜索凭据池。首次扫描仍需至少一个种子 token（环境变量 `GITHUB_TOKENS` 或通过 Token API 提供）。
 - **Jinja2 管理界面** — 仪表盘、Token 管理、推送配置、调度管理、运行历史、推送日志。单一共享认证密钥（`WEB_AUTH_KEY`）：界面用会话 cookie 登录，API 用 Bearer Token。
 
@@ -835,6 +840,8 @@ sequenceDiagram
 | `GPT_LOAD_AUTH_KEY` | 空 | gpt-load 管理凭据 |
 | `TAVILY_PROXY_BASE_URL` | 空 | TavilyProxyManager 实例地址 |
 | `TAVILY_PROXY_AUTH_KEY` | 空 | 该 TavilyProxyManager 实例的 Master Key |
+| `SERPAPI_PROXY_BASE_URL` | 空 | SerpApi key 池服务地址 |
+| `SERPAPI_PROXY_AUTH_KEY` | 空 | 该 SerpApi key 池服务的 Master Key |
 | `HARVESTER_WORKSPACE` | `./data` | 工作目录（provider 结果） |
 | `HARVESTER_DB_PATH` | `<workspace>/harvester.db` | SQLite 数据库路径 |
 | `HARVESTER_SELF_BOOTSTRAP` | `1` | `github` 扫描后把验证通过的 GitHub token 自动导入本实例的 token 存储（自举；设为 `0` 关闭） |
@@ -924,6 +931,7 @@ harvester/
 │   ├── config-groq.yaml        # 只跑 Groq 的 provider 扫描
 │   ├── config-openrouter.yaml  # 只跑 OpenRouter 的 provider 扫描
 │   └── config-tavily.yaml      # 只跑 Tavily 的 provider 扫描
+│   ├── config-serpapi.yaml    # 只跑 SerpApi 的 provider 扫描
    │   ├── config-deepseek.yaml    # 只跑 DeepSeek 的 provider 扫描
    │   ├── config-kimi.yaml        # 只跑 Kimi(Moonshot) 的 provider 扫描
    │   ├── config-glm.yaml         # 只跑 GLM(智谱) 的 provider 扫描
@@ -968,6 +976,7 @@ harvester/
 │   │   ├── registry.py     # 提供商注册表
 │   │   ├── stabilityai.py  # Stability AI 提供商
 │   │   ├── tavily.py       # Tavily 提供商
+│   │   ├── serpapi.py       # SerpApi 提供商
 │   │   ├── deepseek.py     # DeepSeek 提供商
 │   │   ├── kimi.py         # Kimi(Moonshot) 提供商
 │   │   ├── glm.py          # GLM(智谱) 提供商

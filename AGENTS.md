@@ -107,12 +107,46 @@ update preserves intentional local changes (reverts, port/volume tweaks).
   - Gemini invalid keys return 400 — read the body error code.
   - Groq `/openai/v1/models` may not gate auth — follow with an authed
     chat probe.
+  - SerpApi `search.json` answers 200 with real results even WITHOUT a key —
+    validate only via `GET https://serpapi.com/account.json?api_key=`
+    (free, quota-exempt; 401 = invalid). The account response echoes the
+    `api_key` field — never store/log/inspect it.
 - **Boundary (do not cross)**: default credentials documented in gateway
   projects (one-api/new-api `root/123456` panel lineage, CLIProxyAPI
   placeholders, sub2api auto-generated admin password) are "change before
   deploy" defaults, not public authorization. Do not build default-credential
   login/call against third-party instances; passive mapping (Shodan inventory
   records) and publicly announced keys only.
+
+## Feature: serpapi provider (scan + validate + push)
+
+- `provider/serpapi.py` — `SerpapiProvider` (registered as `"serpapi"`, mirror
+  of `provider/tavily.py`). Validates via SerpApi Account API
+  (`account.json?api_key=`); 401 → INVALID_KEY, 200 with account JSON →
+  success (bare 200 without account fields → UNKNOWN, guarding against the
+  search.json-style open endpoint). Keys are prefix-less 32-char hex.
+- Extraction (in `examples/config-serpapi.yaml` + `config/defaults.py`
+  preset): context-anchored — env-name assignments (`SERPAPI_API_KEY` /
+  `SERPAPI_KEY` / `SERP_API_KEY` / `serpapi[_-]?...key`) at task level, wider
+  variadic for domain-anchored conditions (plain `api_key` assignments and
+  `search.json?api_key=` URLs). Deliberately NO bare `[0-9a-f]{32}` pattern
+  (hex digests would flood the check stage's cheap-but-bounded budget).
+- Push: `web/serpapi_push.py` `SerpapiPushService` (mirror of
+  `web/tavily_push.py`), env-gated by `SERPAPI_PROXY_BASE_URL` /
+  `SERPAPI_PROXY_AUTH_KEY` — silent no-op until configured (prod leaves them
+  unset by design; operator fills them in later). Contract identical to
+  TavilyProxyManager: `POST {base}/api/keys`, Bearer, `{"key","alias":...}`;
+  only 32-hex keys are pushed; one `push_logs` row.
+- Hook: `web/runner.py` `_on_completed` fires serpapi push iff
+  `provider_name == "serpapi"` (daemon thread, ImportError-safe).
+- Schedule: `("serpapi", "10 */6 * * *", "examples/config-serpapi.yaml")` in
+  `web/scheduler.py` — seeds only into an EMPTY `schedule_config` table, so
+  prod needs a one-off row insert (or UI add) after deploy.
+- Redaction: NO `tools/patterns.py` entry (bare hex would blitz logs); the
+  provider never writes keys to disk/logs.
+- Tests: `tests/test_serpapi_provider.py`, `tests/test_web_serpapi_push.py`,
+  `tests/test_web_runner_serpapi.py`; scheduler expectations updated in
+  `tests/test_web_scheduler.py`.
 
 ## Tests & conventions
 

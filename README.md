@@ -54,6 +54,7 @@ The system aims to build a **universal data acquisition framework** primarily ta
 | Grok Web/SSO | `grok` | `grok.com` / `x.ai` token assignments and session-cookie traces | Manual browser-context check | Intentionally does not scan the `xai-` API-key prefix by default |
 | Gemini | `gemini` | `AIza...` API keys | `generativelanguage.googleapis.com/v1beta/models` | Uses `x-goog-api-key` |
 | Tavily | `tavily` | `tvly-...` / `tavily-...` API keys | `/usage` metadata | Uses `Authorization: Bearer`; inspect stores usage audit fields |
+| SerpApi | `serpapi` | `SERPAPI_API_KEY` / `SERPAPI_KEY` / `SERP_API_KEY` assignments (prefix-less 32-char hex keys) | `GET /account.json?api_key=` (Account API) | Account/plan audit via inspect (echoed `api_key` field is dropped); `search.json` answers 200 without a key and is NOT used for validation |
 | DeepSeek | `deepseek` | `sk-...` API keys | `GET /models` gate + minimal chat-completion probe (`max_tokens=1`) to surface 402 | Default base URL: `https://api.deepseek.com`; 401 body may be non-JSON; zero-balance keys map to `no-quota-keys.txt` |
 | Kimi / Moonshot | `kimi` | `sk-...` API keys | `GET /v1/models` | Default base URL: `https://api.moonshot.cn/v1`; quotas map to `no-quota-keys.txt` |
 | GLM / Zhipu | `glm` | `{id}.{secret}` dot-form API keys | Chat completion probe (`glm-4.7-flash`) | Default base URL: `https://open.bigmodel.cn/api/paas/v4`; no `/models` endpoint, so inspect is skipped |
@@ -546,6 +547,7 @@ The system features a sophisticated **Query Optimization Engine** with mathemati
 - **Google Gemini**
 - **Google Vertex AI**
 - **Tavily**
+- **SerpApi**
 - **DeepSeek**
 - **Kimi / Moonshot AI**
 - **GLM / Zhipu AI (BigModel)**
@@ -743,6 +745,7 @@ The system features a sophisticated **Query Optimization Engine** with mathemati
    > - [`examples/config-groq.yaml`](examples/config-groq.yaml) - Groq-only scan that writes provider result files
    > - [`examples/config-openrouter.yaml`](examples/config-openrouter.yaml) - OpenRouter-only scan that writes provider result files
    > - [`examples/config-tavily.yaml`](examples/config-tavily.yaml) - Tavily-only scan that writes provider result files
+   > - [`examples/config-serpapi.yaml`](examples/config-serpapi.yaml) - SerpApi-only scan that writes provider result files
    > - [`examples/config-github.yaml`](examples/config-github.yaml) - GitHub token scan that writes provider result files (validated tokens self-bootstrap into the web token store)
 > - [`examples/config-deepseek.yaml`](examples/config-deepseek.yaml) - DeepSeek-only scan that writes provider result files
 > - [`examples/config-kimi.yaml`](examples/config-kimi.yaml) - Kimi (Moonshot)-only scan that writes provider result files
@@ -754,7 +757,7 @@ The system features a sophisticated **Query Optimization Engine** with mathemati
    #### Key Configuration Options
 
 - **`name`**: Unique identifier for the task
-- **`provider_type`**: Determines validation method (`openai`, `openai_like`, `anthropic`, `gemini`, `cerebras`, `openrouter`, `groq`, `grok`, `tavily`, `deepseek`, `kimi`, `glm`, etc.)
+- **`provider_type`**: Determines validation method (`openai`, `openai_like`, `anthropic`, `gemini`, `cerebras`, `openrouter`, `groq`, `grok`, `tavily`, `serpapi`, `deepseek`, `kimi`, `glm`, etc.)
 - **`use_api` / `max_pages`**: Select GitHub API or web search and cap pages per query. The provider configs set `max_pages: 1000`; GitHub API search still caps execution at 10 pages of 100 results, so a single API query reaches GitHub's 1000-result ceiling. Web search uses the configured page cap directly.
 - **`search_types`**: Optional list of GitHub search kinds to fan out per condition. Default is `[code]`. Supported values: `code`, `issues`, `commits`. Non-code types require `use_api: true` (web HTML parsing only supports code).
 - **`global.github_transport`**: Optional ohmygh/gx-inspired transport layer — edge IP pool for `api.github.com` (bypass polluted DNS via `hosts.ohmygh.com` + SNI; background verify so startup stays fast), DoH fallback, ETag/TTL response cache, local link index (`index.skip_known_links` for gather dedup), `text_match` fragments for in-result key extraction, and `search`/`core` quota tracking from `X-RateLimit-*` headers. Edge routing auto-disables when `global.proxy` is set unless `prefer_over_proxy: true`. Does **not** shell out to the `gx` CLI for search (gx is anonymous-only and cannot do authenticated code search).
@@ -766,9 +769,10 @@ The system features a sophisticated **Query Optimization Engine** with mathemati
 
    #### Provider-Specific Notes
 
-   - Use `provider_type: cerebras`, `openrouter`, `groq`, `grok`, `gemini` and `tavily` for the built-in presets. NVIDIA NIM uses `provider_type: openai_like` with its OpenAI-compatible endpoint.
+   - Use `provider_type: cerebras`, `openrouter`, `groq`, `grok`, `gemini`, `tavily` and `serpapi` for the built-in presets. NVIDIA NIM uses `provider_type: openai_like` with its OpenAI-compatible endpoint.
 - The provider-only configs use GitHub API search (`use_api: true`) with `max_pages: 1000`; runtime execution is capped to GitHub's 10-page / 1000-result API window per query.
 - The `tavily` preset scans `tvly-...` / `tavily-...` keys through GitHub API search (`max_pages: 1000`, API-capped to 10 pages) and validates/audits them with Tavily's `/usage` endpoint.
+- The `serpapi` preset scans `SERPAPI_API_KEY` / `SERPAPI_KEY` / `SERP_API_KEY` assignments through GitHub API search (context-anchored extraction, prefix-less 32-char hex keys) and validates/audits them with SerpApi's free `account.json` Account API.
    - The `grok` preset scans Grok web/SSO token assignments and session-cookie traces. It intentionally does not scan the `xai-` API-key prefix by default.
    - Grok web/SSO findings require browser-context manual verification, so they are expected to land in `wait-check-keys.txt` rather than `valid-keys.txt`.
    - `cf_clearance` is intentionally excluded from Grok matching because it is Cloudflare state, not a Grok credential.
@@ -798,7 +802,7 @@ The system features a sophisticated **Query Optimization Engine** with mathemati
    To run one provider-only config and audit the result files:
 
    ```powershell
-   $provider = "cerebras"  # github, nvidia, cerebras, groq, openrouter, tavily, deepseek, kimi, glm
+   $provider = "cerebras"  # github, nvidia, cerebras, groq, openrouter, tavily, serpapi, deepseek, kimi, glm
    $config = "examples\config-$provider.yaml"
    $env:GITHUB_TOKENS = "ghp_xxx"
    python main.py --validate -c $config
@@ -831,6 +835,11 @@ pipeline into a long-running service:
 - **Automatic push to TavilyProxyManager** — after each tavily scan completes,
   validated keys are auto-pushed to TavilyProxyManager (requires both
   `TAVILY_PROXY_BASE_URL` and `TAVILY_PROXY_AUTH_KEY` to be set).
+- **Automatic push to SerpApi key pool** — after each serpapi scan completes,
+  validated keys are auto-pushed to a configured key-pool service (requires
+  both `SERPAPI_PROXY_BASE_URL` and `SERPAPI_PROXY_AUTH_KEY` to be set; the
+  pool endpoint implements the same `POST {base}/api/keys` contract as
+  TavilyProxyManager).
 - **Self-bootstrap** — after a `github` scan completes, validated GitHub API
   tokens are automatically imported into this instance's own token store
   (`label='harvester-bootstrap'`) so the instance grows its own search
@@ -852,6 +861,8 @@ pipeline into a long-running service:
 | `GPT_LOAD_AUTH_KEY` | empty | gpt-load management auth key |
 | `TAVILY_PROXY_BASE_URL` | empty | TavilyProxyManager instance address |
 | `TAVILY_PROXY_AUTH_KEY` | empty | Master key for that TavilyProxyManager instance |
+| `SERPAPI_PROXY_BASE_URL` | empty | SerpApi key-pool service address |
+| `SERPAPI_PROXY_AUTH_KEY` | empty | Master key for that SerpApi key-pool service |
 | `HARVESTER_WORKSPACE` | `./data` | Workspace (provider results) |
 | `HARVESTER_DB_PATH` | `<workspace>/harvester.db` | SQLite DB path |
 | `HARVESTER_SELF_BOOTSTRAP` | `1` | Auto-import validated GitHub tokens into this instance's token store after a github scan (self-bootstrap; set 0 to disable) |
@@ -945,6 +956,7 @@ harvester/
 │   ├── config-groq.yaml        # Groq-only provider scan
 │   ├── config-openrouter.yaml  # OpenRouter-only provider scan
 │   └── config-tavily.yaml      # Tavily-only provider scan
+│   ├── config-serpapi.yaml    # SerpApi-only provider scan
    │   ├── config-deepseek.yaml    # DeepSeek-only provider scan
    │   ├── config-kimi.yaml        # Kimi (Moonshot)-only provider scan
    │   ├── config-glm.yaml         # GLM (Zhipu)-only provider scan
@@ -991,6 +1003,7 @@ harvester/
 │   │   ├── stabilityai.py  # Stability AI provider
 │   │   ├── tavily.py       # Tavily provider
 │   │   ├── deepseek.py     # DeepSeek provider
+│   │   ├── serpapi.py       # SerpApi provider
 │   │   ├── kimi.py         # Kimi (Moonshot) provider
 │   │   ├── glm.py          # GLM (Zhipu) provider
 │   │   ├── vertex.py       # Google Vertex AI provider
