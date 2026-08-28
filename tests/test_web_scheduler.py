@@ -58,7 +58,17 @@ class TestSeedData(unittest.TestCase):
     """
 
     _EXPECTED_PROVIDERS = frozenset(
-        {"deepseek", "kimi", "mimo-cn", "qwen-cn", "glm", "modelscope", "tavily", "github"}
+        {
+            "deepseek",
+            "kimi",
+            "mimo-cn",
+            "qwen-cn",
+            "glm",
+            "modelscope",
+            "tavily",
+            "github",
+            "serpapi",
+        }
     )
     _EXPECTED_CRONS = {
         "deepseek": "0 */4 * * *",
@@ -69,6 +79,7 @@ class TestSeedData(unittest.TestCase):
         "modelscope": "20 */6 * * *",
         "tavily": "40 */6 * * *",
         "github": "50 */6 * * *",
+        "serpapi": "10 */6 * * *",
     }
     _EXPECTED_CONFIG_FILES = {
         "deepseek": "examples/config-deepseek.yaml",
@@ -79,6 +90,7 @@ class TestSeedData(unittest.TestCase):
         "modelscope": "examples/config-modelscope.yaml",
         "tavily": "examples/config-tavily.yaml",
         "github": "examples/config-github.yaml",
+        "serpapi": "examples/config-serpapi.yaml",
     }
 
     def test_seeds_defaults_on_empty_table(self) -> None:

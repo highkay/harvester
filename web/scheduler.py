@@ -48,6 +48,9 @@ _DEFAULT_SCHEDULES: tuple[tuple[str, str, str], ...] = (
     # GitHub token self-bootstrap — scan every 6 hours so the instance's own
     # token pool keeps growing; staggered at :50 to avoid the 0/20/40 burst.
     ("github", "50 */6 * * *", "examples/config-github.yaml"),
+    # SerpApi keys are account-based (monthly plans) — every 6 hours, at :10
+    # to stagger between the :00/:20/:40/:50 six-hour burst.
+    ("serpapi", "10 */6 * * *", "examples/config-serpapi.yaml"),
 )
 
 

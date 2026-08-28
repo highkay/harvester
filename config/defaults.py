@@ -367,6 +367,145 @@ def get_default_config() -> Dict[str, Any]:
                     "plan": "",
                 },
             },
+            {
+                "name": "serpapi",
+                "enabled": False,
+                "provider_type": "serpapi",
+                "use_api": True,
+                "max_pages": 1000,
+                "stages": {
+                    "search": True,
+                    "gather": True,
+                    "check": True,
+                    "inspect": True,
+                },
+                "extras": {},
+                "api": {
+                    "base_url": "https://serpapi.com",
+                    "completion_path": "/search.json",
+                    "model_path": "/account.json",
+                    "default_model": "serpapi-account",
+                    "auth_key": "",
+                    "extra_headers": {},
+                    "api_version": "",
+                    "timeout": 30,
+                    "retries": 3,
+                },
+                "patterns": {
+                    "key_pattern": (
+                        r'(?i)(?:SERPAPI_API_KEY|SERPAPI_KEY|SERP_API_KEY|'
+                        r'serpapi[_-]?(?:api[_-]?key|key))["\'\]]{0,2}\s*[:=]\s*'
+                        r'["\']?([0-9a-fA-F]{32})["\']?'
+                    ),
+                    "address_pattern": "",
+                    "endpoint_pattern": "",
+                    "model_pattern": "",
+                },
+                "conditions": [
+                    {"query": '"SERPAPI_API_KEY"'},
+                    {"query": '"SERPAPI_KEY"'},
+                    {"query": '"SERP_API_KEY"'},
+                    {"query": '"serpapi_key"'},
+                    {"query": '"SERPAPI_API_KEY="'},
+                    {"query": '"SERPAPI_API_KEY:"'},
+                    {"query": '"SERPAPI_KEY="'},
+                    {"query": '"SERPAPI_KEY:"'},
+                    {"query": '"SERPAPI_API_KEY" language:Python'},
+                    {"query": '"SERPAPI_API_KEY" language:JavaScript'},
+                    {"query": '"SERPAPI_API_KEY" language:TypeScript'},
+                    {"query": '"SERPAPI_API_KEY" language:Go'},
+                    {"query": '"SERPAPI_API_KEY" extension:env'},
+                    {"query": '"SERPAPI_API_KEY" extension:json'},
+                    {"query": '"SERPAPI_API_KEY" extension:yaml'},
+                    {"query": '"SERPAPI_API_KEY" extension:yml'},
+                    {"query": '"SERPAPI_API_KEY" extension:toml'},
+                    {
+                        "query": '"serpapi.com" "api_key"',
+                        "patterns": {
+                            "key_pattern": (
+                                r'(?i)(?:(?:serpapi[_-]?(?:api[_-]?key|key)|'
+                                r'serp_api_key|api[_-]?key)["\'\]]{0,2}\s*[:=]\s*'
+                                r'["\']?|search[.]json[?]api_key=)([0-9a-fA-F]{32})'
+                            ),
+                        },
+                    },
+                    {
+                        "query": '"serpapi.com" "api_key="',
+                        "patterns": {
+                            "key_pattern": (
+                                r'(?i)(?:(?:serpapi[_-]?(?:api[_-]?key|key)|'
+                                r'serp_api_key|api[_-]?key)["\'\]]{0,2}\s*[:=]\s*'
+                                r'["\']?|search[.]json[?]api_key=)([0-9a-fA-F]{32})'
+                            ),
+                        },
+                    },
+                    {
+                        "query": '"serpapi.com/search.json"',
+                        "patterns": {
+                            "key_pattern": (
+                                r'(?i)(?:(?:serpapi[_-]?(?:api[_-]?key|key)|'
+                                r'serp_api_key|api[_-]?key)["\'\]]{0,2}\s*[:=]\s*'
+                                r'["\']?|search[.]json[?]api_key=)([0-9a-fA-F]{32})'
+                            ),
+                        },
+                    },
+                    {
+                        "query": '"search.json?api_key="',
+                        "patterns": {
+                            "key_pattern": (
+                                r'(?i)(?:(?:serpapi[_-]?(?:api[_-]?key|key)|'
+                                r'serp_api_key|api[_-]?key)["\'\]]{0,2}\s*[:=]\s*'
+                                r'["\']?|search[.]json[?]api_key=)([0-9a-fA-F]{32})'
+                            ),
+                        },
+                    },
+                    {
+                        "query": '"serpapi.com" "SERPAPI"',
+                        "patterns": {
+                            "key_pattern": (
+                                r'(?i)(?:(?:serpapi[_-]?(?:api[_-]?key|key)|'
+                                r'serp_api_key|api[_-]?key)["\'\]]{0,2}\s*[:=]\s*'
+                                r'["\']?|search[.]json[?]api_key=)([0-9a-fA-F]{32})'
+                            ),
+                        },
+                    },
+                    {
+                        "query": '"serpapi.com" language:Python',
+                        "patterns": {
+                            "key_pattern": (
+                                r'(?i)(?:(?:serpapi[_-]?(?:api[_-]?key|key)|'
+                                r'serp_api_key|api[_-]?key)["\'\]]{0,2}\s*[:=]\s*'
+                                r'["\']?|search[.]json[?]api_key=)([0-9a-fA-F]{32})'
+                            ),
+                        },
+                    },
+                    {
+                        "query": '"serpapi.com" extension:env',
+                        "patterns": {
+                            "key_pattern": (
+                                r'(?i)(?:(?:serpapi[_-]?(?:api[_-]?key|key)|'
+                                r'serp_api_key|api[_-]?key)["\'\]]{0,2}\s*[:=]\s*'
+                                r'["\']?|search[.]json[?]api_key=)([0-9a-fA-F]{32})'
+                            ),
+                        },
+                    },
+                    {
+                        "query": '"serpapi.com" extension:yaml',
+                        "patterns": {
+                            "key_pattern": (
+                                r'(?i)(?:(?:serpapi[_-]?(?:api[_-]?key|key)|'
+                                r'serp_api_key|api[_-]?key)["\'\]]{0,2}\s*[:=]\s*'
+                                r'["\']?|search[.]json[?]api_key=)([0-9a-fA-F]{32})'
+                            ),
+                        },
+                    },
+                ],
+                "rate_limit": {"base_rate": 2.0, "burst_limit": 10, "adaptive": True},
+                "storage": {
+                    "directory": "",
+                    "plan": "",
+                },
+            },
         {
                 "name": "deepseek",
                 "enabled": False,
