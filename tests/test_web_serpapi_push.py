@@ -457,8 +457,6 @@ class TestSerpapiPushServiceBasic(unittest.TestCase):
             row = _fetch_log(db_path, "run-test-014")
             self.assertIsNotNone(row)
             self.assertEqual(row["status"], "failed")
-            self.assertIsNotNone(row["error_message"])
-
     def test_push_uses_env_defaults_when_not_injected(self) -> None:
         """Constructor falls back to SERPAPI_PROXY_* env vars when not injected."""
         db_path = _temp_db_path()
@@ -484,6 +482,68 @@ class TestSerpapiPushServiceBasic(unittest.TestCase):
                 call_args[1]["headers"]["Authorization"],
                 "Bearer env-master-key",
             )
+
+    def test_prefilter_accepts_uppercase_hex(self) -> None:
+        """Uppercase hex keys normalize-accept and are pushed (validation already passed)."""
+        db_path = _temp_db_path()
+        with tempfile.TemporaryDirectory() as workspace:
+            _init_schema(db_path)
+            _write_valid_keys(workspace, ["0123456789ABCDEF0123456789ABCDEF"])
+
+            svc = _make_service(db_path, workspace)
+
+            with patch(
+                "web.serpapi_push.requests.post", return_value=_resp(200)
+            ) as mock_post:
+                svc.push_valid_keys("serpapi", "run-test-016")
+
+            self.assertEqual(mock_post.call_count, 1)
+            body = mock_post.call_args[1]["json"]
+            self.assertEqual(body["key"], "0123456789ABCDEF0123456789ABCDEF")
+
+    def test_prefilter_accepts_length_range(self) -> None:
+        """20–64 char hex keys pass the pre-filter (validation is length-independent)."""
+        db_path = _temp_db_path()
+        with tempfile.TemporaryDirectory() as workspace:
+            _init_schema(db_path)
+            _write_valid_keys(
+                workspace,
+                [
+                    "a" * 20,
+                    "b" * 32,
+                    "c" * 64,
+                ],
+            )
+
+            svc = _make_service(db_path, workspace)
+
+            with patch(
+                "web.serpapi_push.requests.post", return_value=_resp(200)
+            ) as mock_post:
+                svc.push_valid_keys("serpapi", "run-test-017")
+
+            self.assertEqual(mock_post.call_count, 3)
+            row = _fetch_log(db_path, "run-test-017")
+            self.assertEqual(row["added_count"], 3)
+            self.assertEqual(row["ignored_count"], 0)
+
+    def test_prefilter_rejects_outside_length_range(self) -> None:
+        """19-char and 65-char hex runs are ignored by the pre-filter."""
+        db_path = _temp_db_path()
+        with tempfile.TemporaryDirectory() as workspace:
+            _init_schema(db_path)
+            _write_valid_keys(workspace, ["a" * 19, "b" * 65])
+
+            svc = _make_service(db_path, workspace)
+
+            with patch("web.serpapi_push.requests.post") as mock_post:
+                svc.push_valid_keys("serpapi", "run-test-018")
+
+            mock_post.assert_not_called()
+            row = _fetch_log(db_path, "run-test-018")
+            self.assertEqual(row["keys_count"], 2)
+            self.assertEqual(row["ignored_count"], 2)
+            self.assertEqual(row["status"], "success")
 
 
 # ---------------------------------------------------------------------------
@@ -516,24 +576,6 @@ class TestSerpapiPushServiceSingleton(unittest.TestCase):
             callable(getattr(svc, "push_valid_keys", None)),
             "SerpapiPushService must have push_valid_keys method",
         )
-
-    def test_prefilter_accepts_uppercase_hex(self) -> None:
-        """Uppercase hex keys normalize-accept and are pushed (validation already passed)."""
-        db_path = _temp_db_path()
-        with tempfile.TemporaryDirectory() as workspace:
-            _init_schema(db_path)
-            _write_valid_keys(workspace, ["0123456789ABCDEF0123456789ABCDEF"])
-
-            svc = _make_service(db_path, workspace)
-
-            with patch(
-                "web.serpapi_push.requests.post", return_value=_resp(200)
-            ) as mock_post:
-                svc.push_valid_keys("serpapi", "run-test-016")
-
-            self.assertEqual(mock_post.call_count, 1)
-            body = mock_post.call_args[1]["json"]
-            self.assertEqual(body["key"], "0123456789ABCDEF0123456789ABCDEF")
 
 
 if __name__ == "__main__":

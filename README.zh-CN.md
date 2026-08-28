@@ -52,7 +52,7 @@
 | Grok Web/SSO | `grok` | `grok.com` / `x.ai` token 赋值和 session cookie 痕迹 | 浏览器上下文手动验证 | 默认刻意不扫描 `xai-` API Key 前缀 |
 | Gemini | `gemini` | `AIza...` API Key | `generativelanguage.googleapis.com/v1beta/models` | 使用 `x-goog-api-key` |
 | Tavily | `tavily` | `tvly-...` / `tavily-...` API Key | `/usage` 元数据 | 使用 `Authorization: Bearer`；inspect 会记录用量审计字段 |
-| SerpApi | `serpapi` | `SERPAPI_API_KEY` / `SERPAPI_KEY` / `SERP_API_KEY` 赋值（无前缀 32 位十六进制 Key） | `GET /account.json?api_key=`（Account API） | inspect 记录账户/套餐审计（回显的 `api_key` 字段会被丢弃）；`search.json` 不带 key 也返回 200，故不用它做验证 |
+| SerpApi | `serpapi` | `SERPAPI_API_KEY` / `SERPAPI_KEY` / `SERP_API_KEY` 赋值（无前缀十六进制 Key（20-64 位，通常 32 位）） | `GET /account.json?api_key=`（Account API） | inspect 记录账户/套餐审计（回显的 `api_key` 字段会被丢弃）；`search.json` 不带 key 也返回 200，故不用它做验证 |
 | DeepSeek | `deepseek` | `sk-...` API Key | `GET /models` 鉴权门 + 最小 chat completion 探针（`max_tokens=1`，用于识别 402） | 默认 base URL: `https://api.deepseek.com`；401 body 可能不是 JSON；余额不足的 Key 计入 `no-quota-keys.txt` |
 | Kimi / Moonshot | `kimi` | `sk-...` API Key | `GET /v1/models` | 默认 base URL: `https://api.moonshot.cn/v1`；额度不足计入 `no-quota-keys.txt` |
 | GLM / 智谱 | `glm` | `{id}.{secret}` 点分格式 API Key | Chat completion 探针（`glm-4.7-flash`） | 默认 base URL: `https://open.bigmodel.cn/api/paas/v4`；无 `/models` 端点，因此跳过 inspect |
@@ -771,7 +771,7 @@ sequenceDiagram
    - 内置预设使用 `provider_type: cerebras`、`openrouter`、`groq`、`grok`、`gemini`、`tavily` 和 `serpapi`。NVIDIA NIM 使用 `provider_type: openai_like` 和它的 OpenAI 兼容端点。
 - provider-only 配置统一使用 GitHub API 搜索（`use_api: true`）并设置 `max_pages: 1000`；运行时会按 GitHub API 的 10 页 / 1000 条结果窗口封顶。
 - `tavily` 预设会通过 GitHub API 搜索扫描 `tvly-...` / `tavily-...` Key（`max_pages: 1000`，API 执行封顶 10 页），并用 Tavily `/usage` 接口完成验证和用量审计。
-- `serpapi` 预设会通过 GitHub API 搜索扫描 `SERPAPI_API_KEY` / `SERPAPI_KEY` / `SERP_API_KEY` 赋值（上下文锚定提取，无前缀 32 位十六进制 Key），并用 SerpApi 免费的 `account.json` Account API 完成验证和账户/套餐审计。
+- `serpapi` 预设会通过 GitHub API 搜索扫描 `SERPAPI_API_KEY` / `SERPAPI_KEY` / `SERP_API_KEY` 赋值（上下文锚定提取，无前缀十六进制 Key（20-64 位，通常 32 位）），并用 SerpApi 免费的 `account.json` Account API 完成验证和账户/套餐审计。
    - `grok` 预设扫描 Grok Web/SSO token 赋值和 session cookie 痕迹，默认刻意不扫描 `xai-` API Key 前缀。
    - Grok Web/SSO 发现项需要浏览器上下文手动验证，因此预期会进入 `wait-check-keys.txt`，而不是 `valid-keys.txt`。
    - `cf_clearance` 属于 Cloudflare 状态，不是 Grok 凭据，因此不会被 Grok 匹配规则收集。

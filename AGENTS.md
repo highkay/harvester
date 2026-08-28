@@ -124,7 +124,7 @@ update preserves intentional local changes (reverts, port/volume tweaks).
   of `provider/tavily.py`). Validates via SerpApi Account API
   (`account.json?api_key=`); 401 → INVALID_KEY, 200 with account JSON →
   success (bare 200 without account fields → UNKNOWN, guarding against the
-  search.json-style open endpoint). Keys are prefix-less 32-char hex.
+  search.json-style open endpoint). Keys are prefix-less hex; the harness accepts 20-64 chars (typically 32) so validation stays length-independent.
 - Extraction (in `examples/config-serpapi.yaml` + `config/defaults.py`
   preset): context-anchored — env-name assignments (`SERPAPI_API_KEY` /
   `SERPAPI_KEY` / `SERP_API_KEY` / `serpapi[_-]?...key`) at task level, plus a

@@ -9,7 +9,7 @@ so all DB and HTTP access is synchronous (``sqlite3`` + ``requests``).
 
 Deliberately mirrors ``web.tavily_push.py`` but stays a separate module: the
 target service is configured via its own env pair (``SERPAPI_PROXY_BASE_URL`` /
-``SERPAPI_PROXY_AUTH_KEY``), keys are pre-filtered to prefix-less 32-char hex
+``SERPAPI_PROXY_AUTH_KEY``), keys are pre-filtered to prefix-less hex strings (20-64 chars)
 strings, and the provider gate is ``serpapi``. Env-driven, so production keeps
 working (silent no-op) until the pool endpoint is configured.
 """
@@ -39,11 +39,11 @@ _TIMEOUT_SECONDS: int = 30
 _MAX_RETRIES: int = 3
 _RETRY_BACKOFF_BASE: float = 1.0  # seconds
 _RETRY_BACKOFF_MULTIPLIER: float = 3.0
-
 _UNAUTHORIZED_MESSAGE: str = "unauthorized (invalid master key)"
 
-# SerpApi keys are prefix-less 32-char hex strings.
-_KEY_RE: re.Pattern[str] = re.compile(r"[0-9a-fA-F]{32}")
+# SerpApi keys are prefix-less hex strings — accept 20–64 chars so validation
+# verdicts stay length-independent; other lines count as ignored.
+_KEY_RE: re.Pattern[str] = re.compile(r"[0-9a-fA-F]{20,64}")
 
 
 # ---------------------------------------------------------------------------
