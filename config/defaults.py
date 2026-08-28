@@ -425,7 +425,7 @@ def get_default_config() -> Dict[str, Any]:
                             "key_pattern": (
                                 r'(?i)(?:(?:SERPAPI_API_KEY|SERPAPI_KEY|SERP_API_KEY|'
                                 r'serpapi[_-]?(?:api[_-]?key|key))["\'\]]{0,2}\s*[:=]\s*'
-                                r'["\']?|search[.]json[?]api_key=)([0-9a-fA-F]{32})'
+                                r'["\']?|(?:[?&]|&amp;)api_key=)([0-9a-fA-F]{32})(?=["\'\s&#]|$)'
                             ),
                         },
                     },
@@ -435,7 +435,7 @@ def get_default_config() -> Dict[str, Any]:
                             "key_pattern": (
                                 r'(?i)(?:(?:SERPAPI_API_KEY|SERPAPI_KEY|SERP_API_KEY|'
                                 r'serpapi[_-]?(?:api[_-]?key|key))["\'\]]{0,2}\s*[:=]\s*'
-                                r'["\']?|search[.]json[?]api_key=)([0-9a-fA-F]{32})'
+                                r'["\']?|(?:[?&]|&amp;)api_key=)([0-9a-fA-F]{32})(?=["\'\s&#]|$)'
                             ),
                         },
                     },
@@ -445,7 +445,7 @@ def get_default_config() -> Dict[str, Any]:
                             "key_pattern": (
                                 r'(?i)(?:(?:SERPAPI_API_KEY|SERPAPI_KEY|SERP_API_KEY|'
                                 r'serpapi[_-]?(?:api[_-]?key|key))["\'\]]{0,2}\s*[:=]\s*'
-                                r'["\']?|search[.]json[?]api_key=)([0-9a-fA-F]{32})'
+                                r'["\']?|(?:[?&]|&amp;)api_key=)([0-9a-fA-F]{32})(?=["\'\s&#]|$)'
                             ),
                         },
                     },
@@ -455,7 +455,7 @@ def get_default_config() -> Dict[str, Any]:
                             "key_pattern": (
                                 r'(?i)(?:(?:SERPAPI_API_KEY|SERPAPI_KEY|SERP_API_KEY|'
                                 r'serpapi[_-]?(?:api[_-]?key|key))["\'\]]{0,2}\s*[:=]\s*'
-                                r'["\']?|search[.]json[?]api_key=)([0-9a-fA-F]{32})'
+                                r'["\']?|(?:[?&]|&amp;)api_key=)([0-9a-fA-F]{32})(?=["\'\s&#]|$)'
                             ),
                         },
                     },
@@ -465,7 +465,7 @@ def get_default_config() -> Dict[str, Any]:
                             "key_pattern": (
                                 r'(?i)(?:(?:SERPAPI_API_KEY|SERPAPI_KEY|SERP_API_KEY|'
                                 r'serpapi[_-]?(?:api[_-]?key|key))["\'\]]{0,2}\s*[:=]\s*'
-                                r'["\']?|search[.]json[?]api_key=)([0-9a-fA-F]{32})'
+                                r'["\']?|(?:[?&]|&amp;)api_key=)([0-9a-fA-F]{32})(?=["\'\s&#]|$)'
                             ),
                         },
                     },
@@ -475,7 +475,7 @@ def get_default_config() -> Dict[str, Any]:
                             "key_pattern": (
                                 r'(?i)(?:(?:SERPAPI_API_KEY|SERPAPI_KEY|SERP_API_KEY|'
                                 r'serpapi[_-]?(?:api[_-]?key|key))["\'\]]{0,2}\s*[:=]\s*'
-                                r'["\']?|search[.]json[?]api_key=)([0-9a-fA-F]{32})'
+                                r'["\']?|(?:[?&]|&amp;)api_key=)([0-9a-fA-F]{32})(?=["\'\s&#]|$)'
                             ),
                         },
                     },
@@ -485,7 +485,7 @@ def get_default_config() -> Dict[str, Any]:
                             "key_pattern": (
                                 r'(?i)(?:(?:SERPAPI_API_KEY|SERPAPI_KEY|SERP_API_KEY|'
                                 r'serpapi[_-]?(?:api[_-]?key|key))["\'\]]{0,2}\s*[:=]\s*'
-                                r'["\']?|search[.]json[?]api_key=)([0-9a-fA-F]{32})'
+                                r'["\']?|(?:[?&]|&amp;)api_key=)([0-9a-fA-F]{32})(?=["\'\s&#]|$)'
                             ),
                         },
                     },
@@ -495,7 +495,7 @@ def get_default_config() -> Dict[str, Any]:
                             "key_pattern": (
                                 r'(?i)(?:(?:SERPAPI_API_KEY|SERPAPI_KEY|SERP_API_KEY|'
                                 r'serpapi[_-]?(?:api[_-]?key|key))["\'\]]{0,2}\s*[:=]\s*'
-                                r'["\']?|search[.]json[?]api_key=)([0-9a-fA-F]{32})'
+                                r'["\']?|(?:[?&]|&amp;)api_key=)([0-9a-fA-F]{32})(?=["\'\s&#]|$)'
                             ),
                         },
                     },

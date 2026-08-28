@@ -134,35 +134,35 @@ tasks:
       - query: '"serpapi.com" "api_key"'
         patterns:
           key_pattern: >-
-            (?i)(?:(?:SERPAPI_API_KEY|SERPAPI_KEY|SERP_API_KEY|serpapi[_-]?(?:api[_-]?key|key))["'\]]{0,2}\s*[:=]\s*["']?|search[.]json[?]api_key=)([0-9a-fA-F]{32})
+            (?i)(?:(?:SERPAPI_API_KEY|SERPAPI_KEY|SERP_API_KEY|serpapi[_-]?(?:api[_-]?key|key))["'\]]{0,2}\s*[:=]\s*["']?|(?:[?&]|&amp;)api_key=)([0-9a-fA-F]{32})(?=["'\s&#]|$)
       - query: '"serpapi.com" "api_key="'
         patterns:
           key_pattern: >-
-            (?i)(?:(?:SERPAPI_API_KEY|SERPAPI_KEY|SERP_API_KEY|serpapi[_-]?(?:api[_-]?key|key))["'\]]{0,2}\s*[:=]\s*["']?|search[.]json[?]api_key=)([0-9a-fA-F]{32})
+            (?i)(?:(?:SERPAPI_API_KEY|SERPAPI_KEY|SERP_API_KEY|serpapi[_-]?(?:api[_-]?key|key))["'\]]{0,2}\s*[:=]\s*["']?|(?:[?&]|&amp;)api_key=)([0-9a-fA-F]{32})(?=["'\s&#]|$)
       - query: '"serpapi.com/search.json"'
         patterns:
           key_pattern: >-
-            (?i)(?:(?:SERPAPI_API_KEY|SERPAPI_KEY|SERP_API_KEY|serpapi[_-]?(?:api[_-]?key|key))["'\]]{0,2}\s*[:=]\s*["']?|search[.]json[?]api_key=)([0-9a-fA-F]{32})
+            (?i)(?:(?:SERPAPI_API_KEY|SERPAPI_KEY|SERP_API_KEY|serpapi[_-]?(?:api[_-]?key|key))["'\]]{0,2}\s*[:=]\s*["']?|(?:[?&]|&amp;)api_key=)([0-9a-fA-F]{32})(?=["'\s&#]|$)
       - query: '"search.json?api_key="'
         patterns:
           key_pattern: >-
-            (?i)(?:(?:SERPAPI_API_KEY|SERPAPI_KEY|SERP_API_KEY|serpapi[_-]?(?:api[_-]?key|key))["'\]]{0,2}\s*[:=]\s*["']?|search[.]json[?]api_key=)([0-9a-fA-F]{32})
+            (?i)(?:(?:SERPAPI_API_KEY|SERPAPI_KEY|SERP_API_KEY|serpapi[_-]?(?:api[_-]?key|key))["'\]]{0,2}\s*[:=]\s*["']?|(?:[?&]|&amp;)api_key=)([0-9a-fA-F]{32})(?=["'\s&#]|$)
       - query: '"serpapi.com" "SERPAPI"'
         patterns:
           key_pattern: >-
-            (?i)(?:(?:SERPAPI_API_KEY|SERPAPI_KEY|SERP_API_KEY|serpapi[_-]?(?:api[_-]?key|key))["'\]]{0,2}\s*[:=]\s*["']?|search[.]json[?]api_key=)([0-9a-fA-F]{32})
+            (?i)(?:(?:SERPAPI_API_KEY|SERPAPI_KEY|SERP_API_KEY|serpapi[_-]?(?:api[_-]?key|key))["'\]]{0,2}\s*[:=]\s*["']?|(?:[?&]|&amp;)api_key=)([0-9a-fA-F]{32})(?=["'\s&#]|$)
       - query: '"serpapi.com" language:Python'
         patterns:
           key_pattern: >-
-            (?i)(?:(?:SERPAPI_API_KEY|SERPAPI_KEY|SERP_API_KEY|serpapi[_-]?(?:api[_-]?key|key))["'\]]{0,2}\s*[:=]\s*["']?|search[.]json[?]api_key=)([0-9a-fA-F]{32})
+            (?i)(?:(?:SERPAPI_API_KEY|SERPAPI_KEY|SERP_API_KEY|serpapi[_-]?(?:api[_-]?key|key))["'\]]{0,2}\s*[:=]\s*["']?|(?:[?&]|&amp;)api_key=)([0-9a-fA-F]{32})(?=["'\s&#]|$)
       - query: '"serpapi.com" extension:env'
         patterns:
           key_pattern: >-
-            (?i)(?:(?:SERPAPI_API_KEY|SERPAPI_KEY|SERP_API_KEY|serpapi[_-]?(?:api[_-]?key|key))["'\]]{0,2}\s*[:=]\s*["']?|search[.]json[?]api_key=)([0-9a-fA-F]{32})
+            (?i)(?:(?:SERPAPI_API_KEY|SERPAPI_KEY|SERP_API_KEY|serpapi[_-]?(?:api[_-]?key|key))["'\]]{0,2}\s*[:=]\s*["']?|(?:[?&]|&amp;)api_key=)([0-9a-fA-F]{32})(?=["'\s&#]|$)
       - query: '"serpapi.com" extension:yaml'
         patterns:
           key_pattern: >-
-            (?i)(?:(?:SERPAPI_API_KEY|SERPAPI_KEY|SERP_API_KEY|serpapi[_-]?(?:api[_-]?key|key))["'\]]{0,2}\s*[:=]\s*["']?|search[.]json[?]api_key=)([0-9a-fA-F]{32})
+            (?i)(?:(?:SERPAPI_API_KEY|SERPAPI_KEY|SERP_API_KEY|serpapi[_-]?(?:api[_-]?key|key))["'\]]{0,2}\s*[:=]\s*["']?|(?:[?&]|&amp;)api_key=)([0-9a-fA-F]{32})(?=["'\s&#]|$)
     rate_limit:
       base_rate: 1.0
       burst_limit: 5

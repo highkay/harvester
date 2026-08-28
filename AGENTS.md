@@ -126,7 +126,8 @@ update preserves intentional local changes (reverts, port/volume tweaks).
 - Extraction (in `examples/config-serpapi.yaml` + `config/defaults.py`
   preset): context-anchored — env-name assignments (`SERPAPI_API_KEY` /
   `SERPAPI_KEY` / `SERP_API_KEY` / `serpapi[_-]?...key`) at task level, plus a
-  domain-anchored variadic that adds `search.json?api_key=` URLs. Deliberately
+  domain-anchored variadic that adds query-string URLs
+  (`?api_key=` / `&api_key=` / `&amp;api_key=`, any position in the URL).
   NO bare `[0-9a-f]{32}` AND no bare `api_key` branch — the first production
   scan proved a naked `api[_-]?key` branch floods the check stage (~84
   candidates/link, 55k total); env-name + URL forms only.
