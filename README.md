@@ -54,7 +54,7 @@ The system aims to build a **universal data acquisition framework** primarily ta
 | Grok Web/SSO | `grok` | `grok.com` / `x.ai` token assignments and session-cookie traces | Manual browser-context check | Intentionally does not scan the `xai-` API-key prefix by default |
 | Gemini | `gemini` | `AIza...` API keys | `generativelanguage.googleapis.com/v1beta/models` | Uses `x-goog-api-key` |
 | Tavily | `tavily` | `tvly-...` / `tavily-...` API keys | `/usage` metadata | Uses `Authorization: Bearer`; inspect stores usage audit fields |
-| SerpApi | `serpapi` | `SERPAPI_API_KEY` / `SERPAPI_KEY` / `SERP_API_KEY` assignments (prefix-less hex keys (20-64 chars, typically 32)) | `GET /account.json?api_key=` (Account API) | Account/plan audit via inspect (echoed `api_key` field is dropped); `search.json` answers 200 without a key and is NOT used for validation |
+| SerpApi | `serpapi` | `SERPAPI_API_KEY` / `SERPAPI_KEY` / `SERP_API_KEY` assignments (prefix-less 64-char hex keys (measured on prod: valid keys are 64 hex chars)) | `GET /account.json?api_key=` (Account API) | Account/plan audit via inspect (echoed `api_key` field is dropped); `search.json` answers 200 without a key and is NOT used for validation |
 | DeepSeek | `deepseek` | `sk-...` API keys | `GET /models` gate + minimal chat-completion probe (`max_tokens=1`) to surface 402 | Default base URL: `https://api.deepseek.com`; 401 body may be non-JSON; zero-balance keys map to `no-quota-keys.txt` |
 | Kimi / Moonshot | `kimi` | `sk-...` API keys | `GET /v1/models` | Default base URL: `https://api.moonshot.cn/v1`; quotas map to `no-quota-keys.txt` |
 | GLM / Zhipu | `glm` | `{id}.{secret}` dot-form API keys | Chat completion probe (`glm-4.7-flash`) | Default base URL: `https://open.bigmodel.cn/api/paas/v4`; no `/models` endpoint, so inspect is skipped |
@@ -772,7 +772,7 @@ The system features a sophisticated **Query Optimization Engine** with mathemati
    - Use `provider_type: cerebras`, `openrouter`, `groq`, `grok`, `gemini`, `tavily` and `serpapi` for the built-in presets. NVIDIA NIM uses `provider_type: openai_like` with its OpenAI-compatible endpoint.
 - The provider-only configs use GitHub API search (`use_api: true`) with `max_pages: 1000`; runtime execution is capped to GitHub's 10-page / 1000-result API window per query.
 - The `tavily` preset scans `tvly-...` / `tavily-...` keys through GitHub API search (`max_pages: 1000`, API-capped to 10 pages) and validates/audits them with Tavily's `/usage` endpoint.
-- The `serpapi` preset scans `SERPAPI_API_KEY` / `SERPAPI_KEY` / `SERP_API_KEY` assignments through GitHub API search (context-anchored extraction, prefix-less hex keys (20-64 chars, typically 32)) and validates/audits them with SerpApi's free `account.json` Account API.
+- The `serpapi` preset scans `SERPAPI_API_KEY` / `SERPAPI_KEY` / `SERP_API_KEY` assignments through GitHub API search (context-anchored extraction, prefix-less 64-char hex keys (measured on prod: valid keys are 64 hex chars)) and validates/audits them with SerpApi's free `account.json` Account API.
    - The `grok` preset scans Grok web/SSO token assignments and session-cookie traces. It intentionally does not scan the `xai-` API-key prefix by default.
    - Grok web/SSO findings require browser-context manual verification, so they are expected to land in `wait-check-keys.txt` rather than `valid-keys.txt`.
    - `cf_clearance` is intentionally excluded from Grok matching because it is Cloudflare state, not a Grok credential.
