@@ -135,10 +135,11 @@ update preserves intentional local changes (reverts, port/volume tweaks).
   candidates/link, 55k total); env-name + URL forms only.
 - Push: `web/serpapi_push.py` `SerpapiPushService` (mirror of
   `web/tavily_push.py`), env-gated by `SERPAPI_PROXY_BASE_URL` /
-  `SERPAPI_PROXY_AUTH_KEY` — silent no-op until configured (prod leaves them
-  unset by design; operator fills them in later). Contract identical to
+  `SERPAPI_PROXY_AUTH_KEY` — silent no-op until configured. Prod (fnos)
+  configures them now: `SERPAPI_PROXY_BASE_URL=http://192.168.1.18:48081` +
+  pool master key (see pool section). Contract identical to
   TavilyProxyManager: `POST {base}/api/keys`, Bearer, `{"key","alias":...}`;
-  only 32-hex keys are pushed; one `push_logs` row.
+  only 20–64-hex keys are pushed; one `push_logs` row.
 - Hook: `web/runner.py` `_on_completed` fires serpapi push iff
   `provider_name == "serpapi"` (daemon thread, ImportError-safe).
 - Schedule: `("serpapi", "10 */6 * * *", "examples/config-serpapi.yaml")` in
@@ -150,10 +151,49 @@ update preserves intentional local changes (reverts, port/volume tweaks).
   `tests/test_web_runner_serpapi.py`; scheduler expectations updated in
   `tests/test_web_scheduler.py`.
 
+## Feature: serpapi_proxy — SerpApi key pool service
+
+- Self-contained subproject `serpapi_proxy/` (imports NOTHING from the
+  harvester packages; its Docker build context is the repo root but copies
+  only `serpapi_proxy/`). Stdlib sqlite3 store + FastAPI app + optional
+  quota-refresher daemon thread.
+- API: `GET /healthz` (no auth); everything else requires
+  `Authorization: Bearer $MASTER_KEY`. Admin: `POST /api/keys` (200 added /
+  400 `create_failed`|`invalid_key_format` / 401), `GET /api/keys` (masked
+  `key[:6]…key[-4:]` — raw keys never in responses), `DELETE
+  /api/keys/{id}`, `POST /api/keys/{id}/refresh`, `GET /` HTML status page.
+  Catch-all `GET /{path}` is a transparent rotating proxy: picks best key
+  (unknown quota → most searches_left → LRU), injects `api_key`, retries up
+  to 3 across 401(→invalid)/429(→60s cooldown)/ConnectionError(→10s
+  cooldown), 4xx passthrough, exhausted pool → 503 `no_available_keys`.
+- Auth gate is an ASGI middleware, NOT FastAPI route dependencies — FastAPI
+  ≥0.116 ignores dependency-returned Responses (measured 0.128) and the
+  whole pool would have been open. Keep `_require_bearer` as middleware.
+- Per-POST /api/keys the pool synchronously validates the key against
+  serpapi.com account.json (up to `timeout`s) before returning 200 — so
+  harvesters pushing hundreds of keys need a long CLI timeout (~8 min for
+  410 keys measured 2026-08-30).
+- Tests: `python -m unittest discover -s serpapi_proxy/tests -t .` (26).
+- **Deployed on fnos prod (2026-08-30)**: container `serpapi-proxy`,
+  host port 48081, data `/home/admin/harvester/serpapi_proxy/data/pool.db`,
+  compose project `/home/admin/harvester/serpapi_proxy/` (standalone file,
+  not in the root service list). fnos LAN IP is **192.168.1.18**
+  (192.168.1.11 is the rq host, NOT the NAS) → harvester `.env` holds
+  `SERPAPI_PROXY_BASE_URL=http://192.168.1.18:48081`.
+- MASTER_KEY lives in `serpapi_proxy/.env`; harvester `.env`
+  `SERPAPI_PROXY_AUTH_KEY` MUST match. Rotate = rewrite both, then
+  `docker compose up -d` in each project. e2e proof: push_logs row
+  `pool-e2e-1` = `success|410|410|0`; pool 410 rows (223 active / 187
+  exhausted); forward `search.json?engine=google…` → 200 Success.
+- fnos builds pip installs from PyPI by default in this sub-Dockerfile —
+  slow (~10 min) but one-time; root `Dockerfile.web` uses the tuna mirror
+  (fnos-local diff — do NOT clobber).
+
 ## Tests & conventions
 
-- Run: `python -m unittest discover -s tests` (351 tests, 8 skipped; count
-  grows — the historical "322" figure is stale).
+- Run: `python -m unittest discover -s tests` (396 tests, 8 skipped as of
+  2026-08-30; known env baseline = 35 failures in `test_web_ui` /
+  `test_web_push_logs`; count grows — the historical "322" figure is stale).
 - New files must pass `ruff check` and `pyright` (repo has pre-existing lint
   debt elsewhere — leave it).
 - Provider pattern: mirror `provider/openrouter.py` / `provider/kimi.py`.
