@@ -8,11 +8,10 @@ Everything except ``/healthz`` requires ``Authorization: Bearer MASTER_KEY``.
 Raw keys never appear in responses (masked) — never log response bodies.
 """
 
-from __future__ import annotations
-
 import hmac
 import html
 import logging
+import sqlite3
 import threading
 import time
 from contextlib import asynccontextmanager
@@ -155,7 +154,8 @@ def create_app(
             return JSONResponse({"error": "create_failed"}, status_code=400)
         try:
             key_id = store.add(key, alias)
-        except Exception:
+        except sqlite3.IntegrityError:
+            # find-then-add race: another POST inserted the same key first
             return JSONResponse({"error": "create_failed"}, status_code=400)
         verdict = await run_in_threadpool(
             check_account, key.lower(), upstream_base, timeout

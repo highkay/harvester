@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import tempfile
 import time
 import unittest
@@ -112,6 +113,18 @@ class PoolAppTests(unittest.TestCase):
             self.assertEqual(dup.json(), {"error": "create_failed"})
             self.assertEqual(mocked.call_count, 1)  # no re-check on dup
 
+    def test_add_race_window_maps_to_create_failed(self) -> None:
+        # find_by_key passes but add hits the UNIQUE constraint first
+        with mock.patch.object(
+            self.store,
+            "add",
+            side_effect=sqlite3.IntegrityError("UNIQUE constraint failed: keys.key"),
+        ):
+            resp = self.client.post(
+                "/api/keys", json={"key": K64, "alias": "harvester"}, headers=AUTH
+            )
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.json(), {"error": "create_failed"})
     # --- add + account verdicts ------------------------------------------
     def test_add_with_quota_marks_active_and_masks_key(self) -> None:
         with mock.patch(
