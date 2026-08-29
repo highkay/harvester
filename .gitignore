@@ -144,3 +144,6 @@ config.yaml*
 # Debug leftovers
 debug_push*.py
 *.bak
+# SerpApi pool service runtime data (contains real keys — NEVER commit)
+serpapi_proxy/*.db
+serpapi_proxy/data/
