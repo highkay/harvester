@@ -153,10 +153,11 @@ update preserves intentional local changes (reverts, port/volume tweaks).
 
 ## Feature: serpapi_proxy — SerpApi key pool service
 
-- Self-contained subproject `serpapi_proxy/` (imports NOTHING from the
-  harvester packages; its Docker build context is the repo root but copies
-  only `serpapi_proxy/`). Stdlib sqlite3 store + FastAPI app + optional
-  quota-refresher daemon thread.
+- **Canonical repo: https://github.com/highkay/serpapi_proxy** (extracted
+  2026-08-30). The in-tree `serpapi_proxy/` dir below is a legacy snapshot —
+  do NOT edit it; send changes to the standalone repo. It imports NOTHING
+  from the harvester packages (image copies only `serpapi_proxy/`). Stdlib
+  sqlite3 store + FastAPI app + optional quota-refresher daemon thread.
 - API: `GET /healthz` (no auth); everything else requires
   `Authorization: Bearer $MASTER_KEY`. Admin: `POST /api/keys` (200 added /
   400 `create_failed`|`invalid_key_format` / 401), `GET /api/keys` (masked
@@ -169,25 +170,28 @@ update preserves intentional local changes (reverts, port/volume tweaks).
 - Auth gate is an ASGI middleware, NOT FastAPI route dependencies — FastAPI
   ≥0.116 ignores dependency-returned Responses (measured 0.128) and the
   whole pool would have been open. Keep `_require_bearer` as middleware.
+- Duplicate POST returns 400 `create_failed` both via find-before-add and
+  via catching `sqlite3.IntegrityError` from the find→add race window.
 - Per-POST /api/keys the pool synchronously validates the key against
   serpapi.com account.json (up to `timeout`s) before returning 200 — so
-  harvesters pushing hundreds of keys need a long CLI timeout (~8 min for
-  410 keys measured 2026-08-30).
-- Tests: `python -m unittest discover -s serpapi_proxy/tests -t .` (26).
-- **Deployed on fnos prod (2026-08-30)**: container `serpapi-proxy`,
-  host port 48081, data `/home/admin/harvester/serpapi_proxy/data/pool.db`,
-  compose project `/home/admin/harvester/serpapi_proxy/` (standalone file,
-  not in the root service list). fnos LAN IP is **192.168.1.18**
-  (192.168.1.11 is the rq host, NOT the NAS) → harvester `.env` holds
-  `SERPAPI_PROXY_BASE_URL=http://192.168.1.18:48081`.
-- MASTER_KEY lives in `serpapi_proxy/.env`; harvester `.env`
+  harvesters pushing hundreds of NEW keys need a long CLI timeout (~8 min
+  for 410 keys measured 2026-08-30; duplicate re-pushes are ~5 s since the
+  dup path skips the account check).
+- Tests: `python -m unittest discover -s serpapi_proxy/tests -t .` (27).
+- **Deployed on fnos prod from the standalone repo** (container
+  `serpapi-proxy`, host port 48081): clone at `/home/admin/serpapi_proxy`,
+  data `/home/admin/serpapi_proxy/data/pool.db` (migrated from the old
+  harvester-tree deploy, which is now `docker compose down`). fnos LAN IP
+  is **192.168.1.18** (192.168.1.11 is the rq host, NOT the NAS) → harvester
+  `.env` holds `SERPAPI_PROXY_BASE_URL=http://192.168.1.18:48081`.
+- MASTER_KEY lives in `/home/admin/serpapi_proxy/.env`; harvester `.env`
   `SERPAPI_PROXY_AUTH_KEY` MUST match. Rotate = rewrite both, then
-  `docker compose up -d` in each project. e2e proof: push_logs row
-  `pool-e2e-1` = `success|410|410|0`; pool 410 rows (223 active / 187
-  exhausted); forward `search.json?engine=google…` → 200 Success.
-- fnos builds pip installs from PyPI by default in this sub-Dockerfile —
-  slow (~10 min) but one-time; root `Dockerfile.web` uses the tuna mirror
-  (fnos-local diff — do NOT clobber).
+  `docker compose up -d` in each project. The standalone Dockerfile takes a
+  `PIP_INDEX_URL` build arg — fnos `.env` sets the tuna mirror.
+- e2e proof: push_logs `pool-e2e-1` = `success|410|410|0`;
+  `pool-e2e-2` (after extraction) = `success|420|0|420`; pool 420 rows
+  (229 active / 191 exhausted); forward `search.json?engine=google…` → 200
+  Success.
 
 ## Tests & conventions
 
