@@ -99,7 +99,7 @@ class TestAgnesAIProviderCheck(unittest.TestCase):
             args.kwargs["headers"].get("Authorization"), f"Bearer {_TOKEN}"
         )
         payload = json.loads(args.kwargs["data"].decode("utf8"))
-        self.assertEqual(payload["model"], "agnes-2.0-flash")
+        self.assertEqual(payload["model"], "agnes-2.5-flash")
         self.assertEqual(payload["stream"], False)
         self.assertEqual(payload["max_tokens"], 1)
         self.assertEqual(payload["messages"], [{"role": "user", "content": "ping"}])
@@ -189,11 +189,11 @@ class TestAgnesAIProviderInspect(unittest.TestCase):
     def test_inspect_returns_model_ids(self):
         body = {
             "object": "list",
-            "data": [{"id": "agnes-2.0-flash"}, {"id": "gpt-4o"}],
+            "data": [{"id": "agnes-2.5-flash"}, {"id": "gpt-4o"}],
         }
         with _patch_request(FakeResponse(200, json.dumps(body))):
             models = self.provider.inspect(token=_TOKEN)
-        self.assertEqual(models, ["agnes-2.0-flash", "gpt-4o"])
+        self.assertEqual(models, ["agnes-2.5-flash", "gpt-4o"])
 
     def test_inspect_non_200_returns_empty(self):
         with _patch_request(FakeResponse(401, '{"error": {"message": "invalid"}}')):

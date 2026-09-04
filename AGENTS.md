@@ -233,7 +233,7 @@ update preserves intentional local changes (reverts, port/volume tweaks).
   AI is an OpenAI-compatible omni-modal gateway at
   `https://apihub.agnes-ai.com/v1`, authed with `sk-` Bearer keys. Validation
   is a minimal chat-completion probe: `POST /chat/completions` with
-  `{"model":"agnes-2.0-flash","messages":[{"role":"user","content":"ping"}],"max_tokens":1}`.
+  `{"model":"agnes-2.5-flash","messages":[{"role":"user","content":"ping"}],"max_tokens":1}`.
 - **`GET /v1/models` trap**: the endpoint answers 200 for ANY Bearer token
   (presence-only, live-probed), so it is NOT used for validation; `inspect()`
   only lists model IDs for keys that already passed `check()`.

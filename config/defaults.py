@@ -526,7 +526,7 @@ def get_default_config() -> Dict[str, Any]:
                     "base_url": "https://apihub.agnes-ai.com/v1",
                     "completion_path": "/chat/completions",
                     "model_path": "/models",
-                    "default_model": "agnes-2.0-flash",
+                    "default_model": "agnes-2.5-flash",
                     "auth_key": "",
                     "extra_headers": {},
                     "api_version": "",

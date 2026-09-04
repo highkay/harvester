@@ -42,7 +42,7 @@ class AgnesAIProvider(AIBaseProvider):
                 "base_url": "https://apihub.agnes-ai.com/v1",
                 "completion_path": "/chat/completions",
                 "model_path": "/models",
-                "default_model": "agnes-2.0-flash",
+                "default_model": "agnes-2.5-flash",
             },
         )
         super().__init__(conditions=conditions, **kwargs)
