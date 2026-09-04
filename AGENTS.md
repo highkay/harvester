@@ -270,6 +270,21 @@ update preserves intentional local changes (reverts, port/volume tweaks).
   (or a UI add) after deploy.
 - Redaction: NO `tools/patterns.py` entry (a bare `sk-` pattern would blitz
   logs); the provider never writes keys to disk/logs.
+- **Egress & DNS trap (measured on fnos 2026-09-04)**: `apihub.agnes-ai.com`
+  DNS is polluted inside the container, so plain `socks5://` (local DNS) and
+  container-direct both fail with ConnectionError/NETWORK_ERROR while
+  `socks5h://` (remote DNS at the tunnel) returns 200. This silently poisoned
+  the first 3 agnes runs (~110 candidates: every check was NETWORK_ERROR, yet
+  landed in `invalid-keys.txt` — indistinguishable from real invalid keys
+  until a REAL valid key was e2e-probed). Pin agnes to the socks5h rotation
+  via `HARVESTER_PROXY_AGNES_AI` (compose default:
+  `socks5h://192.168.1.18:1080,1090,1091`). `search/client.py` and
+  `config/schemas.py` both whitelist `socks5h` (with mandatory port). The
+  trap also cost 0 real keys in run 1-3; a live probed REAL key (`sk-` + 48
+  alnum — measured 2026-09-04) returns 200 via socks5h from the container.
+- Always measure real-key egress per PROVIDER (not just from the host) before
+  trusting invalid counts — host-direct success does NOT imply container
+  success (groq taught 403-blocks; agnes adds DNS pollution + socks5h).
 
 ## Tests & conventions
 

@@ -176,8 +176,8 @@ class GlobalConfig:
 
         parsed = urlparse(proxy)
         scheme = parsed.scheme.lower()
-        if scheme not in {"http", "https", "socks5"}:
-            raise ValueError("proxy scheme must be one of: http, https, socks5")
+        if scheme not in {"http", "https", "socks5", "socks5h"}:
+            raise ValueError("proxy scheme must be one of: http, https, socks5, socks5h")
 
         if not parsed.hostname:
             raise ValueError("proxy must include a host")
@@ -188,8 +188,8 @@ class GlobalConfig:
         except ValueError as e:
             raise ValueError(f"invalid proxy port: {e}") from e
 
-        if scheme == "socks5" and port is None:
-            raise ValueError("socks5 proxy must include a port")
+        if scheme in {"socks5", "socks5h"} and port is None:
+            raise ValueError("socks5/socks5h proxy must include a port")
 
         return proxy
 

@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import unittest
 
-from config.schemas import ApiConfig
+from config.schemas import ApiConfig, GlobalConfig
 from core.models import Condition, Patterns
 from provider.deepseek import DeepSeekProvider
 
@@ -25,6 +25,16 @@ class TestApiConfigUseProxy(unittest.TestCase):
         # Default True = proxy routing, preserving behavior for
         # international endpoints and configs that do not specify the flag.
         self.assertIs(ApiConfig().use_proxy, True)
+
+
+class TestGlobalConfigProxyScheme(unittest.TestCase):
+    def test_socks5h_proxy_accepted(self):
+        cfg = GlobalConfig(proxy="socks5h://127.0.0.1:1080")
+        self.assertEqual(cfg.proxy, "socks5h://127.0.0.1:1080")
+
+    def test_socks5h_proxy_requires_port(self):
+        with self.assertRaises(ValueError):
+            GlobalConfig(proxy="socks5h://127.0.0.1")
 
 
 class TestProviderUseProxyHelper(unittest.TestCase):

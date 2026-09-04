@@ -45,6 +45,12 @@ services:
       # exits on EVERY request (even valid keys) — 192.168.1.18:7890 (VPS
       # relay, egress 107.172.141.203) is the measured groq-acceptable route.
       - HARVESTER_PROXY_GROQ=${HARVESTER_PROXY_GROQ:-}
+      # Agnes AI override — socks5h (REMOTE DNS) is required, not socks5:
+      # apihub.agnes-ai.com resolves via polluted DNS inside the container, so
+      # socks5:// (local DNS) connects to a dead IP and every check fails with
+      # NETWORK_ERROR, while socks5h:// resolves at the tunnel and works
+      # (measured on fnos 2026-09-04: socks5=ConnectionError, socks5h=200).
+      - HARVESTER_PROXY_AGNES_AI=${HARVESTER_PROXY_AGNES_AI:-socks5h://192.168.1.18:1080,socks5h://192.168.1.18:1090,socks5h://192.168.1.18:1091}
       # --- Timezone ---
       - TZ=Asia/Shanghai
     healthcheck:

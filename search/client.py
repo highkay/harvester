@@ -101,8 +101,8 @@ def set_proxy(proxy: Optional[str]) -> None:
 
     parsed = urllib.parse.urlparse(proxy)
     scheme = parsed.scheme.lower()
-    if scheme not in {"http", "https", "socks5"}:
-        raise ValueError("proxy scheme must be one of: http, https, socks5")
+    if scheme not in {"http", "https", "socks5", "socks5h"}:
+        raise ValueError("proxy scheme must be one of: http, https, socks5, socks5h")
     if not parsed.hostname:
         raise ValueError("proxy must include a host")
 

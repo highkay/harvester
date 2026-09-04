@@ -98,3 +98,13 @@ class TestClientUseProxy(unittest.TestCase):
         self.assertIn("http", client._HTTP_SESSION.proxies)
         self.assertIn("https", client._HTTP_SESSION.proxies)
         self.assertEqual(client._DIRECT_SESSION.proxies, {})
+
+    def test_set_proxy_accepts_socks5h_remote_dns(self):
+        client.set_proxy("socks5h://127.0.0.1:1080")
+
+        self.assertIn("http", client._HTTP_SESSION.proxies)
+        self.assertIn("https", client._HTTP_SESSION.proxies)
+        self.assertEqual(
+            client._HTTP_SESSION.proxies["https"], "socks5h://127.0.0.1:1080"
+        )
+        self.assertEqual(client._DIRECT_SESSION.proxies, {})
