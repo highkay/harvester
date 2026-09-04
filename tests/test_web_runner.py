@@ -212,6 +212,101 @@ class TestTempYamlGeneration(unittest.TestCase):
             os.environ.pop("HARVESTER_PROXY", None)
             self.assertEqual(runner._pick_proxy(), "")
 
+    def test_provider_proxy_override_beats_global(self) -> None:
+        """HARVESTER_PROXY_GROQ replaces the global rotation for groq scans."""
+        from web.runner import PipelineRunner
+
+        runner = PipelineRunner.__new__(PipelineRunner)
+        with patch.dict(
+            os.environ,
+            {
+                "HARVESTER_PROXY": "socks5://192.168.1.18:1080,socks5://192.168.1.18:1090",
+                "HARVESTER_PROXY_GROQ": "socks5://192.168.1.18:7890",
+            },
+            clear=False,
+        ):
+            self.assertEqual(
+                runner._pick_proxy("groq"), "socks5://192.168.1.18:7890"
+            )
+            # Non-groq providers keep the global rotation.
+            self.assertEqual(
+                runner._pick_proxy("tavily"), "socks5://192.168.1.18:1080"
+            )
+
+    def test_provider_proxy_override_rotation_cycles(self) -> None:
+        """A comma-separated provider override rotates independently."""
+        from web.runner import PipelineRunner
+
+        runner = PipelineRunner.__new__(PipelineRunner)
+        runner._proxy_index = 0
+        runner._proxy_lock = __import__("threading").Lock()
+
+        proxies = ["socks5://192.168.1.18:7890", "socks5://192.168.1.18:7891"]
+        with patch.dict(
+            os.environ, {"HARVESTER_PROXY_GROQ": ",".join(proxies)}, clear=False
+        ):
+            picks = [runner._pick_proxy("groq") for _ in range(3)]
+        self.assertEqual(picks, [proxies[0], proxies[1], proxies[0]])
+
+    def test_provider_proxy_override_empty_falls_back(self) -> None:
+        """An empty provider override falls back to the global rotation."""
+        from web.runner import PipelineRunner
+
+        runner = PipelineRunner.__new__(PipelineRunner)
+        with patch.dict(
+            os.environ,
+            {"HARVESTER_PROXY": "socks5://192.168.1.18:1080", "HARVESTER_PROXY_GROQ": ""},
+            clear=False,
+        ):
+            self.assertEqual(
+                runner._pick_proxy("groq"), "socks5://192.168.1.18:1080"
+            )
+
+    def test_provider_proxy_override_env_name_sanitized(self) -> None:
+        """Provider names with punctuation map to underscore env suffixes."""
+        from web.runner import PipelineRunner
+
+        runner = PipelineRunner.__new__(PipelineRunner)
+        with patch.dict(
+            os.environ,
+            {"HARVESTER_PROXY_MIMO_CN": "socks5://192.168.1.18:7890"},
+            clear=False,
+        ):
+            self.assertEqual(
+                runner._pick_proxy("mimo-cn"), "socks5://192.168.1.18:7890"
+            )
+
+    def test_provider_proxy_override_injected_into_temp_yaml(self) -> None:
+        """A groq run's generated YAML carries the provider override proxy."""
+        from web.runner import PipelineRunner
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workdir = Path(tmpdir)
+            source_yaml = workdir / "config-groq.yaml"
+            source_yaml.write_text(_SAMPLE_YAML, encoding="utf-8")
+            runtime_dir = workdir / "runtime"
+            runtime_dir.mkdir()
+
+            runner = PipelineRunner.__new__(PipelineRunner)
+            runner._workspace = str(workdir)
+            runner._init_yaml_source_dir = str(workdir)
+
+            with patch.dict(
+                os.environ,
+                {
+                    "HARVESTER_PROXY": "socks5://192.168.1.18:1080",
+                    "HARVESTER_PROXY_GROQ": "socks5://192.168.1.18:7890",
+                },
+                clear=False,
+            ):
+                result_path = runner._generate_temp_yaml(
+                    "groq", "run-groq-1", ["ghp_token_one"]
+                )
+            generated = yaml.safe_load(result_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                generated["global"].get("proxy"), "socks5://192.168.1.18:7890"
+            )
+
 
 class TestReEntrancyPrevention(unittest.TestCase):
     """Given a PipelineRunner,

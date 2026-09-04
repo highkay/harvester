@@ -35,6 +35,12 @@ services:
       # Outbound SOCKS5 proxies for GitHub fetches (comma-separated; the runner
       # rotates one per scan). Benchmarked 1080/1090/1091 as fastest & stable.
       - HARVESTER_PROXY=${HARVESTER_PROXY:-socks5://192.168.1.18:1080,socks5://192.168.1.18:1090,socks5://192.168.1.18:1091}
+      # Provider-specific override — replaces the global rotation ONLY for
+      # that provider's scans (comma-separated; empty = inherit HARVESTER_PROXY).
+      # Groq: api.groq.com's Cloudflare edge 403-blocks the 1080/1090/1091
+      # exits on EVERY request (even valid keys) — 192.168.1.18:7890 (VPS
+      # relay, egress 107.172.141.203) is the measured groq-acceptable route.
+      - HARVESTER_PROXY_GROQ=${HARVESTER_PROXY_GROQ:-}
       # --- Timezone ---
       - TZ=Asia/Shanghai
     healthcheck:

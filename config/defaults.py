@@ -184,7 +184,9 @@ def get_default_config() -> Dict[str, Any]:
                     "retries": 3,
                 },
                 "patterns": {
-                    "key_pattern": "gsk_[0-9A-Za-z_-]{20,}",
+                    # Honeypot decoys embed base64("XgroqX") == "WGdyb3FY";
+                    # alnum-only charset drops GTK gsk_* symbols / placeholders.
+                    "key_pattern": "gsk_(?!.*WGdyb3FY)[A-Za-z0-9]{20,}",
                     "address_pattern": "",
                     "endpoint_pattern": "",
                     "model_pattern": "",

@@ -13,6 +13,7 @@ push module can consume.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import sqlite3
 import threading
@@ -648,7 +649,7 @@ class PipelineRunner:
         # NOTE: source configs (config-*.yaml) often carry `proxy: ""` to
         # disable env-proxy inheritance — an explicit picked proxy must
         # override that key, otherwise the scan silently runs without it.
-        proxy = self._pick_proxy()
+        proxy = self._pick_proxy(provider_name)
         if proxy:
             global_section["proxy"] = proxy
         elif "proxy" not in global_section:
@@ -670,12 +671,26 @@ class PipelineRunner:
         )
         return dest
 
-    def _pick_proxy(self) -> str:
-        """Pick one proxy from HARVESTER_PROXY (comma-separated), round-robin.
+    def _pick_proxy(self, provider_name: str = "") -> str:
+        """Pick one proxy for a scan, from a comma-separated rotation.
 
-        Returns "" when the env var is unset/empty.
+        Per-provider override: ``HARVESTER_PROXY_<PROVIDER>`` (provider name
+        upper-cased, non-alphanumerics mapped to ``_``, e.g.
+        ``HARVESTER_PROXY_GROQ``) replaces the global ``HARVESTER_PROXY``
+        rotation for that provider when set and non-empty. Providers without
+        an override keep the global rotation (one proxy per scan, spread
+        across concurrent scans).
+
+        Returns "" when nothing is configured.
         """
-        raw = os.environ.get("HARVESTER_PROXY", "").strip()
+        raw = ""
+        if provider_name:
+            override_var = "HARVESTER_PROXY_" + re.sub(
+                r"[^A-Za-z0-9]+", "_", provider_name
+            ).upper()
+            raw = os.environ.get(override_var, "").strip()
+        if not raw:
+            raw = os.environ.get("HARVESTER_PROXY", "").strip()
         if not raw:
             return ""
         proxies = [p.strip() for p in raw.split(",") if p.strip()]
