@@ -510,6 +510,86 @@ def get_default_config() -> Dict[str, Any]:
                 },
             },
         {
+                "name": "agnes-ai",
+                "enabled": False,
+                "provider_type": "agnes-ai",
+                "use_api": True,
+                "max_pages": 1000,
+                "stages": {
+                    "search": True,
+                    "gather": True,
+                    "check": True,
+                    "inspect": True,
+                },
+                "extras": {},
+                "api": {
+                    "base_url": "https://apihub.agnes-ai.com/v1",
+                    "completion_path": "/chat/completions",
+                    "model_path": "/models",
+                    "default_model": "agnes-2.0-flash",
+                    "auth_key": "",
+                    "extra_headers": {},
+                    "api_version": "",
+                    "timeout": 30,
+                    "retries": 3,
+                },
+                "patterns": {
+                    # Env-anchored extraction only; the lookahead excludes
+                    # Anthropic/OpenAI project & service-account sk- keys.
+                    # Domain conditions below widen to Bearer/quoted sk- keys.
+                    "key_pattern": (
+                        r"(?i)(?:AGNES_API_KEY|AGNES_AI_API_KEY|AGNES_KEY|"
+                        r"agnes[_-]?(?:ai[_-]?)?api[_-]?key)"
+                        r"[\"'\]]{0,2}\s*[:=]\s*[\"']?"
+                        r"(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,64})"
+                        r"[\"']?"
+                    ),
+                    "address_pattern": "",
+                    "endpoint_pattern": "",
+                    "model_pattern": "",
+                },
+                "conditions": [
+                    {"query": '"AGNES_API_KEY"'},
+                    {"query": '"AGNES_API_KEY="'},
+                    {"query": '"AGNES_API_KEY:"'},
+                    {"query": '"AGNES_API_KEY" language:Python'},
+                    {"query": '"AGNES_API_KEY" extension:env'},
+                    {"query": '"AGNES_API_KEY" extension:yaml'},
+                    {
+                        "query": '"apihub.agnes-ai.com"',
+                        "patterns": {
+                            "key_pattern": (
+                                r"(?i)(?:Bearer\s+|[\"']\s*)?"
+                                r"(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,64})"
+                            ),
+                        },
+                    },
+                    {
+                        "query": '"apihub.agnes-ai.com" "Authorization"',
+                        "patterns": {
+                            "key_pattern": (
+                                r"(?i)(?:Bearer\s+|[\"']\s*)?"
+                                r"(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,64})"
+                            ),
+                        },
+                    },
+                    {
+                        "query": '"agnes-ai.com" "api_key"',
+                        "patterns": {
+                            "key_pattern": (
+                                r"(?i)(?:Bearer\s+|[\"']\s*)?"
+                                r"(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,64})"
+                            ),
+                        },
+                    },
+                ],
+                "rate_limit": {"base_rate": 1.0, "burst_limit": 5, "adaptive": True},
+                "storage": {
+                    "directory": "",
+                    "plan": "",
+                },
+            },
+        {
                 "name": "deepseek",
                 "enabled": False,
                 "provider_type": "deepseek",

@@ -1,0 +1,144 @@
+# Agnes AI-only scan configuration
+# Wide GitHub collection + minimal chat-completion validation profile.
+# Results are written to ./data/providers/agnes-ai/*.txt
+
+global:
+  workspace: "./data"
+  max_retries_requeued: 3
+  proxy: ""
+  # ohmygh/gx-inspired transport: edge IP pool, cache, link index, text-match
+  github_transport:
+    edge_pool:
+      enabled: true
+      source: auto
+      hosts_url: "https://hosts.ohmygh.com/v1/hosts"
+      refresh_interval: 3600
+      max_edges: 32
+      verify: true
+      prefer_over_proxy: false
+    doh:
+      enabled: true
+    cache:
+      enabled: true
+      ttl_search: 60
+      ttl_core: 300
+      max_entries: 1000
+      directory: "cache/github_api"
+    index:
+      enabled: true
+      directory: "cache/search_index"
+      # Set true on resume runs to skip gather for already-seen URLs
+      skip_known_links: false
+    text_match: true
+    quota_tracking: true
+  github_credentials:
+    sessions:
+      - "your_github_session_here"
+    tokens:
+      - "your_github_token_here"
+    strategy: "round_robin"
+  user_agents:
+    - "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
+
+pipeline:
+  threads:
+    search: 1
+    gather: 4
+    check: 2
+    inspect: 1
+  queue_sizes:
+    search: 100000
+    gather: 200000
+    check: 500000
+    inspect: 1000000
+
+monitoring:
+  update_interval: 2.0
+  error_threshold: 0.1
+  queue_threshold: 1000000
+  memory_threshold: 1073741824
+  response_threshold: 5.0
+
+persistence:
+  batch_size: 1
+  save_interval: 5
+  queue_interval: 60
+  snapshot_interval: 300
+  auto_restore: true
+  shutdown_timeout: 30
+  format: txt
+
+ratelimits:
+  github_api:
+    base_rate: 0.15
+    burst_limit: 3
+    adaptive: true
+  agnes_ai:
+    base_rate: 1.0
+    burst_limit: 5
+    adaptive: true
+
+tasks:
+  - name: agnes-ai
+    enabled: true
+    provider_type: agnes-ai
+    use_api: true
+    max_pages: 1000
+    # GitHub code search is the only transport with a gated window for this
+    # provider (validated via the completion probe, not presence)
+    search_types: [code]
+    stages:
+      search: true
+      gather: true
+      check: true
+      inspect: true
+    api:
+      base_url: https://apihub.agnes-ai.com/v1
+      completion_path: /chat/completions
+      model_path: /models
+      default_model: agnes-2.0-flash
+      auth_key: ""
+      extra_headers: {}
+      api_version: ""
+      timeout: 30
+      retries: 3
+    patterns:
+      # Agnes keys are sk- Bearer keys. Default extraction only captures
+      # assignments anchored to Agnes env names, so raw sk- runs (checksums,
+      # unrelated providers) in matched blobs do not flood the check stage.
+      # Domain-anchored conditions override with a wider Bearer/quoted
+      # variadic below. The lookahead skips Anthropic/OpenAI project and
+      # service-account keys.
+      key_pattern: >-
+        (?i)(?:AGNES_API_KEY|AGNES_AI_API_KEY|AGNES_KEY|agnes[_-]?(?:ai[_-]?)?api[_-]?key)["'\]]{0,2}\s*[:=]\s*["']?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,64})["']?
+      address_pattern: ""
+      endpoint_pattern: ""
+      model_pattern: ""
+    conditions:
+      # Each GitHub API search query has its own 1000-result window.
+      - query: '"AGNES_API_KEY"'
+      - query: '"AGNES_API_KEY="'
+      - query: '"AGNES_API_KEY:"'
+      - query: '"AGNES_API_KEY" language:Python'
+      - query: '"AGNES_API_KEY" extension:env'
+      - query: '"AGNES_API_KEY" extension:yaml'
+      # Domain-anchored blobs: allow Bearer/quoted sk- keys without the env name.
+      - query: '"apihub.agnes-ai.com"'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|["']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,64})
+      - query: '"apihub.agnes-ai.com" "Authorization"'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|["']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,64})
+      - query: '"agnes-ai.com" "api_key"'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|["']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,64})
+    rate_limit:
+      base_rate: 1.0
+      burst_limit: 5
+      adaptive: true
+    storage:
+      directory: ""
+      plan: ""
