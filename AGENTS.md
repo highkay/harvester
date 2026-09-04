@@ -218,6 +218,12 @@ update preserves intentional local changes (reverts, port/volume tweaks).
   alnum-only charset (drops GTK4 `gsk_*` symbols and doc placeholders).
   Length floor stays 20+ deliberately — the serpapi lesson: narrowing length
   without a measured real-key corpus silently drops every real key.
+  Tripwires for future sessions: (1) "real keys are gsk_+48 alnum" is
+  INFERRED from docs/decoys, not measured — measure the first real valid key
+  and re-align only then; (2) if a hardened run yields near-zero candidates
+  reaching the check stage, suspect the pattern first; (3) behaviour is
+  pinned by tests/test_groq_pattern.py (decoy rejection, no capture groups,
+  defaults↔examples lockstep).
 - `run_records.total_keys_checked` is never written by `web/runner.py` (only
   `valid_keys_found`) — 0 there means "not wired", not "nothing checked".
 
