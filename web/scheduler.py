@@ -51,6 +51,9 @@ _DEFAULT_SCHEDULES: tuple[tuple[str, str, str], ...] = (
     # SerpApi keys are account-based (monthly plans) — every 6 hours, at :10
     # to stagger between the :00/:20/:40/:50 six-hour burst.
     ("serpapi", "10 */6 * * *", "examples/config-serpapi.yaml"),
+    # Agnès AI — every 6 hours, at :35 to avoid the existing */6 cluster
+    # minutes (0/10/20/40/50) and the */4 cluster (0/15/30/45).
+    ("agnes-ai", "35 */6 * * *", "examples/config-agnes-ai.yaml"),
 )
 
 

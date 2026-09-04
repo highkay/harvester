@@ -27,6 +27,10 @@ services:
       # --- SerpApi push service ---
       - SERPAPI_PROXY_BASE_URL=${SERPAPI_PROXY_BASE_URL:-}
       - SERPAPI_PROXY_AUTH_KEY=${SERPAPI_PROXY_AUTH_KEY:-}
+      # --- Agnes AI push service (to gpt-load add-multiple, group 19) ---
+      - AGNES_LOAD_BASE_URL=${AGNES_LOAD_BASE_URL:-http://107.172.141.203:43001}
+      - AGNES_LOAD_GROUP_ID=${AGNES_LOAD_GROUP_ID:-19}
+      - AGNES_LOAD_AUTH_KEY=${AGNES_LOAD_AUTH_KEY:-}
       # --- GitHub self-bootstrap (default enabled; set 0 to disable) ---
       - HARVESTER_SELF_BOOTSTRAP=${HARVESTER_SELF_BOOTSTRAP:-1}
       # --- Storage ---

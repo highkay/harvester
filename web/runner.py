@@ -517,6 +517,36 @@ class PipelineRunner:
                 f"run_id={run_id} error={exc}"
             )
 
+        # Agnes AI push — symmetric to the serpapi block above. Only fires for
+        # agnes-ai scans; the target gpt-load instance + group default via
+        # AGNES_LOAD_BASE_URL / AGNES_LOAD_GROUP_ID (+ optional
+        # AGNES_LOAD_AUTH_KEY). Env gating lives inside AgnesAIPushService.
+        try:
+            from web.agnes_ai_push import get_agnes_ai_push_service  # type: ignore[import-untyped,unused-ignore]
+
+            if provider_name == "agnes-ai":
+                agnes_ai_push_service = get_agnes_ai_push_service()
+                # Run push in a new thread to avoid blocking the completion callback
+                t = threading.Thread(
+                    target=agnes_ai_push_service.push_valid_keys,
+                    args=(provider_name, run_id),
+                    daemon=True,
+                )
+                t.start()
+                logger.info(
+                    f"AgnesAI push triggered: provider={provider_name} run_id={run_id}"
+                )
+        except ImportError:
+            logger.info(
+                f"AgnesAI push service not available: "
+                f"provider={provider_name} run_id={run_id}"
+            )
+        except Exception as exc:
+            logger.error(
+                f"AgnesAI push hook error: provider={provider_name} "
+                f"run_id={run_id} error={exc}"
+            )
+
     def _task_names_from_config(self, config_path: Path) -> list[str]:
         """Return the names of every task defined in a config YAML.
 
