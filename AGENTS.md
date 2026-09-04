@@ -214,9 +214,10 @@ update preserves intentional local changes (reverts, port/volume tweaks).
 - **Honeypot decoys**: repos poison the `"gsk_"` search space with fake keys
   whose bodies embed base64("XgroqX") == `WGdyb3FY` (measured: 44% of
   rejected candidates). `examples/config-groq.yaml` and the groq preset in
-  `config/defaults.py` exclude them via a `(?!.*WGdyb3FY)` lookahead and use
-  an alnum-only charset, which also drops GTK4 `gsk_*` code symbols and doc
-  placeholders that dominate the search results.
+  `config/defaults.py` exclude them via a `(?!.*WGdy)` lookahead plus an
+  alnum-only charset (drops GTK4 `gsk_*` symbols and doc placeholders).
+  Length floor stays 20+ deliberately — the serpapi lesson: narrowing length
+  without a measured real-key corpus silently drops every real key.
 - `run_records.total_keys_checked` is never written by `web/runner.py` (only
   `valid_keys_found`) — 0 there means "not wired", not "nothing checked".
 

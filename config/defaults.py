@@ -184,9 +184,10 @@ def get_default_config() -> Dict[str, Any]:
                     "retries": 3,
                 },
                 "patterns": {
-                    # Honeypot decoys embed base64("XgroqX") == "WGdyb3FY";
-                    # alnum-only charset drops GTK gsk_* symbols / placeholders.
-                    "key_pattern": "gsk_(?!.*WGdyb3FY)[A-Za-z0-9]{20,}",
+                    # Honeypot decoys embed base64("XgroqX") == "WGdyb3FY"; the
+                    # "WGdy" lookahead also catches truncated fragments. Length
+                    # stays 20+ (length-independent; no measured real-key corpus).
+                    "key_pattern": "gsk_(?!.*WGdy)[A-Za-z0-9]{20,}",
                     "address_pattern": "",
                     "endpoint_pattern": "",
                     "model_pattern": "",

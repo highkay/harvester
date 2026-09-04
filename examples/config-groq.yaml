@@ -74,14 +74,16 @@ tasks:
       timeout: 30
       retries: 3
     patterns:
-      # Real Groq keys are gsk_ + 48 alphanumerics. Exclusions:
+      # Real Groq keys are gsk_ + alphanumerics (docs); measured live keys are
+      # scarce, so length stays 20+ (length-independent — the serpapi lesson:
+      # a fixed/narrow length silently drops every real key). Exclusions:
       #   - the negative lookahead drops honeypot decoys whose bodies embed
       #     base64("XgroqX") == "WGdyb3FY" (measured on fnos 2026-09-04: 44%
-      #     of rejected candidates were these planted fake keys);
-      #   - the alnum-only charset drops GTK4 gsk_* code symbols and doc
-      #     placeholders (gsk_your_actual_key_here / gsk_xxxx...) which
-      #     dominate the GitHub "gsk_" search space.
-      key_pattern: "gsk_(?!.*WGdyb3FY)[A-Za-z0-9]{20,}"
+      #     of rejected candidates were these planted fake keys); "WGdy" also
+      #     catches fragments truncated mid-marker;
+      #   - alnum-only charset drops GTK4 gsk_* code symbols and doc
+      #     placeholders (gsk_your_actual_key_here / gsk_xxxx...).
+      key_pattern: "gsk_(?!.*WGdy)[A-Za-z0-9]{20,}"
       address_pattern: ""
       endpoint_pattern: ""
       model_pattern: ""
