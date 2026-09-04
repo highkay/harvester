@@ -76,6 +76,10 @@ class AgnesAIProvider(AIBaseProvider):
         timeout = self._get_timeout(default=10)
         retries = self._get_retries(default=2)
         headers = self._get_headers(token=token) or {}
+        # The Agnes gateway 400s requests without an explicit JSON content type
+        # (measured 2026-09-04) — unlike OpenAI-compatible endpoints that
+        # tolerate a missing header for raw data= posts.
+        headers["Content-Type"] = "application/json"
 
         payload = json.dumps(
             {

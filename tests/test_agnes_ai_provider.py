@@ -98,6 +98,9 @@ class TestAgnesAIProviderCheck(unittest.TestCase):
         self.assertEqual(
             args.kwargs["headers"].get("Authorization"), f"Bearer {_TOKEN}"
         )
+        self.assertEqual(
+            args.kwargs["headers"].get("Content-Type"), "application/json"
+        )
         payload = json.loads(args.kwargs["data"].decode("utf8"))
         self.assertEqual(payload["model"], "agnes-2.5-flash")
         self.assertEqual(payload["stream"], False)
