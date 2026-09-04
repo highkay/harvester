@@ -4,6 +4,7 @@
 AI Provider implementations for search engine.
 """
 
+from .agnes_ai import AgnesAIProvider
 from .anthropic import AnthropicProvider
 from .azure import AzureOpenAIProvider
 from .base import AIBaseProvider
@@ -33,6 +34,7 @@ from .vertex import VertexProvider
 
 __all__ = [
     "AIBaseProvider",
+    "AgnesAIProvider",
     "OpenAILikeProvider",
     "OpenAIProvider",
     "AnthropicProvider",
