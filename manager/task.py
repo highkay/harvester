@@ -261,25 +261,35 @@ class TaskManager(LifecycleManager, TaskDataProvider):
         # 1. Start pipeline (creates ResultManager without backup)
         self.pipeline.start()
 
-        # 2. Recover queue tasks
-        recoverd_tasks = self.pipeline.queue_manager.load_all_queues()
-
-        # 3. Filter recovered tasks by stage configuration
-        undo_tasks = self._filter_recovery(recoverd_tasks)
-
-        # 4. Recover result file tasks (material.txt, links.txt) and invalid keys
-        old_tasks = self.pipeline.result_manager.recover_all_tasks()
-
-        # 5. Add recovered tasks to appropriate queues
-        recovery_info = TaskRecoveryInfo(
-            queue_tasks=undo_tasks,
-            result_tasks=old_tasks,
-            total_queue_tasks=sum(len(tasks) for tasks in undo_tasks.values()),
-            total_result_tasks=old_tasks.total_check_tasks() + old_tasks.total_acquisition_tasks(),
+        auto_restore = bool(
+            getattr(getattr(self.config, "persistence", None), "auto_restore", True)
         )
-        self._add_recovered_tasks(recovery_info)
 
-        # 6. Backup existing files (after recovery is complete)
+        if auto_restore:
+            # 2. Recover queue tasks (crash/resume support; shared queue_state)
+            recoverd_tasks = self.pipeline.queue_manager.load_all_queues()
+
+            # 3. Filter recovered tasks by stage configuration
+            undo_tasks = self._filter_recovery(recoverd_tasks)
+
+            # 4. Recover result file tasks (material.txt, links.txt) and invalid keys
+            old_tasks = self.pipeline.result_manager.recover_all_tasks()
+
+            # 5. Add recovered tasks to appropriate queues
+            recovery_info = TaskRecoveryInfo(
+                queue_tasks=undo_tasks,
+                result_tasks=old_tasks,
+                total_queue_tasks=sum(len(tasks) for tasks in undo_tasks.values()),
+                total_result_tasks=old_tasks.total_check_tasks() + old_tasks.total_acquisition_tasks(),
+            )
+            self._add_recovered_tasks(recovery_info)
+        else:
+            recovery_info = None
+            logger.info(
+                "persistence.auto_restore is off - starting clean (no queue/result recovery)"
+            )
+
+        # 6. Backup existing files (always, so stale results never pile up)
         self.pipeline.result_manager.backup_all_existing_files()
 
         # 6b. Previously-valid keys were re-queued for check during recovery
@@ -298,9 +308,15 @@ class TaskManager(LifecycleManager, TaskDataProvider):
             self.pipeline.add_initial_tasks(initial_tasks)
 
         # Log recovery and startup info
-        logger.info(
-            f"Started task manager: {recovery_info.total_queue_tasks} queue tasks, {recovery_info.total_result_tasks} result tasks, {len(initial_tasks)} initial tasks"
-        )
+        if recovery_info is None:
+            logger.info(
+                f"Started task manager (clean start): {len(initial_tasks)} initial tasks"
+            )
+        else:
+            logger.info(
+                f"Started task manager: {recovery_info.total_queue_tasks} queue tasks, "
+                f"{recovery_info.total_result_tasks} result tasks, {len(initial_tasks)} initial tasks"
+            )
 
     def _on_stop(self) -> None:
         """Stop the task manager gracefully"""
