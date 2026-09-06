@@ -187,12 +187,23 @@ def get_default_config() -> Dict[str, Any]:
                     # Honeypot decoys embed base64("XgroqX") == "WGdyb3FY"; the
                     # "WGdy" lookahead also catches truncated fragments. Length
                     # stays 20+ (length-independent; no measured real-key corpus).
-                    "key_pattern": "gsk_(?!.*WGdy)[A-Za-z0-9]{20,}",
+                    # Marker words / sequential placeholders / 4-char runs are
+                    # excluded too — 2026-09-06 prod audit: the pool was 100%
+                    # doc placeholders (gsk_abc123…, gsk_xxxx…, gsk_test…).
+                    "key_pattern": "gsk_(?!.*WGdy)(?!.*(?i:test|secret|example|demo|fake|dummy|sample|placeholder|keyhere|yourkey|localhost))(?!.*(?:abc123|xyz456|def789|ghi012|jkl345|mno678|pqr901|stu234|vwx567|1234567890|abcdefghijklmnopqrstuvwxyz|abcdefgh))(?!.*(?:X{4,}|x{4,}|A{4,}|a{4,}|B{4,}|0{4,}|9{4,}))[A-Za-z0-9]{20,}",
                     "address_pattern": "",
                     "endpoint_pattern": "",
                     "model_pattern": "",
                 },
-                "conditions": [{"query": '"gsk_"'}],
+                "conditions": [
+                    {"query": '"gsk_"'},
+                    {"query": '"GROQ_API_KEY"'},
+                    {"query": '"GROQ_API_KEY="'},
+                    {"query": '"GROQ_API_KEY:"'},
+                    {"query": '"api.groq.com"'},
+                    {"query": '"api.groq.com" "Authorization"'},
+                    {"query": '"gsk_" created:>=2026-08-01'},
+                ],
                 "rate_limit": {"base_rate": 2.0, "burst_limit": 10, "adaptive": True},
                 "storage": {
                     "directory": "",

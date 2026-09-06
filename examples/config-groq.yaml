@@ -38,7 +38,7 @@ persistence:
   save_interval: 5
   queue_interval: 60
   snapshot_interval: 300
-  auto_restore: true
+  auto_restore: false
   shutdown_timeout: 30
   format: txt
 
@@ -57,7 +57,7 @@ tasks:
     enabled: true
     provider_type: groq
     use_api: true
-    max_pages: 1000
+    max_pages: 200
     stages:
       search: true
       gather: true
@@ -77,18 +77,27 @@ tasks:
       # Real Groq keys are gsk_ + alphanumerics (docs); measured live keys are
       # scarce, so length stays 20+ (length-independent — the serpapi lesson:
       # a fixed/narrow length silently drops every real key). Exclusions:
-      #   - the negative lookahead drops honeypot decoys whose bodies embed
-      #     base64("XgroqX") == "WGdyb3FY" (measured on fnos 2026-09-04: 44%
-      #     of rejected candidates were these planted fake keys); "WGdy" also
-      #     catches fragments truncated mid-marker;
-      #   - alnum-only charset drops GTK4 gsk_* code symbols and doc
-      #     placeholders (gsk_your_actual_key_here / gsk_xxxx...).
-      key_pattern: "gsk_(?!.*WGdy)[A-Za-z0-9]{20,}"
+      #   - WGdy lookahead: honeypot decoys embed base64("XgroqX") == "WGdyb3FY";
+      #   - marker words / sequential placeholders / 4-char runs: the 2026-09-06
+      #     prod audit found the whole candidate pool was doc placeholders
+      #     (gsk_abc123…, gsk_xxxx…, gsk_test…, gsk_AAAA…); these lookaheads
+      #     cut them at extraction time (they cost check-stage quota);
+      #   - alnum-only charset still drops GTK gsk_* symbols.
+      key_pattern: 'gsk_(?!.*WGdy)(?!.*(?i:test|secret|example|demo|fake|dummy|sample|placeholder|keyhere|yourkey|localhost))(?!.*(?:abc123|xyz456|def789|ghi012|jkl345|mno678|pqr901|stu234|vwx567|1234567890|abcdefghijklmnopqrstuvwxyz|abcdefgh))(?!.*(?:X{4,}|x{4,}|A{4,}|a{4,}|B{4,}|0{4,}|9{4,}))[A-Za-z0-9]{20,}'
       address_pattern: ""
       endpoint_pattern: ""
       model_pattern: ""
     conditions:
+      # Each GitHub API search query has its own 1000-result window.
+      # auto_restore=false means every run searches fresh; the created: window
+      # biases toward recently-created repos (2026-09-06 addition).
       - query: '"gsk_"'
+      - query: '"GROQ_API_KEY"'
+      - query: '"GROQ_API_KEY="'
+      - query: '"GROQ_API_KEY:"'
+      - query: '"api.groq.com"'
+      - query: '"api.groq.com" "Authorization"'
+      - query: '"gsk_" created:>=2026-08-01'
     rate_limit:
       base_rate: 2.0
       burst_limit: 10
