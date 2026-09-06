@@ -846,6 +846,11 @@ pipeline into a long-running service:
   completes, validated `sk-` keys auto-push to the configured gpt-load group
   via `AGNES_LOAD_BASE_URL` / `AGNES_LOAD_GROUP_ID` / `AGNES_LOAD_AUTH_KEY`
   (group 19 on `http://107.172.141.203:43001` by default).
+- **Automatic push to gpt-load (ModelScope)**: after each modelscope scan
+  completes, validated keys auto-push to the configured gpt-load group via
+  `MODELSCOPE_LOAD_BASE_URL` / `MODELSCOPE_LOAD_GROUP_ID` /
+  `MODELSCOPE_LOAD_AUTH_KEY` (group 13 on `http://192.168.1.18:43001` by
+  default).
 - **Self-bootstrap** — after a `github` scan completes, validated GitHub API
   tokens are automatically imported into this instance's own token store
   (`label='harvester-bootstrap'`) so the instance grows its own search
@@ -872,6 +877,9 @@ pipeline into a long-running service:
 | `AGNES_LOAD_BASE_URL` | `http://107.172.141.203:43001` | gpt-load instance base URL for agnes-ai push |
 | `AGNES_LOAD_GROUP_ID` | `19` | gpt-load group to push agnes-ai keys into |
 | `AGNES_LOAD_AUTH_KEY` | empty | gpt-load management auth key for agnes-ai push (empty sends no `Authorization` header) |
+| `MODELSCOPE_LOAD_BASE_URL` | `http://192.168.1.18:43001` | gpt-load instance base URL for modelscope push |
+| `MODELSCOPE_LOAD_GROUP_ID` | `13` | gpt-load group to push modelscope keys into |
+| `MODELSCOPE_LOAD_AUTH_KEY` | empty | gpt-load auth key for modelscope push; empty sends no `Authorization` header |
 | `HARVESTER_WORKSPACE` | `./data` | Workspace (provider results) |
 | `HARVESTER_DB_PATH` | `<workspace>/harvester.db` | SQLite DB path |
 | `HARVESTER_SELF_BOOTSTRAP` | `1` | Auto-import validated GitHub tokens into this instance's token store after a github scan (self-bootstrap; set 0 to disable) |

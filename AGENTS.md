@@ -286,6 +286,46 @@ update preserves intentional local changes (reverts, port/volume tweaks).
   trusting invalid counts — host-direct success does NOT imply container
   success (groq taught 403-blocks; agnes adds DNS pollution + socks5h).
 
+## Feature: modelscope provider (scan + validate + push)
+
+- `provider/modelscope.py`: `ModelScopeProvider` (registered as `"modelscope"`).
+  Alibaba ModelScope (魔搭社区) is an OpenAI-compatible gateway at
+  `https://api-inference.modelscope.cn/v1` (single CN endpoint), authed with
+  ModelScope tokens (`MODELSCOPE_API_KEY` / `MODELSCOPE_SDK_TOKEN`, no fixed
+  prefix — length / charset undocumented). Validation is a minimal
+  chat-completion probe: `POST /chat/completions` with
+  `{"model":"Qwen/Qwen3-8B","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`.
+- **`GET /v1/models` trap**: the endpoint is PUBLIC — returns 200 even for
+  invalid keys (model list is not gated, live-probed in provider), so it is
+  NOT used for validation; `model_path` only feeds inspection metadata.
+- Status map (`_judge`): 200 → valid; 401 (or body `authentication failed` /
+  `invalid.*token` / `unauthorized`) → INVALID_KEY; 402 / 400 body
+  `arrearage|out_of_service|good standing|欠费|余额` / 429 body
+  `quota|throttling|insufficient|billing` → NO_QUOTA; 429 else →
+  RATE_LIMITED; 403 `model_not_found|不存在` → NO_MODEL, 403
+  `unauthorized|无权|已被封禁` → INVALID_KEY, 403 else → NO_ACCESS.
+- Push: `web/modelscope_push.py` `ModelScopePushService` (mirror of
+  `web/agnes_ai_push.py`), env-gated by `MODELSCOPE_LOAD_BASE_URL` /
+  `MODELSCOPE_LOAD_GROUP_ID` / `MODELSCOPE_LOAD_AUTH_KEY`. After a modelscope
+  scan it POSTs validated keys to a gpt-load instance
+  `POST {base}/api/keys/add-multiple` with body
+  `{"group_id":<int>,"keys_text":"<key>\n<key>"}`. Defaults:
+  `MODELSCOPE_LOAD_BASE_URL=http://192.168.1.18:43001` (the user's gpt-load
+  instance; 192.168.1.18 is the fnos NAS LAN IP), `MODELSCOPE_LOAD_GROUP_ID=13`
+  (group named "modelscope"), `MODELSCOPE_LOAD_AUTH_KEY=""` (empty → no
+  Authorization header; non-empty → `Bearer <key>`); never raises; idempotent
+  per run_id; writes one `push_logs` row (gpt_load_config_id=0, group_id=env
+  int).
+- Hook: `web/runner.py` `_on_completed` fires modelscope push iff
+  `provider_name == "modelscope"` (daemon thread, ImportError-safe).
+- Schedule: `("modelscope", "0 11 * * *", "examples/config-modelscope.yaml")`
+  daily 11:00 in `web/scheduler.py`; seeds only into an EMPTY
+  `schedule_config` table, so prod (fnos) needs a one-off row insert (or a UI
+  add) after deploy.
+- Redaction: NO `tools/patterns.py` entry (ModelScope tokens have no fixed
+  prefix, so a bare pattern would blitz logs); the provider never writes keys
+  to disk/logs.
+
 ## Tests & conventions
 
 - Run: `python -m unittest discover -s tests` (396 tests, 8 skipped as of

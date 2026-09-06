@@ -31,6 +31,10 @@ services:
       - AGNES_LOAD_BASE_URL=${AGNES_LOAD_BASE_URL:-http://107.172.141.203:43001}
       - AGNES_LOAD_GROUP_ID=${AGNES_LOAD_GROUP_ID:-19}
       - AGNES_LOAD_AUTH_KEY=${AGNES_LOAD_AUTH_KEY:-}
+      # --- ModelScope push service (to gpt-load add-multiple, group 13) ---
+      - MODELSCOPE_LOAD_BASE_URL=${MODELSCOPE_LOAD_BASE_URL:-http://192.168.1.18:43001}
+      - MODELSCOPE_LOAD_GROUP_ID=${MODELSCOPE_LOAD_GROUP_ID:-13}
+      - MODELSCOPE_LOAD_AUTH_KEY=${MODELSCOPE_LOAD_AUTH_KEY:-}
       # --- GitHub self-bootstrap (default enabled; set 0 to disable) ---
       - HARVESTER_SELF_BOOTSTRAP=${HARVESTER_SELF_BOOTSTRAP:-1}
       # --- Storage ---
