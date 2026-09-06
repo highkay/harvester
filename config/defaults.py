@@ -799,23 +799,83 @@ def get_default_config() -> Dict[str, Any]:
                 },
                 "extras": {},
                 "api": {
-                    "base_url": "https://api-inference.modelscope.cn/v1",
-                    "completion_path": "/chat/completions",
-                    "model_path": "/models",
-                    "default_model": "Qwen/Qwen3-8B",
+                    "base_url": "https://modelscope.cn/openapi/v1",
+                    "completion_path": "/users/me",
+                    "model_path": "/users/me",
+                    "default_model": "modelscope-account",
                     "auth_key": "Authorization",
                     "extra_headers": {},
                     "api_version": "",
                     "timeout": 30,
                     "retries": 3,
+                    "use_proxy": False,
                 },
                 "patterns": {
-                    "key_pattern": "[0-9A-Za-z_-]{20,}",
+                    # ms- SDK/user tokens extracted only from MODELSCOPE_* env
+                    # assignments (no bare branch). Domain conditions below
+                    # widen to Bearer/quoted or oauth2 URL forms.
+                    "key_pattern": (
+                        r"(?i)(?:MODELSCOPE_API_TOKEN|MODELSCOPE_SDK_TOKEN|"
+                        r"MODELSCOPE_ACCESS_TOKEN|MODELSCOPE_API_KEY)"
+                        r"[\"'\]]{0,2}\s*[:=]\s*[\"']?"
+                        r"(ms-[A-Za-z0-9_-]{8,})"
+                        r"[\"']?"
+                    ),
                     "address_pattern": "",
                     "endpoint_pattern": "",
                     "model_pattern": "",
                 },
-                "conditions": [{"query": '"MODELSCOPE_API_KEY"'}],
+                "conditions": [
+                    {"query": '"MODELSCOPE_API_KEY"'},
+                    {"query": '"MODELSCOPE_API_KEY="'},
+                    {"query": '"MODELSCOPE_API_KEY:"'},
+                    {"query": '"MODELSCOPE_SDK_TOKEN"'},
+                    {"query": '"MODELSCOPE_SDK_TOKEN="'},
+                    {"query": '"MODELSCOPE_SDK_TOKEN:"'},
+                    {"query": '"MODELSCOPE_ACCESS_TOKEN"'},
+                    {"query": '"MODELSCOPE_API_TOKEN"'},
+                    {"query": '"MODELSCOPE_API_KEY" language:Python'},
+                    {"query": '"MODELSCOPE_API_KEY" language:JavaScript'},
+                    {"query": '"MODELSCOPE_API_KEY" language:TypeScript'},
+                    {"query": '"MODELSCOPE_SDK_TOKEN" language:Python'},
+                    {"query": '"modelscope" extension:env'},
+                    {"query": '"modelscope" extension:yaml'},
+                    {"query": '"modelscope" extension:json'},
+                    {"query": '"modelscope" extension:toml'},
+                    {
+                        "query": '"modelscope.cn" "Authorization"',
+                        "patterns": {
+                            "key_pattern": (
+                                r"(?i)(?:Bearer\s+|[\"']\s*)?"
+                                r"(ms-[A-Za-z0-9_-]{8,})"
+                            ),
+                        },
+                    },
+                    {
+                        "query": '"oauth2:" "modelscope.cn"',
+                        "patterns": {
+                            "key_pattern": r"oauth2:(ms-[A-Za-z0-9_-]{8,})@",
+                        },
+                    },
+                    {
+                        "query": '"api-inference.modelscope.cn"',
+                        "patterns": {
+                            "key_pattern": (
+                                r"(?i)(?:Bearer\s+|[\"']\s*)?"
+                                r"(ms-[A-Za-z0-9_-]{8,})"
+                            ),
+                        },
+                    },
+                    {
+                        "query": '"api-inference.modelscope.cn" "Authorization"',
+                        "patterns": {
+                            "key_pattern": (
+                                r"(?i)(?:Bearer\s+|[\"']\s*)?"
+                                r"(ms-[A-Za-z0-9_-]{8,})"
+                            ),
+                        },
+                    },
+                ],
                 "rate_limit": {"base_rate": 0.2, "burst_limit": 2, "adaptive": True},
                 "storage": {
                     "directory": "",
