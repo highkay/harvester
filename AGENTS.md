@@ -224,6 +224,27 @@ update preserves intentional local changes (reverts, port/volume tweaks).
   reaching the check stage, suspect the pattern first; (3) behaviour is
   pinned by tests/test_groq_pattern.py (decoy rejection, no capture groups,
   defaults↔examples lockstep).
+- **"0 valid since forever" was ALSO a corpus-replay bug (fixed 2026-09-06).**
+  `manager/task.py::_on_start` recovered the previous run's
+  `links.txt`/`material.txt`/`invalid-keys.txt` (and shared `queue_state`
+  files, provider-filtered) BEFORE backing them up, so every nightly groq
+  run re-checked last night's pool instead of searching fresh — measured:
+  consecutive links.txt sets were byte-identical (0 new/0 dropped, only
+  row-order shuffle) while run_records said "completed". The egress/pattern
+  fixes were necessary but unobservable under replay. Fix: `persistence.
+  auto_restore` gate is now actually consumed by `_on_start` (it was a
+  parsed-but-unused flag); `examples/config-groq.yaml` sets
+  `auto_restore: false` (clean start each run, still backs up old files).
+  Dorks widened too: `"gsk_"` plus `GROQ_API_KEY` env anchors,
+  `api.groq.com` domain dorks, and a `created:>=2026-08-01` freshness window
+  (max_pages 200); pattern excludes doc placeholders (marker words,
+  abc123-style sequences, 4-char runs). Prod verification 2026-09-06:
+  manager.log shows "clean start", 7 initial search tasks, fresh gather
+  queue (5k+ links in 4 min), zero "Recovered" lines. Diagnosis recipe:
+  set-diff two backups' links.txt + grep manager.log for
+  "Recovered N unique links" vs "clean start". Fun fact: the 165-candidate
+  pool that ran for 3h nightly was doc placeholders (gsk_xxx…/gsk_test…/
+  gsk_abc123…) — all re-verified dead (163×401 + 2 network-EXH, 0 live).
 - `run_records.total_keys_checked` is never written by `web/runner.py` (only
   `valid_keys_found`) — 0 there means "not wired", not "nothing checked".
 
