@@ -310,21 +310,28 @@ update preserves intentional local changes (reverts, port/volume tweaks).
 ## Feature: modelscope provider (scan + validate + push)
 
 - `provider/modelscope.py`: `ModelScopeProvider` (registered as `"modelscope"`).
-  Alibaba ModelScope (魔搭社区) is an OpenAI-compatible gateway at
-  `https://api-inference.modelscope.cn/v1` (single CN endpoint), authed with
-  ModelScope tokens (`MODELSCOPE_API_KEY` / `MODELSCOPE_SDK_TOKEN`, no fixed
-  prefix — length / charset undocumented). Validation is a minimal
-  chat-completion probe: `POST /chat/completions` with
-  `{"model":"Qwen/Qwen3-8B","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`.
-- **`GET /v1/models` trap**: the endpoint is PUBLIC — returns 200 even for
-  invalid keys (model list is not gated, live-probed in provider), so it is
-  NOT used for validation; `model_path` only feeds inspection metadata.
-- Status map (`_judge`): 200 → valid; 401 (or body `authentication failed` /
-  `invalid.*token` / `unauthorized`) → INVALID_KEY; 402 / 400 body
-  `arrearage|out_of_service|good standing|欠费|余额` / 429 body
-  `quota|throttling|insufficient|billing` → NO_QUOTA; 429 else →
-  RATE_LIMITED; 403 `model_not_found|不存在` → NO_MODEL, 403
-  `unauthorized|无权|已被封禁` → INVALID_KEY, 403 else → NO_ACCESS.
+  Validation is `GET https://modelscope.cn/openapi/v1/users/me` with
+  `Authorization: Bearer <token>` (single CN hub endpoint; clean status map).
+- Status map (`_judge`): 200 + `success:true` + `data` dict → valid; 401 (or
+  body `InvalidAuthentication`) → INVALID_KEY; 403 → NO_ACCESS; 429 →
+  RATE_LIMITED; >=500 (post-retry) → NETWORK_ERROR; 200 without proper
+  JSON/data → UNKNOWN (presence-only trap guard).
+- Traps: `GET https://api-inference.modelscope.cn/v1/models` returns 200 for
+  ANY key (presence-only) — never used for validation; `POST /api/v1/login`
+  returns 400 + business Code 10010103009 for invalid tokens (not used as
+  primary because of read-only-tier subtleties).
+- Extraction: context-anchored — task-level env-name assignments capturing
+  `ms-[A-Za-z0-9_-]{8,}` (no naked branch — the old bare `[0-9A-Za-z_-]{20,}`
+  flooded the check stage with 2648+ candidates / 0 valid on 2026-08-11);
+  domain-anchored conditions add Bearer/quoted variadic + `oauth2:(ms-…)@`
+  git-URL form.
+- Egress: verified 2026-09-06 from the fnos harvester container — direct
+  connection to modelscope.cn works (no proxy, no DNS pollution);
+  `use_proxy: false`.
+- Tripwire: the `ms-` charset/length floor of 8 is from docs/third-party spans
+  — measure the FIRST real valid key and re-align before narrowing; never add
+  an upper bound (serpapi lesson).
+- `inspect()` returns `[]` (hub token → user profile, no model enumeration).
 - Push: `web/modelscope_push.py` `ModelScopePushService` (mirror of
   `web/agnes_ai_push.py`), env-gated by `MODELSCOPE_LOAD_BASE_URL` /
   `MODELSCOPE_LOAD_GROUP_ID` / `MODELSCOPE_LOAD_AUTH_KEY`. After a modelscope
@@ -343,9 +350,8 @@ update preserves intentional local changes (reverts, port/volume tweaks).
   daily 11:00 in `web/scheduler.py`; seeds only into an EMPTY
   `schedule_config` table, so prod (fnos) needs a one-off row insert (or a UI
   add) after deploy.
-- Redaction: NO `tools/patterns.py` entry (ModelScope tokens have no fixed
-  prefix, so a bare pattern would blitz logs); the provider never writes keys
-  to disk/logs.
+- Redaction: NO `tools/patterns.py` entry (a bare `ms-` pattern would blitz
+  logs); the provider never writes keys to disk/logs.
 
 ## Tests & conventions
 
