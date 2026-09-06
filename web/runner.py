@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 import sqlite3
 import threading
 import time
@@ -246,8 +245,8 @@ class PipelineRunner:
             tokens = self._get_enabled_api_tokens()
             if not tokens:
                 raise RuntimeError(
-                    f"No enabled API tokens found. "
-                    f"Add tokens via the Token API before scanning."
+                    "No enabled API tokens found. "
+                    "Add tokens via the Token API before scanning."
                 )
 
             # 2. Generate temporary YAML with injected tokens
@@ -544,6 +543,38 @@ class PipelineRunner:
         except Exception as exc:
             logger.error(
                 f"AgnesAI push hook error: provider={provider_name} "
+                f"run_id={run_id} error={exc}"
+            )
+
+        # ModelScope push — symmetric to the agnes-ai block above. Only fires
+        # for modelscope scans; the target gpt-load instance + group default
+        # via MODELSCOPE_LOAD_BASE_URL / MODELSCOPE_LOAD_GROUP_ID (+ optional
+        # MODELSCOPE_LOAD_AUTH_KEY). Env gating lives inside
+        # ModelScopePushService.
+        try:
+            from web.modelscope_push import get_modelscope_push_service  # type: ignore[import-untyped,unused-ignore]
+
+            if provider_name == "modelscope":
+                modelscope_push_service = get_modelscope_push_service()
+                # Run push in a new thread to avoid blocking the completion callback
+                t = threading.Thread(
+                    target=modelscope_push_service.push_valid_keys,
+                    args=(provider_name, run_id),
+                    daemon=True,
+                )
+                t.start()
+                logger.info(
+                    f"ModelScope push triggered: "
+                    f"provider={provider_name} run_id={run_id}"
+                )
+        except ImportError:
+            logger.info(
+                f"ModelScope push service not available: "
+                f"provider={provider_name} run_id={run_id}"
+            )
+        except Exception as exc:
+            logger.error(
+                f"ModelScope push hook error: provider={provider_name} "
                 f"run_id={run_id} error={exc}"
             )
 

@@ -77,7 +77,7 @@ class TestSeedData(unittest.TestCase):
         "mimo-cn": "30 */4 * * *",
         "qwen-cn": "45 */4 * * *",
         "glm": "0 */6 * * *",
-        "modelscope": "20 */6 * * *",
+        "modelscope": "0 11 * * *",
         "tavily": "40 */6 * * *",
         "github": "50 */6 * * *",
         "serpapi": "10 */6 * * *",

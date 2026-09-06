@@ -42,7 +42,8 @@ _DEFAULT_SCHEDULES: tuple[tuple[str, str, str], ...] = (
     ("qwen-cn", "45 */4 * * *", "examples/config-qwen.yaml"),
     # Medium-churn providers — every 6 hours.
     ("glm", "0 */6 * * *", "examples/config-glm.yaml"),
-    ("modelscope", "20 */6 * * *", "examples/config-modelscope.yaml"),
+    # ModelScope scans run 6-hourly → DAILY at 11:00 (off-peak, low churn).
+    ("modelscope", "0 11 * * *", "examples/config-modelscope.yaml"),
     # Tavily keys survive longer (usage-audit based) — every 6 hours.
     ("tavily", "40 */6 * * *", "examples/config-tavily.yaml"),
     # GitHub token self-bootstrap — scan every 6 hours so the instance's own
