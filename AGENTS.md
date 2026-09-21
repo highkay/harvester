@@ -195,6 +195,15 @@ update preserves intentional local changes (reverts, port/volume tweaks).
 
 ## Feature: groq provider — egress & honeypot facts (verified 2026-09-04)
 
+> **2026-09-21 CORRECTION — the Cloudflare block described below is NO LONGER
+> accurate.** Measured on fnos (container on host networking): the socks trio
+> with `socks5://` (LOCAL DNS) returns the normal `401 invalid_api_key` (6/6
+> probes); only `socks5h://` (remote DNS) still gets the bare 403. The
+> dedicated relay `socks5://192.168.1.18:7890` is GONE (connection refused,
+> nothing listening on the NAS). `HARVESTER_PROXY_GROQ` in fnos `.env` is now
+> EMPTY so groq inherits the global trio. Re-verify before trusting either
+> direction again.
+
 - **Groq's Cloudflare edge 403-blocks fnos entirely.** Every request from
   fnos direct AND through the benchmarked socks trio
   (`192.168.1.18:1080/1090/1091`, whose egress is Cloudflare anycast
@@ -353,11 +362,97 @@ update preserves intentional local changes (reverts, port/volume tweaks).
 - Redaction: NO `tools/patterns.py` entry (a bare `ms-` pattern would blitz
   logs); the provider never writes keys to disk/logs.
 
+## Feature: glm + glm-ai providers (split + first yield run, 2026-09-21)
+
+- **Key format is MEASURED, not inferred**: `<32 lowercase hex>.<16+ mixed-case
+  alnum>`, 49 chars (sample live-validated at 200 on api.z.ai). The original
+  pattern `[0-9a-f]{32}\.[0-9a-f]{32}` (32-hex secret) matched NO real key —
+  scans looked healthy while extracting 0 candidates (serpapi lesson again).
+  Fixed to `[0-9a-f]{32}\.[A-Za-z0-9]{16,}` in `examples/config-glm*.yaml`,
+  `config/defaults.py`, `examples/config-full.yaml` and `tools/patterns.py`
+  (the redaction pattern had the same bug and leaked real keys into logs).
+- **Endpoints**: `glm` -> `https://open.bigmodel.cn/api/paas/v4` (direct);
+  `glm-ai` -> `https://api.z.ai/api/paas/v4` (see the egress section). Both
+  expose an auth-gated `GET /models` (the old "no /models endpoint" comment was
+  wrong) but validation uses the chat-completions probe with `glm-4.7-flash`.
+- **Status map**: 401 / body code 1000·1001·1003 -> invalid; 400 code 1211 ->
+  NO_MODEL; 402 / code 1113 -> no-quota; **429 code 1305 (model overload) ->
+  RATE_LIMITED -> `wait-check-keys.txt`** (62 occurrences in one 45-min window
+  measured — expect a fat wait bucket on busy days; those keys are recoverable,
+  not lost).
+- **First production run (manual, 3h18m, ended by a service restart)**: `glm`
+  234 valid / 164 invalid / 100 wait (60.8k links); `glm-ai` 25 valid / 38
+  invalid / 27 wait (41.8k links). Pushed: `glm` -> gpt-load group 14
+  (234/234/0), `glm-ai` -> group 15 (25/25/0, union of a `backup-<ts>/` dir +
+  live file). `run_records.valid_keys_found` was NOT written (the run was
+  reconciled as `failed: interrupted by service restart`) — authoritative
+  counts live in the provider files + `push_logs`.
+- **Config**: `auto_restore: false` in both (the first-run pool is ~60k links;
+  replaying it daily would re-gather the whole backlog). Schedules: `glm`
+  `0 12`, `glm-ai` `0 13` (daily, staggered).
+
+## Feature: kimi-coding (corrected 2026-09-21)
+
+- Endpoint `https://api.kimi.com/coding/v1`; auth-gated `GET /models` lists
+  ONLY `kimi-for-coding, kimi-for-coding-highspeed, k3, k3-256k`.
+  **`kimi-k3` is an Open-Platform (api.moonshot.cn) id and does NOT exist
+  here** — the old `default_model: kimi-k3` made a live key answer 401 "model
+  id does not exist", which was classified INVALID_KEY and silently discarded.
+  Now `kimi-for-coding`; `provider/kimi.py` maps 401 model/plan errors
+  (`model id does not exist|recognized as other|does not have access to`) to
+  NO_MODEL so they land in wait-check instead.
+- Error semantics (measured): 403 `access_terminated_error` "Your current
+  subscription does not have access to Kimi Code right now" = authentic key
+  with a lapsed/absent subscription -> NO_ACCESS -> `wait-check-keys.txt`
+  (never pushed); 401 "The API Key appears to be invalid or may have expired"
+  = dead/revoked key -> invalid. Real keys are `sk-kimi-` at 72 chars.
+- The one key ever pushed (Aug) later 401'd on every probe — staleness law,
+  not a misclassification.
+
+## Ops: container egress, host networking & deploys (2026-09-21)
+
+- The harvester container now runs `network_mode: host` + `WEB_PORT=8002`
+  (was bridge + `8002:8000`), because **container-direct requests to api.z.ai
+  through docker NAT were ~50-80% lossy while host-direct was 5/5 fast**.
+  Post-switch container-direct: 5/6 at 1.3-8.6s — the Aliyun-GA IPv6 addresses
+  answer, the IPv4 addresses are blackholed (0/9 with IPv4 pinned). `glm-ai`
+  runs `use_proxy: false`; watch its wait-check ratio and flip back to the
+  socks5 rotation if it degrades.
+- **groq**: see the 2026-09-21 correction in the groq section — trio+socks5 now
+  works, socks5h is the one that 403s, and the 7890 relay is gone.
+- **cerebras is Cloudflare-blocked on every tested path** (direct, socks5,
+  socks5h, browser UA -> 403 + a CF support JSON). Its schedule is DISABLED
+  until a working egress is found — do not re-enable blindly.
+- **`docker compose up -d --build` is BROKEN on fnos**: the docker daemon's
+  registry proxy (`127.0.0.1:7890`) is dead, so `python:3.12-slim` cannot be
+  pulled. Working deploy recipe: `docker compose up -d` (recreate from the
+  local image) -> `docker compose cp <changed files> harvester-web:/app/...`
+  -> **`docker compose restart`** (a bare `cp` does not reload already-imported
+  modules, and a recreate wipes the copied layer — the restart is what makes
+  new code active without a rebuild).
+- **Concurrency ceiling**: fnos is a 4-core box already at load ~8 with 6-8
+  concurrent scans. Aggregate gather throughput measured ~855-953 links/min
+  (~31/min per gather thread vs ~125 in a single run), so raising
+  `pipeline.threads.gather` does NOT help — reduce overlap and per-run link
+  volume instead.
+- **`POST /api/runs/{id}/cancel` does not stop a mid-run scan** (the cancel
+  event is only checked before `app.run()`). The only way to stop one is a
+  container restart; startup reconciliation then records it as `failed:
+  interrupted by service restart`.
+- **`data/queue_state/*.json` is shared by every concurrent run** and gets
+  overwritten in turn — never use its size as a per-run progress signal; read
+  the per-run display tables from the container logs instead.
+
 ## Tests & conventions
 
-- Run: `python -m unittest discover -s tests` (396 tests, 8 skipped as of
-  2026-08-30; known env baseline = 35 failures in `test_web_ui` /
-  `test_web_push_logs`; count grows — the historical "322" figure is stale).
+- Run: `python -m unittest discover -s tests` (490 tests, 8 skipped, 0 failures
+  as of 2026-09-21 — the old "35 failures in test_web_ui / test_web_push_logs"
+  baseline is stale; the suite is green now).
+- **One config file = one task.** Do NOT bundle regional tasks into one config
+  (2026-09-21: `glm`/`kimi`/`mimo`/`qwen` were split into per-task files). A
+  bundled run aggregates 2-3 tasks into one `run_records.valid_keys_found` and
+  mixes statistics; pushes are per task anyway. `web/scheduler.py` now seeds
+  one schedule row per task (15 rows, daily staggered).
 - New files must pass `ruff check` and `pyright` (repo has pre-existing lint
   debt elsewhere — leave it).
 - Provider pattern: mirror `provider/openrouter.py` / `provider/kimi.py`.
