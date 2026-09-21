@@ -90,7 +90,11 @@ tasks:
       base_url: https://api.z.ai/api/paas/v4
       completion_path: /chat/completions
       model_path: ""
-      default_model: glm-4.7-flash
+      # MEASURED 2026-09-21: glm-4.5-flash is the least congested flash model
+      # (8/10 200s through the proxy) — glm-4.7-flash is heavily congested
+      # (mostly 429 code 1305) and non-flash models answer 1113 "no resource
+      # pack" for these free-tier keys.
+      default_model: glm-4.5-flash
       auth_key: Authorization
       extra_headers: {}
       api_version: ""

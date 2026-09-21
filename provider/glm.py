@@ -24,7 +24,9 @@ class GLMProvider(OpenAILikeProvider):
 
     Zhipu's API (open.bigmodel.cn/api/paas/v4) exposes NO ``GET /models``
     endpoint, so ``check`` uses the inherited OpenAI-compatible chat-completions
-    probe against ``glm-4.7-flash`` and auth is classified from Zhipu's
+    probe against ``glm-4.5-flash`` (the least congested flash model — measured
+    2026-09-21; ``glm-4.7-flash`` is heavily congested and non-flash ids answer
+    1113 "no resource pack" for free-tier keys) and auth is classified from Zhipu's
     string error codes. ``inspect`` returns an empty list because there is no
     model-list API for this provider.
     """
@@ -37,7 +39,7 @@ class GLMProvider(OpenAILikeProvider):
                 "base_url": "https://open.bigmodel.cn/api/paas/v4",
                 "completion_path": "/chat/completions",
                 "model_path": "",
-                "default_model": "glm-4.7-flash",
+                "default_model": "glm-4.5-flash",
             },
         )
 

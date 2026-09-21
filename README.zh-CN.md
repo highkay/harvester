@@ -55,7 +55,7 @@
 | SerpApi | `serpapi` | `SERPAPI_API_KEY` / `SERPAPI_KEY` / `SERP_API_KEY` 赋值（无前缀 64 位十六进制 Key（生产实测：有效 key 均为 64 位 hex）） | `GET /account.json?api_key=`（Account API） | inspect 记录账户/套餐审计（回显的 `api_key` 字段会被丢弃）；`search.json` 不带 key 也返回 200，故不用它做验证 |
 | DeepSeek | `deepseek` | `sk-...` API Key | `GET /models` 鉴权门 + 最小 chat completion 探针（`max_tokens=1`，用于识别 402） | 默认 base URL: `https://api.deepseek.com`；401 body 可能不是 JSON；余额不足的 Key 计入 `no-quota-keys.txt` |
 | Kimi / Moonshot | `kimi` | `sk-...` API Key | `GET /v1/models` | 默认 base URL: `https://api.moonshot.cn/v1`；额度不足计入 `no-quota-keys.txt` |
-| GLM / 智谱 | `glm` | `{id}.{secret}` 点分格式 API Key | Chat completion 探针（`glm-4.7-flash`） | 默认 base URL: `https://open.bigmodel.cn/api/paas/v4`；无 `/models` 端点，因此跳过 inspect |
+| GLM / 智谱 | `glm` | `{id}.{secret}` 点分格式 API Key | Chat completion 探针（`glm-4.5-flash`） | 默认 base URL: `https://open.bigmodel.cn/api/paas/v4`；无 `/models` 端点，因此跳过 inspect |
 | 小米 MiMo | `mimo` | `tp-...` / `sk-...` API Key | `GET /models` | 默认 base URL: `https://token-plan-cn.xiaomimimo.com/v1`（大陆集群）；按 task 区分区域集群（新加坡为 `token-plan-sgp.xiaomimimo.com/v1`） |
 | 阿里云 Qwen（百炼） | `qwen` | `sk-...` API Key | `GET /models` + chat 探针 | 默认 base URL: `https://dashscope.aliyuncs.com/compatible-mode/v1`（国内）；国际为 `dashscope-intl.aliyuncs.com`；欠费为 HTTP 400 + `code: Arrearage`（映射到 no-quota） |
 | 魔搭 ModelScope | `modelscope` | `MODELSCOPE_API_KEY` / `MODELSCOPE_SDK_TOKEN`（无固定前缀） | chat 探针（models 列表公开、不设鉴权门） | 默认 base URL: `https://api-inference.modelscope.cn/v1`；单一国内端点 |

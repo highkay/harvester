@@ -691,7 +691,7 @@ def get_default_config() -> Dict[str, Any]:
                     "base_url": "https://open.bigmodel.cn/api/paas/v4",
                     "completion_path": "/chat/completions",
                     "model_path": "",
-                    "default_model": "glm-4.7-flash",
+                    "default_model": "glm-4.5-flash",
                     "auth_key": "Authorization",
                     "extra_headers": {},
                     "api_version": "",

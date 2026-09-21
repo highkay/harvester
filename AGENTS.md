@@ -374,7 +374,10 @@ update preserves intentional local changes (reverts, port/volume tweaks).
 - **Endpoints**: `glm` -> `https://open.bigmodel.cn/api/paas/v4` (direct);
   `glm-ai` -> `https://api.z.ai/api/paas/v4` (see the egress section). Both
   expose an auth-gated `GET /models` (the old "no /models endpoint" comment was
-  wrong) but validation uses the chat-completions probe with `glm-4.7-flash`.
+  wrong) but validation uses the chat-completions probe with `glm-4.5-flash`
+  (measured 2026-09-21: 10/10 200s from the CN endpoint, 8/10 from z.ai — the
+  least congested flash model; `glm-4.7-flash` is mostly 429 code 1305 and every
+  non-flash id answers 1113 "no resource pack" for these free-tier keys).
 - **Status map**: 401 / body code 1000·1001·1003 -> invalid; 400 code 1211 ->
   NO_MODEL; 402 / code 1113 -> no-quota; **429 code 1305 (model overload) ->
   RATE_LIMITED -> `wait-check-keys.txt`** (62 occurrences in one 45-min window
