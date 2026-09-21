@@ -201,6 +201,17 @@ class KimiProvider(OpenAILikeProvider):
         if code == 200:
             return CheckResult.success()
 
+        # Auth passed, but the model id or plan is wrong. Docs + measurement on
+        # api.kimi.com/coding/v1 (2026-09-21): an unknown model id answers 401
+        # "Your model id does not exist, recognized as other:<id>", and a
+        # plan-gated model answers 401 "... does not have access to <model>".
+        # Neither means the key is invalid — route them to NO_MODEL so they land
+        # in wait-check-keys.txt instead of being silently discarded as invalid.
+        if code == 401 and re.findall(
+            r"model id does not exist|recognized as other|does not have access to", message, flags=re.I
+        ):
+            return CheckResult.fail(ErrorReason.NO_MODEL)
+
         if code == 401 or re.findall(r"invalid_authentication|incorrect_api_key", message, flags=re.I):
             return CheckResult.fail(ErrorReason.INVALID_KEY)
 

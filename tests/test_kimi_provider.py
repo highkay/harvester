@@ -119,6 +119,46 @@ class TestKimiProviderCheck(unittest.TestCase):
         self.assertFalse(result.available)
         self.assertEqual(result.reason, ErrorReason.INVALID_KEY)
 
+    def test_check_wrong_model_id_routes_to_no_model(self):
+        """A valid key probed with a model id that does not exist on the
+        endpoint answers 401 "model id does not exist" — that must NOT be
+        treated as an invalid key (measured on api.kimi.com/coding/v1)."""
+        with mock.patch(
+            "provider.kimi.request",
+            side_effect=[
+                FakeResponse(200, MODELS_RESPONSE),
+                FakeResponse(
+                    401,
+                    '{"error":{"message":"Your model id does not exist, recognized as other:kimi-k3",'
+                    '"type":"invalid_request_error"}}',
+                ),
+            ],
+        ):
+            result = self.provider.check(token="sk-validkey12345678901234567890")
+
+        self.assertFalse(result.available)
+        self.assertEqual(result.reason, ErrorReason.NO_MODEL)
+
+    def test_check_lapsed_subscription_routes_to_no_access(self):
+        """403 access_terminated_error = authentic key whose Kimi Code
+        subscription lapsed -> NO_ACCESS (wait-check), never invalid."""
+        with mock.patch(
+            "provider.kimi.request",
+            side_effect=[
+                FakeResponse(200, MODELS_RESPONSE),
+                FakeResponse(
+                    403,
+                    '{"error":{"message":"Your current subscription does not have access to Kimi Code '
+                    'right now. Upgrade your plan to keep coding with Kimi Code: '
+                    'https://www.kimi.com/code/#pricing","type":"access_terminated_error"}}',
+                ),
+            ],
+        ):
+            result = self.provider.check(token="sk-lapsed123456789012345678901")
+
+        self.assertFalse(result.available)
+        self.assertEqual(result.reason, ErrorReason.NO_ACCESS)
+
     def test_check_rate_limited(self):
         with _patch_request(FakeResponse(429, '{"error":{"type":"rate_limit_reached_error"}}')):
             result = self.provider.check(token="sk-limited")
