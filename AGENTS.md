@@ -416,6 +416,12 @@ update preserves intentional local changes (reverts, port/volume tweaks).
   = dead/revoked key -> invalid. Real keys are `sk-kimi-` at 72 chars.
 - The one key ever pushed (Aug) later 401'd on every probe — staleness law,
   not a misclassification.
+- Pattern narrowed to `sk-kimi-[0-9A-Za-z_-]{20,}` (2026-09-21): the plain
+  `sk-` pattern pulled ~300 dead platform/placeholder keys through the check
+  stage every run for 0 valid keys; 16/16 real coding keys are `sk-kimi-` +
+  72 chars, so only the prefixed form is extracted now. Tripwire: if a future
+  run shows near-zero candidates at the check stage, widen back to `sk-` and
+  re-measure before trusting the narrowing.
 
 ## Ops: container egress, host networking & deploys (2026-09-21)
 
