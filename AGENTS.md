@@ -374,10 +374,15 @@ update preserves intentional local changes (reverts, port/volume tweaks).
 - **Endpoints**: `glm` -> `https://open.bigmodel.cn/api/paas/v4` (direct);
   `glm-ai` -> `https://api.z.ai/api/paas/v4` (see the egress section). Both
   expose an auth-gated `GET /models` (the old "no /models endpoint" comment was
-  wrong) but validation uses the chat-completions probe with `glm-4.5-flash`
-  (measured 2026-09-21: 10/10 200s from the CN endpoint, 8/10 from z.ai — the
-  least congested flash model; `glm-4.7-flash` is mostly 429 code 1305 and every
-  non-flash id answers 1113 "no resource pack" for these free-tier keys).
+  wrong) but validation uses the chat-completions probe with `glm-5.3-flash`.
+  **Policy 2026-09-21: the gpt-load `glm`/`zai` groups only accept
+  glm-5.3-flash-capable keys** — free-tier flash-only keys answer 429/1113
+  ("余额不足或无可用资源包") for every non-flash model and are classified
+  no-quota (never valid, never pushed). Measurement that led here:
+  `glm-4.5-flash` answered 200 on 10/10 CN probes (least congested),
+  `glm-4.7-flash` was mostly 429 code 1305, and all non-flash ids returned
+  1113; the operator decided the pool must serve `glm-5.3-flash` only, and the
+  previously pushed 362 free-tier keys were cleared from both groups.
 - **Status map**: 401 / body code 1000·1001·1003 -> invalid; 400 code 1211 ->
   NO_MODEL; 402 / code 1113 -> no-quota; **429 code 1305 (model overload) ->
   RATE_LIMITED -> `wait-check-keys.txt`** (62 occurrences in one 45-min window
