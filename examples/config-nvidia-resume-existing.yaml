@@ -68,7 +68,7 @@ tasks:
       base_url: https://integrate.api.nvidia.com/v1
       completion_path: /chat/completions
       model_path: /models
-      default_model: meta/llama-3.3-70b-instruct
+      default_model: meta/llama-3.2-11b-vision-instruct  # measured 2026-09-21: meta/llama-3.3-70b-instruct is GONE from NVIDIA /v1/models; this one answers in ~1.4s
       auth_key: Authorization
       extra_headers: {}
       api_version: ""
