@@ -442,6 +442,20 @@ update preserves intentional local changes (reverts, port/volume tweaks).
 - **`data/queue_state/*.json` is shared by every concurrent run** and gets
   overwritten in turn — never use its size as a per-run progress signal; read
   the per-run display tables from the container logs instead.
+- **gpt-load test-model mismatch → "keys cannot be verified" (measured
+  2026-09-21)**: the `glm`/`zai` groups had `test_model: glm-5.3-flash`, but the
+  harvested free-tier keys answer **429 code 1113 ("余额不足或无可用资源包")**
+  for every non-flash model, so gpt-load's verification failed 100% while the
+  keys were perfectly usable for `glm-4.7-flash` / `glm-4.5-flash` (flaky
+  ~1/3 of probes 200, the rest 429 code 1305 model congestion). The group's
+  test model must match what the pooled keys can serve. Fix path:
+  `PUT {gpt_load}/api/groups/{id}` with the full group object (auth
+  `Bearer $GPT_LOAD_AUTH_KEY`) — `GET /api/groups` lists groups, and
+  `PUT /api/groups` does NOT exist (404); the update is the id-suffixed route.
+  Same latent trap found in group `kimicoding` (`test_model: k3`, plan-gated on
+  low tiers) → now `kimi-for-coding`. Note: free flash models are congested, so
+  even with the right test model expect intermittent validation failures —
+  that is capacity, not key validity.
 
 ## Tests & conventions
 
