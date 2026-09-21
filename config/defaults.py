@@ -699,7 +699,7 @@ def get_default_config() -> Dict[str, Any]:
                     "retries": 3,
                 },
                 "patterns": {
-                    "key_pattern": "[0-9a-f]{32}\\.[0-9a-f]{32}",
+                    "key_pattern": "[0-9a-f]{32}\\.[A-Za-z0-9]{16,}",
                     "address_pattern": "",
                     "endpoint_pattern": "",
                     "model_pattern": "",

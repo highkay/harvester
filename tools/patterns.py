@@ -31,7 +31,7 @@ API_KEY_PATTERNS = [
     r"\banthrop[0-9A-Za-z_-]{20,}",  # Anthropic keys
     r"\bgsk_[0-9A-Za-z_-]{20,}",  # Groq/GooeyAI keys
     r"\bstab_[0-9A-Za-z_-]{20,}",  # StabilityAI keys
-    r"\b[0-9a-f]{32}\.[0-9a-f]{32}\b",  # Zhipu AI (GLM) keys: {id}.{secret}
+    r"\b[0-9a-f]{32}\.[A-Za-z0-9]{16,}\b",  # Zhipu AI (GLM) keys: {id}.{secret} (measured: 32 lowercase hex + 16+ alnum)
 ]
 
 # Query parsing patterns
