@@ -58,11 +58,17 @@ class TestAutoRestoreGate(unittest.TestCase):
         tm._add_recovered_tasks.assert_not_called()
         tm.pipeline.result_manager.backup_all_existing_files.assert_called_once()
 
-    def test_auto_restore_missing_config_defaults_true(self) -> None:
+    def test_auto_restore_missing_config_defaults_false(self) -> None:
+        """The default flipped to False on 2026-09-21 (replay ratchet: a
+        recurring run re-queued the accumulated link pool every time —
+        deepseek reached 267k links / 14.5h runs). With no persistence section
+        at all the manager must start clean, still backing up old files."""
         tm = _build(True)
         tm.config = SimpleNamespace()  # no persistence section at all
         tm._on_start()
-        tm.pipeline.result_manager.recover_all_tasks.assert_called_once()
+        tm.pipeline.queue_manager.load_all_queues.assert_not_called()
+        tm.pipeline.result_manager.recover_all_tasks.assert_not_called()
+        tm.pipeline.result_manager.backup_all_existing_files.assert_called_once()
 
 
 if __name__ == "__main__":

@@ -363,7 +363,13 @@ class PersistenceConfig:
     save_interval: int = 30
     queue_interval: int = 60
     snapshot_interval: int = 300  # seconds, periodic snapshot build interval
-    auto_restore: bool = True
+    # Default FALSE = clean start. auto_restore=true re-queues the previous
+    # run's accumulated links/invalid/valid pools (crash/resume recovery); on a
+    # recurring schedule that replay RATCHETS the corpus — measured 2026-09-21:
+    # deepseek grew to 267k links -> 14.5h avg runs (max 53h), and the backlog
+    # was largely re-checking itself instead of searching fresh. Opt in only for
+    # resume / validate-existing profiles.
+    auto_restore: bool = False
     shutdown_timeout: int = 30
     simple: bool = False  # Write simple text files alongside NDJSON
 

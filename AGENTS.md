@@ -465,6 +465,36 @@ update preserves intentional local changes (reverts, port/volume tweaks).
   even with the right test model expect intermittent validation failures —
   that is capacity, not key validity.
 
+- **`persistence.auto_restore` defaults to FALSE since 2026-09-21.** It means
+  "replay the previous run's accumulated links/invalid/valid pools" (crash /
+  resume recovery). On a recurring schedule that replay RATCHETS the corpus:
+  every run re-queues the whole backlog (measured: deepseek 238k->267k links
+  over 9 days -> 869 min avg runs, max 3196 min; log proof:
+  `Recovered 16623 unique links items from legacy file`). Defaults are pinned in
+  three places (`config/schemas.py`, `config/loader.py`,
+  `manager/task.py::_on_start`) and by
+  `tests/test_task_manager_autorestore.py`. Use `auto_restore: true` ONLY for
+  resume / validate-existing profiles (`config-nvidia-resume-existing.yaml`,
+  `config-nvidia-validate-existing.yaml`,
+  `config-tavily-validate-existing.yaml`). Old files are always backed up to
+  `backup-<ts>/`, and the wait-check pool can be re-validated on demand (see
+  the wait-pool recovery recipe below).
+
+### Wait-pool recovery recipe (validated 2026-09-21)
+
+`wait-check-keys.txt` is terminal for the pipeline (never automatically
+re-checked), but many entries are recoverable — keys that hit 429/1305 model
+congestion, or a model-id mismatch, rather than being dead. Recipe: read the
+wait file, re-check each key against the provider endpoint with the CURRENT
+model at a throttled rate (**5 s/key**; hammering triggers `429 code 1302`
+account rate limits, and 1 s/key on 2.6k keys is also needlessly slow), bucket
+by the provider's own semantics (200 -> valid, 401 -> invalid, 1113/no-quota ->
+no-quota, everything else stays in wait), rewrite the result files (dedupe-union),
+then **push immediately** — the next clean-start run resets the files, so
+recovered keys must not wait for the run cycle. Measured 2026-09-21: glm
+100 -> 5 wait (**+95 valid**), glm-ai 27 -> 4 (**+23**), tavily 2665 wait
+(mostly dead 401s, ~20% salvageable).
+
 ## Tests & conventions
 
 - Run: `python -m unittest discover -s tests` (490 tests, 8 skipped, 0 failures

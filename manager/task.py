@@ -261,8 +261,9 @@ class TaskManager(LifecycleManager, TaskDataProvider):
         # 1. Start pipeline (creates ResultManager without backup)
         self.pipeline.start()
 
+        # Missing config -> clean start (see PersistenceConfig.auto_restore).
         auto_restore = bool(
-            getattr(getattr(self.config, "persistence", None), "auto_restore", True)
+            getattr(getattr(self.config, "persistence", None), "auto_restore", False)
         )
 
         if auto_restore:

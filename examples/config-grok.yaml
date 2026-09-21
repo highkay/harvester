@@ -1,6 +1,9 @@
-# Agnes AI-only scan configuration
-# Wide GitHub collection + minimal chat-completion validation profile.
-# Results are written to ./data/providers/agnes-ai/*.txt
+# Grok/xAI-only scan configuration
+# Searches GitHub for xai- API keys and validates them via GET /v1/models.
+# Grok web/SSO session tokens are intentionally NOT scanned: the provider
+# routes them to wait-check (browser-context manual verification), so they
+# can never land in valid-keys.txt.
+# Results are written to ./data/providers/grok/*.txt
 
 global:
   workspace: "./data"
@@ -73,19 +76,17 @@ ratelimits:
     base_rate: 0.15
     burst_limit: 3
     adaptive: true
-  agnes_ai:
+  grok:
     base_rate: 1.0
     burst_limit: 5
     adaptive: true
 
 tasks:
-  - name: agnes-ai
+  - name: grok
     enabled: true
-    provider_type: agnes-ai
+    provider_type: grok
     use_api: true
     max_pages: 1000
-    # GitHub code search is the only transport with a gated window for this
-    # provider (validated via the completion probe, not presence)
     search_types: [code]
     stages:
       search: true
@@ -93,48 +94,35 @@ tasks:
       check: true
       inspect: true
     api:
-      base_url: https://apihub.agnes-ai.com/v1
+      base_url: https://api.x.ai/v1
       completion_path: /chat/completions
       model_path: /models
-      default_model: agnes-2.5-flash
-      auth_key: ""
+      default_model: grok-4
+      auth_key: Authorization
       extra_headers: {}
       api_version: ""
       timeout: 30
       retries: 3
     patterns:
-      # Agnes keys are sk- Bearer keys. Default extraction only captures
-      # assignments anchored to Agnes env names, so raw sk- runs (checksums,
-      # unrelated providers) in matched blobs do not flood the check stage.
-      # Domain-anchored conditions override with a wider Bearer/quoted
-      # variadic below. The lookahead skips Anthropic/OpenAI project and
-      # service-account keys.
-      key_pattern: >-
-        (?i)(?:AGNES_API_KEY|AGNES_AI_API_KEY|AGNES_KEY|agnes[_-]?(?:ai[_-]?)?api[_-]?key)["'\]]{0,2}\s*[:=]\s*["']?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,64})["']?
+      key_pattern: "xai-[0-9A-Za-z_-]{32,}"
       address_pattern: ""
       endpoint_pattern: ""
       model_pattern: ""
     conditions:
       # Each GitHub API search query has its own 1000-result window.
-      - query: '"AGNES_API_KEY"'
-      - query: '"AGNES_API_KEY="'
-      - query: '"AGNES_API_KEY:"'
-      - query: '"AGNES_API_KEY" language:Python'
-      - query: '"AGNES_API_KEY" extension:env'
-      - query: '"AGNES_API_KEY" extension:yaml'
-      # Domain-anchored blobs: allow Bearer/quoted sk- keys without the env name.
-      - query: '"apihub.agnes-ai.com"'
-        patterns:
-          key_pattern: >-
-            (?i)(?:Bearer\s+|["']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,64})
-      - query: '"apihub.agnes-ai.com" "Authorization"'
-        patterns:
-          key_pattern: >-
-            (?i)(?:Bearer\s+|["']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,64})
-      - query: '"agnes-ai.com" "api_key"'
-        patterns:
-          key_pattern: >-
-            (?i)(?:Bearer\s+|["']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,64})
+      - query: '"XAI_API_KEY"'
+      - query: '"XAI_API_KEY="'
+      - query: '"XAI_API_KEY:"'
+      - query: '"xai-"'
+      - query: '"api.x.ai"'
+      - query: '"api.x.ai" "Authorization"'
+      - query: '"api.x.ai" "api_key"'
+      - query: '"grok-4"'
+      - query: '"grok-beta"'
+      - query: '"xai" "api_key"'
+      - query: '"xai" language:Python'
+      - query: '"api.x.ai" extension:env'
+      - query: '"XAI_API_KEY" language:Python'
     rate_limit:
       base_rate: 1.0
       burst_limit: 5

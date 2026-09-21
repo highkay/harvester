@@ -192,7 +192,7 @@ persistence:
   # Periodic snapshot interval in seconds
   snapshot_interval: 300
   # Auto restore state on startup
-  auto_restore: true
+  auto_restore: false  # clean start (replay ratchets the corpus)
   # Shutdown timeout in seconds
   shutdown_timeout: 30
   # Output format, support txt or ndjson

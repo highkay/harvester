@@ -46,7 +46,7 @@ persistence:
   # Clean start each run (old files are still backed up to backup-<ts>/):
   # replaying the previous pool (~76k links) re-queues the whole backlog;
   # freshly leaked tokens matter more than re-checking the old corpus.
-  auto_restore: false
+  auto_restore: false  # clean start (replay ratchets the corpus)
   shutdown_timeout: 30
   format: txt
 

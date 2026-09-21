@@ -307,7 +307,8 @@ class ConfigLoader:
             batch_size=data.get("batch_size", 50),
             save_interval=data.get("save_interval", 30),
             queue_interval=data.get("queue_interval", 60),
-            auto_restore=data.get("auto_restore", True),
+            # Clean start by default — see PersistenceConfig.auto_restore.
+            auto_restore=data.get("auto_restore", False),
             shutdown_timeout=data.get("shutdown_timeout", 30),
             simple=data.get("format", "txt").strip().lower() == "txt",
         )

@@ -33,7 +33,7 @@ monitoring:
 # Data persistence configuration
 persistence:
   # Auto restore state on startup
-  auto_restore: true
+  auto_restore: false  # clean start (replay ratchets the corpus)
   # Shutdown timeout in seconds
   shutdown_timeout: 30
 

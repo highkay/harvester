@@ -45,7 +45,7 @@ persistence:
   save_interval: 5
   queue_interval: 60
   snapshot_interval: 300
-  auto_restore: true
+  auto_restore: false  # clean start (replay ratchets the corpus)
   shutdown_timeout: 30
   format: txt
 
