@@ -1,16 +1,19 @@
-# Kimi (Moonshot AI) — mainland China scan configuration (task: kimi)
-# Endpoint: https://api.moonshot.cn/v1   (platform.moonshot.cn)
-# NOTE: the other two regional tasks are SEPARATE configs now:
-#   kimi-coding -> examples/config-kimi-coding.yaml   (api.kimi.com/coding/v1)
-#   kimi-ai     -> examples/config-kimi-ai.yaml       (api.moonshot.ai/v1)
+# Kimi for Coding (subscription plan) scan configuration (task: kimi-coding)
+# Endpoint: https://api.kimi.com/coding/v1   (Kimi Code / coding subscription, platform.kimi.com)
+# NOTE: the other two regional tasks are SEPARATE configs:
+#   kimi -> examples/config-kimi.yaml                 (api.moonshot.cn/v1)
+#   kimi-ai -> examples/config-kimi-ai.yaml           (api.moonshot.ai/v1)
 # Upstream: per-endpoint GitHub search conditions (top 1000 results per query).
 # Downstream: validates keys against this endpoint's GET /models, then probes a
-# minimal chat completion to surface 402 (zero-balance keys are filtered to
-# no-quota-keys.txt instead of being marked valid).
-# Results are written to ./data-kimi/providers/kimi/*.txt
+# minimal chat completion.
+# Subscription semantics (measured): keys from accounts WITHOUT an active Kimi
+# Code subscription are rejected with 403 "Your current subscription does not
+# have access to Kimi Code right now" and are classified NO_ACCESS (they are
+# NOT valid for this endpoint); 401 means the key itself is invalid/expired.
+# Results are written to ./data-kimi-coding/providers/kimi-coding/*.txt
 
 global:
-  workspace: "./data-kimi"
+  workspace: "./data-kimi-coding"
   max_retries_requeued: 3
   proxy: ""
   github_credentials:
@@ -69,7 +72,7 @@ ratelimits:
     adaptive: true
 
 tasks:
-  - name: kimi
+  - name: kimi-coding
     enabled: true
     provider_type: kimi
     use_api: true
@@ -81,10 +84,14 @@ tasks:
       check: true
       inspect: true
     api:
-      base_url: https://api.moonshot.cn/v1
+      base_url: https://api.kimi.com/coding/v1
       completion_path: /chat/completions
       model_path: /models
-      default_model: kimi-k3
+      # MEASURED 2026-09-21: GET /models on this endpoint lists ONLY
+      # kimi-for-coding, kimi-for-coding-highspeed, k3, k3-256k.
+      # kimi-k3 is an Open-Platform (api.moonshot.cn) model id and is NOT valid
+      # here — probing with it makes a live key look invalid.
+      default_model: kimi-for-coding
       auth_key: Authorization
       extra_headers: {}
       api_version: ""
@@ -97,21 +104,21 @@ tasks:
       endpoint_pattern: ""
       model_pattern: ""
     conditions:
-      # Each GitHub API search query has its own 1000-result window.
-      - query: '"MOONSHOT_API_KEY"'
-      - query: '"MOONSHOT_API_KEY="'
-      - query: '"MOONSHOT_API_KEY:"'
-      - query: '"api.moonshot.cn"'
-      - query: '"api.moonshot.cn" "Authorization"'
-      - query: '"api.moonshot.cn" "api_key"'
-      - query: '"moonshot" "api_key"'
-      - query: '"kimi" "api_key"'
-      - query: '"sk-" "api.moonshot.cn"'
-      - query: '"MOONSHOT_API_KEY" language:Python'
-      - query: '"api.moonshot.cn" language:JavaScript'
-      - query: '"api.moonshot.cn" extension:env'
-      - query: '"api.moonshot.cn" extension:json'
-      - query: '"moonshot" extension:yaml'
+      # Kimi for Coding (Claude Code / IDE) subscription keys: platform.kimi.com
+      - query: '"api.kimi.com"'
+      - query: '"api.kimi.com" "Authorization"'
+      - query: '"api.kimi.com" "api_key"'
+      - query: '"kimi.com/coding"'
+      - query: '"coding/v1" "kimi"'
+      - query: '"KIMI_CODING_API_KEY"'
+      - query: '"KIMI_API_KEY" "coding"'
+      - query: '"sk-" "api.kimi.com"'
+      - query: '"api.kimi.com" language:Python'
+      - query: '"api.kimi.com" language:JavaScript'
+      - query: '"api.kimi.com" extension:env'
+      - query: '"api.kimi.com" extension:json'
+      - query: '"api.kimi.com" extension:yaml'
+      - query: '"platform.kimi.com" "api_key"'
     rate_limit:
       base_rate: 0.2
       burst_limit: 2

@@ -1,14 +1,21 @@
-# GLM (Zhipu AI / BigModel) — mainland China scan configuration (task: glm)
-# Endpoint: https://open.bigmodel.cn/api/paas/v4   (platform.bigmodel.cn)
-# NOTE: the international z.ai endpoint is a SEPARATE config now:
-#   glm-ai -> examples/config-glm-ai.yaml            (api.z.ai, needs outbound proxy)
+# GLM international (z.ai / bigmodel.ai) scan configuration (task: glm-ai)
+# Endpoint: https://api.z.ai/api/paas/v4   (international, z.ai / bigmodel.ai)
+# NOTE: the mainland endpoint is a SEPARATE config:
+#   glm -> examples/config-glm.yaml                  (open.bigmodel.cn)
 # Upstream: per-endpoint GitHub search conditions (top 1000 results per query).
 # Downstream: validates keys against this endpoint via a chat-completions probe
 # (GET /models exists but is not used for validation).
-# Results are written to ./data-glm/providers/glm/*.txt
+# Egress (measured 2026-09-21, AFTER switching the harvester container to host
+# networking): api.z.ai is directly reachable — 5/6 probes answered (401/200)
+# with 1.3-8.6s latency; the Aliyun-GA IPv6 addresses answered while the IPv4
+# addresses were blackholed (0/9 via IPv4-pinned probes). Direct is slower and
+# flakier than the socks5 rotation (3/3 in ~1.3s), so WATCH wait-check-keys.txt
+# after enabling direct here and set use_proxy back to true if the drop is
+# material.
+# Results are written to ./data-glm-ai/providers/glm-ai/*.txt
 
 global:
-  workspace: "./data-glm"
+  workspace: "./data-glm-ai"
   max_retries_requeued: 3
   proxy: ""
   github_credentials:
@@ -44,7 +51,7 @@ persistence:
   save_interval: 5
   queue_interval: 60
   snapshot_interval: 300
-  # Clean start each run: the first run's pool was ~60k links and replaying it
+  # Clean start each run: the first run's pool was ~36k links and replaying it
   # (auto_restore: true) would re-gather the whole backlog every day. Old files
   # are still backed up to backup-<ts>/ — only the replay is skipped.
   auto_restore: false
@@ -66,7 +73,7 @@ ratelimits:
     adaptive: true
 
 tasks:
-  - name: glm
+  - name: glm-ai
     enabled: true
     provider_type: glm
     use_api: true
@@ -80,7 +87,7 @@ tasks:
     api:
       # GET /models exists (auth-enforced) but is not used for validation;
       # validation uses the chat completions probe.
-      base_url: https://open.bigmodel.cn/api/paas/v4
+      base_url: https://api.z.ai/api/paas/v4
       completion_path: /chat/completions
       model_path: ""
       default_model: glm-4.7-flash
@@ -89,29 +96,28 @@ tasks:
       api_version: ""
       timeout: 30
       retries: 3
-      use_proxy: false  # domestic endpoint — connect directly
+      use_proxy: false  # z.ai is directly reachable post host-networking (see egress note above)
     patterns:
       key_pattern: "[0-9a-f]{32}\\.[A-Za-z0-9]{16,}"
       address_pattern: ""
       endpoint_pattern: ""
       model_pattern: ""
     conditions:
-      # Each GitHub API search query has its own 1000-result window.
-      - query: '"ZHIPUAI_API_KEY"'
-      - query: '"ZHIPUAI_API_KEY="'
-      - query: '"ZHIPUAI_API_KEY:"'
-      - query: '"open.bigmodel.cn"'
-      - query: '"bigmodel.cn"'
-      - query: '"open.bigmodel.cn" "Authorization"'
-      - query: '"open.bigmodel.cn" "api_key"'
-      - query: '"zhipuai" "api_key"'
-      - query: '"glm-4" "api_key"'
-      - query: '"chatglm" "api_key"'
-      - query: '"ZHIPUAI_API_KEY" language:Python'
-      - query: '"open.bigmodel.cn" language:JavaScript'
-      - query: '"open.bigmodel.cn" extension:env'
-      - query: '"bigmodel.cn" extension:json'
-      - query: '"zhipuai" extension:yaml'
+      # International Zhipu: api.z.ai / bigmodel.ai / z.ai platform keys.
+      - query: '"api.z.ai"'
+      - query: '"api.z.ai" "Authorization"'
+      - query: '"api.z.ai" "api_key"'
+      - query: '"ZHIPUAI_API_KEY" "api.z.ai"'
+      - query: '"z.ai" "api_key"'
+      - query: '"bigmodel.ai" "api_key"'
+      - query: '"glm-4" "api.z.ai"'
+      - query: '"zhipuai" "api.z.ai"'
+      - query: '"api.z.ai" language:Python'
+      - query: '"api.z.ai" language:JavaScript'
+      - query: '"api.z.ai" extension:env'
+      - query: '"api.z.ai" extension:json'
+      - query: '"z.ai" extension:yaml'
+      - query: '"ZHIPUAI_API_KEY" language:Python "api.z.ai"'
     rate_limit:
       base_rate: 0.2
       burst_limit: 2

@@ -55,6 +55,15 @@ _DEFAULT_SCHEDULES: tuple[tuple[str, str, str], ...] = (
     # Agnès AI — every 6 hours, at :35 to avoid the existing */6 cluster
     # minutes (0/10/20/40/50) and the */4 cluster (0/15/30/45).
     ("agnes-ai", "35 */6 * * *", "examples/config-agnes-ai.yaml"),
+    # Secondary regional tasks live in their own config files now (previously
+    # bundled into the primary provider's config, which mixed run records,
+    # push statistics and schedules together). Daily at staggered hours —
+    # region-specific keys are low churn, so once a day is sufficient.
+    ("glm-ai", "0 13 * * *", "examples/config-glm-ai.yaml"),
+    ("kimi-ai", "0 14 * * *", "examples/config-kimi-ai.yaml"),
+    ("kimi-coding", "0 15 * * *", "examples/config-kimi-coding.yaml"),
+    ("mimo-sg", "0 16 * * *", "examples/config-mimo-sg.yaml"),
+    ("qwen-intl", "0 17 * * *", "examples/config-qwen-intl.yaml"),
 )
 
 

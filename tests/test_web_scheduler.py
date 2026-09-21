@@ -54,16 +54,21 @@ class TestCronValidation(unittest.TestCase):
 class TestSeedData(unittest.TestCase):
     """Given an empty schedule_config table,
     When init_scheduler is called,
-    Then 10 default provider schedules are inserted.
+    Then 15 default provider schedules are inserted.
     """
 
     _EXPECTED_PROVIDERS = frozenset(
         {
             "deepseek",
             "kimi",
+            "kimi-ai",
+            "kimi-coding",
             "mimo-cn",
+            "mimo-sg",
             "qwen-cn",
+            "qwen-intl",
             "glm",
+            "glm-ai",
             "modelscope",
             "tavily",
             "github",
@@ -82,6 +87,11 @@ class TestSeedData(unittest.TestCase):
         "github": "50 */6 * * *",
         "serpapi": "10 */6 * * *",
         "agnes-ai": "35 */6 * * *",
+        "glm-ai": "0 13 * * *",
+        "kimi-ai": "0 14 * * *",
+        "kimi-coding": "0 15 * * *",
+        "mimo-sg": "0 16 * * *",
+        "qwen-intl": "0 17 * * *",
     }
     _EXPECTED_CONFIG_FILES = {
         "deepseek": "examples/config-deepseek.yaml",
@@ -94,6 +104,11 @@ class TestSeedData(unittest.TestCase):
         "github": "examples/config-github.yaml",
         "serpapi": "examples/config-serpapi.yaml",
         "agnes-ai": "examples/config-agnes-ai.yaml",
+        "glm-ai": "examples/config-glm-ai.yaml",
+        "kimi-ai": "examples/config-kimi-ai.yaml",
+        "kimi-coding": "examples/config-kimi-coding.yaml",
+        "mimo-sg": "examples/config-mimo-sg.yaml",
+        "qwen-intl": "examples/config-qwen-intl.yaml",
     }
 
     def test_seeds_defaults_on_empty_table(self) -> None:
@@ -119,7 +134,7 @@ class TestSeedData(unittest.TestCase):
                 settings = _make_settings(db_path)
                 svc = await init_scheduler(settings)
 
-                # -- Then: 7 default rows inserted --
+                # -- Then: 15 default rows inserted --
                 db2 = await get_db(db_path)
                 cursor2 = await db2.execute(
                     "SELECT provider_name, cron_expression, enabled, config_file "

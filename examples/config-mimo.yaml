@@ -1,15 +1,15 @@
-# Xiaomi MiMo-only scan configuration
-# Two regional Token Plan endpoints, one task each:
-#   mimo-cn -> https://token-plan-cn.xiaomimimo.com/v1   (mainland China cluster)
-#   mimo-sg -> https://token-plan-sgp.xiaomimimo.com/v1  (Singapore cluster)
+# Xiaomi MiMo — mainland China Token Plan scan configuration (task: mimo-cn)
+# Endpoint: https://token-plan-cn.xiaomimimo.com/v1   (mainland China cluster)
+# NOTE: the Singapore cluster is a SEPARATE config now:
+#   mimo-sg -> examples/config-mimo-sg.yaml            (token-plan-sgp.xiaomimimo.com)
 # IMPORTANT: Token Plan endpoints only accept tp- prefixed keys. The pay-as-you-go
 # sk- keys (api.xiaomimimo.com) cannot be validated on these endpoints, so only
 # tp- keys are collected.
 # Upstream: per-endpoint GitHub search conditions (top 1000 results per query).
-# Downstream: each task validates keys against its own endpoint's GET /models,
-# then probes a minimal chat completion to surface 402 (zero-balance keys are
-# filtered to no-quota-keys.txt instead of being marked valid).
-# Results are written to ./data-mimo/providers/<task>/*.txt
+# Downstream: validates keys against this endpoint's GET /models, then probes a
+# minimal chat completion to surface 402 (zero-balance keys are filtered to
+# no-quota-keys.txt instead of being marked valid).
+# Results are written to ./data-mimo/providers/mimo-cn/*.txt
 
 global:
   workspace: "./data-mimo"
@@ -67,7 +67,6 @@ ratelimits:
     adaptive: true
 
 tasks:
-  # ============ Mainland China cluster: token-plan-cn.xiaomimimo.com ============
   - name: mimo-cn
     enabled: true
     provider_type: mimo
@@ -107,58 +106,6 @@ tasks:
       - query: '"mimo" "api_key" "xiaomi"'
       - query: '"tp-" "xiaomimimo.com"'
       - query: '"mimo-v2.5"'
-      - query: '"MIMO_API_KEY" language:Python'
-      - query: '"xiaomimimo.com" language:JavaScript'
-      - query: '"xiaomimimo.com" extension:env'
-      - query: '"xiaomimimo.com" extension:json'
-      - query: '"mimo" extension:yaml'
-    rate_limit:
-      base_rate: 0.2
-      burst_limit: 2
-      adaptive: true
-    storage:
-      directory: ""
-      plan: ""
-
-  # ============ Singapore cluster: token-plan-sgp.xiaomimimo.com ============
-  - name: mimo-sg
-    enabled: true
-    provider_type: mimo
-    use_api: true
-    max_pages: 1000
-    search_types: [code]
-    stages:
-      search: true
-      gather: true
-      check: true
-      inspect: true
-    api:
-      base_url: https://token-plan-sgp.xiaomimimo.com/v1
-      completion_path: /chat/completions
-      model_path: /models
-      default_model: mimo-v2.5-pro
-      auth_key: Authorization
-      extra_headers: {}
-      api_version: ""
-      timeout: 30
-      retries: 3
-      use_proxy: true  # international endpoint — route through proxy
-    patterns:
-      key_pattern: "tp-[0-9A-Za-z_-]{20,}"
-      address_pattern: ""
-      endpoint_pattern: ""
-      model_pattern: ""
-    conditions:
-      # Singapore Token Plan keys + shared MiMo env keys (validated against sgp).
-      - query: '"token-plan-sgp.xiaomimimo.com"'
-      - query: '"MIMO_API_KEY"'
-      - query: '"MIMO_API_KEY="'
-      - query: '"MIMO_API_KEY:"'
-      - query: '"xiaomimimo.com" "Authorization"'
-      - query: '"xiaomimimo.com" "api_key"'
-      - query: '"mimo" "api_key" "xiaomi"'
-      - query: '"tp-" "xiaomimimo.com"'
-      - query: '"mimo-v2.5" "api_key"'
       - query: '"MIMO_API_KEY" language:Python'
       - query: '"xiaomimimo.com" language:JavaScript'
       - query: '"xiaomimimo.com" extension:env'
