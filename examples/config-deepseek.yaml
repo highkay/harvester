@@ -39,7 +39,10 @@ persistence:
   save_interval: 5
   queue_interval: 60
   snapshot_interval: 300
-  auto_restore: true
+  # Clean start each run (old files are still backed up to backup-<ts>/):
+  # replaying the previous pool (measured ~183k links; avg 14.5h/run for ~0-1
+  # valid keys) re-queues the whole backlog every day for no measurable yield.
+  auto_restore: false
   shutdown_timeout: 30
   format: txt
 
