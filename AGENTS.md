@@ -545,6 +545,157 @@ update preserves intentional local changes (reverts, port/volume tweaks).
   token in a config a long-lived process holds. Pipeline logs are UTC; file mtimes
   are local (+8).
 
+## Hardening pass (2026-09-22, part 2): anchoring, pattern house rule, run accounting, scheduler
+
+- **Extraction anchored: deepseek / qwen / qwen-intl / mimo-cn / mimo-sg**
+  (same kimi-style fix, same day): naked task-level patterns
+  (`sk-[0-9A-Za-z_-]{20,}`, `tp-…`) made every bare `sk-`/`tp-` run on a
+  fetched page a candidate. **Measured real formats (prod corpus
+  2026-09-22)**: deepseek `sk-` + **32 hex** (n=401), qwen `sk-` + **32 hex**
+  (n=315), mimo Token Plan `tp-` + **48 alnum** (n=1). Flood measured: one
+  deepseek run yielded 477 authentic keys against **2572 invalid** bare-`sk-`
+  candidates (sk-ant- 186, sk-or-, other vendors); qwen ~1441 invalid/run;
+  mimo ~142 invalid/run (`tp-secret-` / `tp-your-` hyphenated placeholders).
+  Task patterns now fire only on env-name assignments (`DEEPSEEK_*`,
+  `DASHSCOPE_*`/`QWEN_*`, `MIMO_*`/`XIAOMIMIMO_*`) with the
+  `sk-ant-|proj|svcacct` lookahead, and every host-named dork
+  (`api.deepseek.com`, `dashscope.aliyuncs.com`, `dashscope-intl.aliyuncs.com`,
+  `xiaomimimo.com`) carries the wide Bearer/quoted/plain per-condition
+  override (the query is the anchor). No upper bound on the body — the
+  measured widths are documented, not enforced (serpapi lesson).
+  **mimo coverage gap**: the re-flood guard captures `tp-` ONLY; mimo
+  **`sk-` pay-as-you-go** keys (api.xiaomimimo.com) are NOT scanned — a
+  different, unmeasured vendor surface. **Tripwire**: if one of these
+  providers shows near-zero candidates reaching the check stage, widen back
+  (drop the anchor) and re-measure before trusting the narrowing. Pinned by
+  `tests/test_deepseek_pattern.py` / `test_qwen_pattern.py` /
+  `test_mimo_pattern.py` (defaults↔examples lockstep included).
+- **House pattern convention (census of 129 patterns, 2026-09-22)**: ZERO
+  capture groups is the norm — naked patterns let the whole match be the key
+  (`re.findall` returns strings); census found 0 compile errors and 0 shipped
+  multi-group patterns. Context-anchored patterns (kimi/agnes/deepseek/qwen/
+  mimo lineage) use exactly ONE group to cut the key out of its env
+  assignment. A blanket "group count must be 1" rule would therefore be
+  WRONG — it would force every naked pattern into a capture group for no
+  gain. The real hazards are (1) **multi-group patterns**: `findall` starts
+  returning tuples, so extraction silently grabs fragments or chokes; (2)
+  **zero-group patterns whose match INCLUDES context**: whole match =
+  env-name + quotes + key, so junk reaches the candidate material and the
+  check stage.
+- **Failed-run accounting + cancel guard (web/db.py, web/runner.py)**: prod
+  carried **54/54 failed rows with NULL `duration_seconds`** — the
+  restart-reconciliation path never recorded runtime or key counts.
+  `reconcile_running_runs` now computes duration per row in SQL from the
+  row's own `started_at` (julianday diff — the dead process took its
+  Python-side timer with it) and counts `valid_keys_found` strictly from
+  THAT row's provider directory (never a foreign provider's numbers).
+  Cancel guard: `run_scan` pre-registers the cancel event BEFORE the row
+  insert/thread start so an early cancel is never dropped (`_execute` honours
+  a pre-set event as "Run cancelled before start"), and `_update_run_sync`
+  gained `only_if_running` (a terminal write from the scan thread can no
+  longer clobber a `cancelled` row) + `duration_from_started_at` (SQL-computed
+  duration for failure paths). Pinned by `tests/test_web_runner_lifecycle.py`.
+- **Scheduler seed list 15 → 19 rows** (`web/scheduler.py::_DEFAULT_SCHEDULES`):
+  added `("groq", "0 1 * * *", examples/config-groq.yaml)`,
+  `("ollama", "20 3 * * *", …config-ollama.yaml)`,
+  `("openrouter", "40 8 * * *", …config-openrouter.yaml)`,
+  `("nvidia", "50 11 * * *", …config-nvidia.yaml)`. The `github 50 */6 * * *`
+  entry was ALREADY seeded (an earlier AGENTS claim that it was missing is
+  stale). Crons mirror prod's hour chain (groq 01 — the row inserted manually
+  on 2026-09-03, ollama 03, openrouter 08, nvidia beside modelscope's 11)
+  at minutes that collide with nothing else in the list. Deliberately NOT
+  seeded: **grok** (wait-only by design — provider routes web/SSO findings to
+  manual verification), **hf** (measured ~0 yield), **cerebras**
+  (Cloudflare-blocked egress; disabled on prod), **opencode** (separate
+  workstream, uncommitted). Seeding only fills an EMPTY `schedule_config`, so
+  prod (18 rows / 17 enabled, hour chain 01-17 + disabled cerebras) is
+  untouched: a direct prod DB dump (2026-09-22, 18 rows) shows prod ALREADY
+  HAS the **groq** (`0 1 * * *`), **ollama** (`0 3 * * *`) and **openrouter**
+  (`0 8 * * *`) rows — the ollama section above records their daily prod
+  runs — so the only rows missing on prod are **github** and **nvidia**.
+  Audit first, then run the idempotent inserts (ON CONFLICT DO NOTHING keeps
+  any existing prod row — and its tuned cron — intact; the ollama/openrouter
+  inserts are therefore no-ops on prod but harmless, and the fresh-install
+  seed list still carries all four):
+
+  ```sql
+  SELECT provider_name, cron_expression, enabled, config_file
+    FROM schedule_config ORDER BY provider_name;  -- audit
+  -- the two rows actually missing on prod (2026-09-22 dump):
+  INSERT INTO schedule_config (provider_name, cron_expression, enabled, config_file)
+    VALUES ('github','50 */6 * * *',1,'examples/config-github.yaml')
+    ON CONFLICT(provider_name) DO NOTHING;
+  INSERT INTO schedule_config (provider_name, cron_expression, enabled, config_file)
+    VALUES ('nvidia','50 11 * * *',1,'examples/config-nvidia.yaml')
+    ON CONFLICT(provider_name) DO NOTHING;
+  -- prod already has ollama (`0 3 * * *`) and openrouter (`0 8 * * *`), so
+  -- these are no-ops there (DO NOTHING preserves the prod crons); kept for
+  -- any DB that lacks them:
+  INSERT INTO schedule_config (provider_name, cron_expression, enabled, config_file)
+    VALUES ('ollama','20 3 * * *',1,'examples/config-ollama.yaml')
+    ON CONFLICT(provider_name) DO NOTHING;
+  INSERT INTO schedule_config (provider_name, cron_expression, enabled, config_file)
+    VALUES ('openrouter','40 8 * * *',1,'examples/config-openrouter.yaml')
+    ON CONFLICT(provider_name) DO NOTHING;
+  ```
+
+  **Do NOT run `scripts/optimize_schedules.py` against prod.** Unlike the
+  DO-NOTHING inserts above it performs an UPSERT (`ON CONFLICT(provider_name)
+  DO UPDATE SET cron_expression=excluded…, enabled=excluded…,
+  config_file=excluded…`, with `enabled` inserted as the literal `1`), so it
+  OVERWRITES prod's manually/UI-tuned crons and config paths and
+  force-enables every default-list row (e.g. ollama `0 3` → `20 3`,
+  openrouter `0 8` → `40 8`); only providers outside `_DEFAULT_SCHEDULES`
+  are left untouched. The DO-NOTHING SQL above is the safe path — reconcile
+  any cron differences via the UI.
+
+  A restart (or schedule CRUD via the API) is what turns new rows into
+  APScheduler jobs — `init_scheduler` rebuilds jobs from the table at startup.
+- **Scheduler anti-overlap guard bug (FIXED)**: `_run_provider_job` released
+  `_running` in `finally` as soon as `runner.run_scan` returned — and
+  `run_scan` returns when the scan *thread starts*, not when the scan ends.
+  Net effect during any live scan: `is_running()` claimed idle,
+  `POST /api/schedule/{p}/run` answered **202 "triggered"**, and the runner
+  then rejected the duplicate with its own 409 — which the broad except in
+  the job callback swallowed. The UI reported success for a run that never
+  happened (no new run_records row); cron double-firings were equally
+  invisible. Fix: `SchedulerService.start_scan` holds the guard and arms a
+  watcher task that polls the run's `run_records` row via the runner's public
+  `get_run` every `_WATCH_POLL_SECONDS` (5 s), releasing `_running` only when
+  the row leaves `running` (completed/failed/cancelled — or vanishes); a
+  failed start releases the guard and propagates; `trigger_manual` AWAITS the
+  start so 409 (either guard) and 404 (missing schedule row / missing config
+  template, mapped from the runner's ValueError) reach the route truthfully;
+  `shutdown()` cancels the watchers. Pinned by
+  `tests/test_web_scheduler.py::TestGuardHeldForScanLifetime` (5 tests; the
+  file is at 21).
+- **Provider status-map hardening (pinned by
+  `tests/test_provider_status_maps.py`, mocked responses, no network)**:
+  `stage/definition.py::CheckStage` routes NO_MODEL / NO_ACCESS /
+  BAD_REQUEST / is_retryable (NETWORK_ERROR, TIMEOUT, 5xx, RATE_LIMITED) →
+  `wait-check-keys.txt` (recoverable) and INVALID_KEY / UNKNOWN →
+  `invalid-keys.txt` (permanent discard). Any provider that fabricates
+  INVALID_KEY for a recoverable state permanently burns live keys, so:
+  **azure / doubao / qianfan** 404 → NO_MODEL (wrong model/deployment
+  routing, not a dead key); **stabilityai / anthropic** transport failures
+  (TLS EOF, timeout) → retryable → wait, never INVALID_KEY; **openrouter**
+  403 → NO_ACCESS; **openai_like** 200-with-error-body guard — the
+  dict-shaped case is now closed (HTTP 200 + a dict `error` body fails as
+  INVALID_KEY instead of passing as success), but the guard is still
+  dict-gated (`isinstance(error, dict)`), so a 200 whose `error` is a plain
+  STRING still falls through to success — i.e. the latent hole documented in
+  the ollama section remains open, not fixed;
+  **BAD_REQUEST** moved from invalid-discard into the wait bucket (trade-off
+  below).
+- **BAD_REQUEST→wait tripwire**: the reroute keeps recoverable 400s out of
+  the permanent-discard bucket, but genuine 400-junk from providers that map
+  a plain 400 to `ErrorReason.BAD_REQUEST` — **qwen** (non-Arrearage 400s),
+  **tavily**, **serpapi** — now accumulates in `wait-check-keys.txt` too,
+  and the wait-pool recovery recipe (≥5 s/key) will keep re-probing those
+  entries every pass without ever clearing them. Watch wait-pool growth per
+  provider; if it balloons with pure BAD_REQUEST entries, revisit the
+  routing (or map those providers' 400s to INVALID_KEY).
+
 ## Ops: container egress, host networking & deploys (2026-09-21)
 
 - The harvester container now runs `network_mode: host` + `WEB_PORT=8002`
@@ -676,14 +827,18 @@ in the proxy pool (only 222 were new).
 
 ## Tests & conventions
 
-- Run: `python -m unittest discover -s tests` (490 tests, 8 skipped, 0 failures
-  as of 2026-09-21 — the old "35 failures in test_web_ui / test_web_push_logs"
-  baseline is stale; the suite is green now).
+- Run: `python -m unittest discover -s tests` (committed baseline 572 OK / 8
+  skipped as of 2026-09-22; the same-day hardening workstreams push it past
+  ~700 — `tests/test_web_scheduler.py` alone is 21. The old "490 tests" and
+  "35 failures in test_web_ui / test_web_push_logs" baselines are stale).
 - **One config file = one task.** Do NOT bundle regional tasks into one config
   (2026-09-21: `glm`/`kimi`/`mimo`/`qwen` were split into per-task files). A
   bundled run aggregates 2-3 tasks into one `run_records.valid_keys_found` and
   mixes statistics; pushes are per task anyway. `web/scheduler.py` now seeds
-  one schedule row per task (15 rows, daily staggered).
+  one schedule row per task (19 rows since 2026-09-22: high-churn */4 + */6
+  layers, daily regional hours, and the groq/ollama/openrouter/nvidia
+  additions — see the 2026-09-22 hardening section for the prod gap this
+  leaves behind).
 - New files must pass `ruff check` and `pyright` (repo has pre-existing lint
   debt elsewhere — leave it).
 - Provider pattern: mirror `provider/openrouter.py` / `provider/kimi.py`.

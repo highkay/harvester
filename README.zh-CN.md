@@ -49,15 +49,15 @@
 | Cerebras | `cerebras` | `csk-...` API Key | `/v1/models` | 默认 base URL: `https://api.cerebras.ai/v1` |
 | OpenRouter | `openrouter` | `sk-or-v1-...` API Key | `/api/v1/key` 元数据 | 验证时会带 `X-Title: harvester` |
 | Groq | `groq` | `gsk_...` API Key | `/openai/v1/models` | 使用 OpenAI 兼容验证路径 |
-| Grok Web/SSO | `grok` | `grok.com` / `x.ai` token 赋值和 session cookie 痕迹 | 浏览器上下文手动验证 | 默认刻意不扫描 `xai-` API Key 前缀 |
+| Grok / xAI | `grok` | 通过 `XAI_API_KEY` 环境变量赋值 + `api.x.ai` 域 dork 扫描 `xai-...` API Key | 对 `https://api.x.ai/v1` 调用 `GET /v1/models` | 预设不扫描 Web/SSO session token；provider 匹配到的 session 痕迹会进入 `wait-check-keys.txt`（浏览器上下文手动验证），绝不进入 `valid-keys.txt` |
 | Gemini | `gemini` | `AIza...` API Key | `generativelanguage.googleapis.com/v1beta/models` | 使用 `x-goog-api-key` |
 | Tavily | `tavily` | `tvly-...` / `tavily-...` API Key | `/usage` 元数据 | 使用 `Authorization: Bearer`；inspect 会记录用量审计字段 |
 | SerpApi | `serpapi` | `SERPAPI_API_KEY` / `SERPAPI_KEY` / `SERP_API_KEY` 赋值（无前缀 64 位十六进制 Key（生产实测：有效 key 均为 64 位 hex）） | `GET /account.json?api_key=`（Account API） | inspect 记录账户/套餐审计（回显的 `api_key` 字段会被丢弃）；`search.json` 不带 key 也返回 200，故不用它做验证 |
-| DeepSeek | `deepseek` | `sk-...` API Key | `GET /models` 鉴权门 + 最小 chat completion 探针（`max_tokens=1`，用于识别 402） | 默认 base URL: `https://api.deepseek.com`；401 body 可能不是 JSON；余额不足的 Key 计入 `no-quota-keys.txt` |
+| DeepSeek | `deepseek` | DeepSeek 环境变量名锚定的 `sk-...` Key（`DEEPSEEK_*` 赋值；实测：`sk-` + 32 位 hex，n=401；`api.deepseek.com` 域 dork 放宽到 Bearer/引号/明文形式） | `GET /models` 鉴权门 + 最小 chat completion 探针（`max_tokens=1`，用于识别 402） | 默认 base URL: `https://api.deepseek.com`；401 body 可能不是 JSON；余额为零的 Key 计入 `no-quota-keys.txt` |
 | Kimi / Moonshot | `kimi` | `sk-...` API Key | `GET /v1/models` | 默认 base URL: `https://api.moonshot.cn/v1`；额度不足计入 `no-quota-keys.txt` |
 | GLM / 智谱 | `glm` | `{id}.{secret}` 点分格式 API Key | Chat completion 探针（`glm-5.3-flash`） | 默认 base URL: `https://open.bigmodel.cn/api/paas/v4`；无 `/models` 端点，因此跳过 inspect |
-| 小米 MiMo | `mimo` | `tp-...` / `sk-...` API Key | `GET /models` | 默认 base URL: `https://token-plan-cn.xiaomimimo.com/v1`（大陆集群）；按 task 区分区域集群（新加坡为 `token-plan-sgp.xiaomimimo.com/v1`） |
-| 阿里云 Qwen（百炼） | `qwen` | `sk-...` API Key | `GET /models` + chat 探针 | 默认 base URL: `https://dashscope.aliyuncs.com/compatible-mode/v1`（国内）；国际为 `dashscope-intl.aliyuncs.com`；欠费为 HTTP 400 + `code: Arrearage`（映射到 no-quota） |
+| 小米 MiMo | `mimo` | Token-Plan 环境变量名锚定的 `tp-...` Key（`MIMO_*`/`XIAOMIMIMO_*` 赋值；实测：`tp-` + 48 位字母数字，n=1；`xiaomimimo.com` host dork 放宽） | `GET /models` | 默认 base URL: `https://token-plan-cn.xiaomimimo.com/v1`（大陆集群）；按 task 区分区域集群（新加坡为 `token-plan-sgp.xiaomimimo.com/v1`）；`sk-` 按量付费 Key（api.xiaomimimo.com）不在扫描范围内——未实测的 vendor 面，防止再次泛滥 |
+| 阿里云 Qwen（百炼） | `qwen` | DashScope 环境变量名锚定的 `sk-...` Key（`DASHSCOPE_*`/`QWEN_*` 赋值；实测：`sk-` + 32 位 hex，n=315；`dashscope.aliyuncs.com` / `dashscope-intl.aliyuncs.com` host dork 放宽） | `GET /models` + chat 探针 | 默认 base URL: `https://dashscope.aliyuncs.com/compatible-mode/v1`（国内）；国际为 `dashscope-intl.aliyuncs.com`；欠费为 HTTP 400 + `code: Arrearage`（映射到 no-quota） |
 | 魔搭 ModelScope | `modelscope` | `MODELSCOPE_API_KEY` / `MODELSCOPE_SDK_TOKEN`（无固定前缀） | chat 探针（models 列表公开、不设鉴权门） | 默认 base URL: `https://api-inference.modelscope.cn/v1`；单一国内端点 |
 | GitHub API Token（自举） | `github` | `ghp_` / `gho_` / `ghu_` / `ghs_` / `ghr_` / `github_pat_` API Token | `GET /user` Bearer 校验 | 默认 base URL `https://api.github.com`；`github` 扫描后，验证通过的 token 会自动导入 Web 实例自身的 token 池（自举 self-bootstrap） |
 
@@ -772,7 +772,7 @@ sequenceDiagram
 - provider-only 配置统一使用 GitHub API 搜索（`use_api: true`）并设置 `max_pages: 1000`；运行时会按 GitHub API 的 10 页 / 1000 条结果窗口封顶。
 - `tavily` 预设会通过 GitHub API 搜索扫描 `tvly-...` / `tavily-...` Key（`max_pages: 1000`，API 执行封顶 10 页），并用 Tavily `/usage` 接口完成验证和用量审计。
 - `serpapi` 预设会通过 GitHub API 搜索扫描 `SERPAPI_API_KEY` / `SERPAPI_KEY` / `SERP_API_KEY` 赋值（上下文锚定提取，无前缀 64 位十六进制 Key（生产实测：有效 key 均为 64 位 hex）），并用 SerpApi 免费的 `account.json` Account API 完成验证和账户/套餐审计。
-   - `grok` 预设扫描 Grok Web/SSO token 赋值和 session cookie 痕迹，默认刻意不扫描 `xai-` API Key 前缀。
+   - `grok` 预设扫描 `xai-` API Key（`XAI_API_KEY` 赋值 + `api.x.ai` 域 dork），并通过 xAI 的 `GET /v1/models` 验证。预设刻意不扫描 Web/SSO session token；provider 匹配到的 session 痕迹会改为进入 `wait-check-keys.txt`。
    - Grok Web/SSO 发现项需要浏览器上下文手动验证，因此预期会进入 `wait-check-keys.txt`，而不是 `valid-keys.txt`。
    - `cf_clearance` 属于 Cloudflare 状态，不是 Grok 凭据，因此不会被 Grok 匹配规则收集。
 
