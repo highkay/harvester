@@ -69,7 +69,13 @@ class TavilyProvider(AIBaseProvider):
         return urllib.parse.urljoin(base_url, path.removeprefix("/"))
 
     def check(self, token: str, address: str = "", endpoint: str = "", model: str = "") -> CheckResult:
-        """Check Tavily token validity with the lightweight usage endpoint."""
+        """Check Tavily token validity with the usage endpoint.
+
+        The /usage endpoint returns 200 for any authentic key, including keys
+        whose plan quota is fully exhausted (those keys return 402 on actual
+        /search calls). We parse the response to detect exhaustion and classify
+        such keys as NO_QUOTA so they are never pushed to the proxy pool.
+        """
         headers = self._get_headers(token=token)
         if not headers:
             return CheckResult.fail(ErrorReason.INVALID_KEY)
@@ -109,7 +115,14 @@ class TavilyProvider(AIBaseProvider):
         return self._judge_usage(code, message)
 
     def _judge_usage(self, code: int, message: str) -> CheckResult:
-        """Judge Tavily usage endpoint response."""
+        """Judge Tavily usage endpoint response.
+
+        The /usage endpoint returns 200 for any authentic key. We parse the
+        response body to detect plan-level quota exhaustion: when
+        ``account.plan_usage >= account.plan_limit`` the key will return 402
+        on actual /search calls, so we classify it as NO_QUOTA instead of
+        valid — preventing useless keys from being pushed to the proxy pool.
+        """
         message = trim(message)
         text = self._message_text(message)
 
@@ -119,10 +132,13 @@ class TavilyProvider(AIBaseProvider):
             except Exception:
                 return CheckResult.fail(ErrorReason.UNKNOWN)
 
-            if isinstance(data, dict):
-                return CheckResult.success(message="Tavily usage endpoint accepted key")
+            if not isinstance(data, dict):
+                return CheckResult.fail(ErrorReason.UNKNOWN)
 
-            return CheckResult.fail(ErrorReason.UNKNOWN)
+            if self._is_quota_exhausted(data):
+                return CheckResult.fail(ErrorReason.NO_QUOTA)
+
+            return CheckResult.success(message="Tavily usage endpoint accepted key with remaining quota")
 
         if code == 401 or re.findall(r"invalid\s+(api\s+)?key|unauthorized|unauthenticated", text, flags=re.I):
             return CheckResult.fail(ErrorReason.INVALID_KEY)
@@ -143,6 +159,41 @@ class TavilyProvider(AIBaseProvider):
             return CheckResult.fail(ErrorReason.SERVER_ERROR)
 
         return CheckResult.fail(ErrorReason.UNKNOWN)
+
+    @staticmethod
+    def _is_quota_exhausted(data: dict) -> bool:
+        """Detect whether the /usage response indicates an exhausted key.
+
+        Checks two levels:
+        1. Account plan: ``plan_usage >= plan_limit`` (when plan_limit is a number)
+        2. Per-key limit: ``usage >= limit`` (when key.limit is a number)
+
+        Pay-as-you-go credits (``paygo_usage < paygo_limit``) override plan
+        exhaustion — a key with paygo balance can still make search calls.
+        """
+        account = data.get("account")
+        if isinstance(account, dict):
+            plan_limit = account.get("plan_limit")
+            plan_usage = account.get("plan_usage")
+            if isinstance(plan_limit, (int, float)) and isinstance(plan_usage, (int, float)):
+                if plan_usage >= plan_limit:
+                    # Plan exhausted — check if paygo credits are still available
+                    paygo_limit = account.get("paygo_limit")
+                    paygo_usage = account.get("paygo_usage")
+                    if isinstance(paygo_limit, (int, float)) and isinstance(paygo_usage, (int, float)):
+                        if paygo_usage < paygo_limit:
+                            return False
+                    return True
+
+        key_info = data.get("key")
+        if isinstance(key_info, dict):
+            key_limit = key_info.get("limit")
+            key_usage = key_info.get("usage")
+            if isinstance(key_limit, (int, float)) and isinstance(key_usage, (int, float)):
+                if key_usage >= key_limit:
+                    return True
+
+        return False
 
     @staticmethod
     def _message_text(message: str) -> str:
