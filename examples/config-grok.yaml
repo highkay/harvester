@@ -63,7 +63,7 @@ monitoring:
   response_threshold: 5.0
 
 persistence:
-  batch_size: 1
+  batch_size: 50  # flush every 50 items (or save_interval seconds); 1 = a write+log per item
   save_interval: 5
   queue_interval: 60
   snapshot_interval: 300

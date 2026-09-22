@@ -552,6 +552,18 @@ own wait entries are re-checked on the next pass. Recovered value is often
 smaller than it looks: of 1281 recovered tavily "valid" keys, 1059 were already
 in the proxy pool (only 222 were new).
 
+- **`persistence.batch_size: 1` in the examples was a mistake (fixed
+  2026-09-22)**: `manager/pipeline.py` feeds it to `ResultBuffer`, so 1 means a
+  file write + an INFO line per item — measured 64,893 `Saved 1 links items`
+  lines in 6 h (70% of all INFO). The examples now use 50 (the schema default);
+  `save_interval` (5 s) still bounds the flush latency, and a crash can only
+  lose the in-flight buffer.
+- **Expected check outcomes are not ERRORs (fixed 2026-09-22)**:
+  `search/client.py::chat` now logs 400-404/429 at debug — every invalid key
+  answers 401 and the glm policy deliberately drives free-tier keys into
+  429/1113, which had produced 1200 of 1713 ERROR lines in 6 h. 5xx, timeouts
+  and connection errors stay ERROR.
+
 ## Tests & conventions
 
 - Run: `python -m unittest discover -s tests` (490 tests, 8 skipped, 0 failures
