@@ -24,9 +24,21 @@ keys to configured targets (gpt-load / TavilyProxyManager / local token store).
 Production container: `harvester-web` (image built locally on fnos via
 `docker compose up -d --build`). fnos git state is often **ahead of
 `origin/main` by local commits** (verify with `git status` before assuming).
-fnos has local edits to `Dockerfile.web` / `docker-compose.yml` and a
-`docker-compose.yml.bak.20260812` backup — do not clobber those blindly.
+fnos has local edits to `Dockerfile.web` /
+`docker-compose.yml` and a `docker-compose.yml.bak.20260812` backup — do not
+clobber those blindly.
 
+**2026-09-22 deployment-drift warning**: after a day of scp + `docker compose cp`
+deploys, the fnos working tree carries ~40 files as *uncommitted modifications*
+whose content equals `origin/main` (the same changes were committed and pushed
+from the workstation). Consequences: `git pull` refuses; and a naive
+`git checkout -- .` / `git reset --hard` there would REVERT the deployed configs
+to their pre-fix versions while the container keeps the new ones — a later
+rebuild would then bake the OLD configs. To reconcile: back up `Dockerfile.web`
+and `docker-compose.yml`, `git fetch origin`, `git reset --hard origin/main`,
+restore `Dockerfile.web`, then `cp docker-compose.hostnet.yml docker-compose.yml`
+(the running container is unaffected by file edits; only the next
+recreate/build reads them).
 ### How to deploy to production (fnos)
 
 ```bash
