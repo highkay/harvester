@@ -92,25 +92,58 @@ tasks:
       retries: 3
       use_proxy: false  # domestic endpoint — connect directly
     patterns:
-      key_pattern: "sk-[0-9A-Za-z_-]{20,}"
+      # Moonshot platform keys are sk- + 48 alnum. MEASURED 2026-09-22 (prod):
+      # 229/229 authentic kimi no-quota keys (and 15/15 kimi-ai) had body_len
+      # 48, alnum, mixed case + digits. Format alone cannot separate them from
+      # other sk- providers, so the task-level pattern only fires on
+      # Moonshot/Kimi env-name assignments; domain-named conditions override
+      # with a Bearer/quoted variadic below. The lookahead skips Anthropic /
+      # OpenAI project / service-account keys. No upper bound on the body: a
+      # fixed width silently drops keys if the provider rotates the format
+      # (serpapi lesson).
+      key_pattern: >-
+        (?i)(?:moonshot[_-]?(?:ai[_-]?)?api[_-]?key|kimi[_-]?(?:ai[_-]?)?api[_-]?key|moonshot[_-]?key)["'\]]{0,2}\s*[:=]\s*["']?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})["']?
       address_pattern: ""
       endpoint_pattern: ""
       model_pattern: ""
     conditions:
       # Each GitHub API search query has its own 1000-result window.
+      # Env-name dorks inherit the narrow task pattern above.
       - query: '"MOONSHOT_API_KEY"'
       - query: '"MOONSHOT_API_KEY="'
       - query: '"MOONSHOT_API_KEY:"'
+      # Domain-anchored blobs: allow Bearer/quoted sk- keys without the env name.
       - query: '"api.moonshot.cn"'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|["']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})
       - query: '"api.moonshot.cn" "Authorization"'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|["']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})
       - query: '"api.moonshot.cn" "api_key"'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|["']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})
       - query: '"moonshot" "api_key"'
       - query: '"kimi" "api_key"'
       - query: '"sk-" "api.moonshot.cn"'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|["']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})
       - query: '"MOONSHOT_API_KEY" language:Python'
       - query: '"api.moonshot.cn" language:JavaScript'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|["']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})
       - query: '"api.moonshot.cn" extension:env'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|["']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})
       - query: '"api.moonshot.cn" extension:json'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|["']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})
       - query: '"moonshot" extension:yaml'
     rate_limit:
       base_rate: 0.2

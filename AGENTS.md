@@ -435,6 +435,34 @@ update preserves intentional local changes (reverts, port/volume tweaks).
   run shows near-zero candidates at the check stage, widen back to `sk-` and
   re-measure before trusting the narrowing.
 
+## Feature: kimi + kimi-ai extraction anchored (2026-09-22)
+
+- **Measured real-key corpus (n=245)**: 229/229 `kimi` (api.moonshot.cn) and
+  15/15 `kimi-ai` (api.moonshot.ai) authentic no-quota keys (i.e. they passed
+  provider auth) were exactly `sk-` + **48 alnum** (mixed case + digits) — same
+  shape on both endpoints — plus one operator sample. Format alone therefore
+  cannot separate Moonshot keys from other `sk-` vendors; only context can.
+- **The flood**: both configs used a naked task-level
+  `sk-[0-9A-Za-z_-]{20,}`, so every `sk-` run on a fetched page became a
+  candidate — measured 1727 invalid (kimi) / 1001 invalid (kimi-ai) in one run,
+  body lengths scattered 20-57 (placeholders like `sk-your…`/`sk-tes…`,
+  `sk-ant-` keys, other vendors) against only 229/15 authentic keys.
+- **Fix (mirrors agnes-ai)**: task-level extraction is anchored to
+  Moonshot/Kimi env names —
+  `(?i)(?:moonshot[_-]?(?:ai[_-]?)?api[_-]?key|kimi[_-]?(?:ai[_-]?)?api[_-]?key|moonshot[_-]?key)["'\]]{0,2}\s*[:=]\s*["']?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})["']?`
+  — and every domain-named dork (`api.moonshot.cn` / `api.moonshot.ai` /
+  `platform.kimi.ai` / `moonshot.ai` / `kimi.ai`) overrides with the wide
+  `(?i)(?:Bearer\s+|["']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})`
+  form (the query itself is the anchor). No upper bound on the body: a fixed
+  width silently drops keys if the provider rotates the format (serpapi
+  lesson) — the 48 is documented, not enforced.
+- Tests: `tests/test_kimi_pattern.py` (10) — env anchoring, bare-`sk-`
+  rejection at every observed body length, single capture group, the
+  ant/proj/svcacct lookahead, override-only-on-domain-dorks, no-upper-bound,
+  and kimi↔kimi-ai lockstep. Both configs validate; suite 572 OK / 8 skipped.
+- Tripwire: if a future run shows near-zero candidates reaching the check
+  stage, widen back (drop the anchor) and re-measure before trusting it.
+
 ## Ops: container egress, host networking & deploys (2026-09-21)
 
 - The harvester container now runs `network_mode: host` + `WEB_PORT=8002`

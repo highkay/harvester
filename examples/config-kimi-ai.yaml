@@ -92,26 +92,80 @@ tasks:
       retries: 3
       use_proxy: true  # international endpoint — route through proxy
     patterns:
-      key_pattern: "sk-[0-9A-Za-z_-]{20,}"
+      # Moonshot platform keys are sk- + 48 alnum. MEASURED 2026-09-22 (prod):
+      # 15/15 authentic kimi-ai no-quota keys (and 229/229 kimi) had body_len
+      # 48, alnum, mixed case + digits. Format alone cannot separate them from
+      # other sk- providers, so the task-level pattern only fires on
+      # Moonshot/Kimi env-name assignments; domain-named conditions override
+      # with a Bearer/quoted variadic below. The lookahead skips Anthropic /
+      # OpenAI project / service-account keys. No upper bound on the body: a
+      # fixed width silently drops keys if the provider rotates the format
+      # (serpapi lesson).
+      key_pattern: >-
+        (?i)(?:moonshot[_-]?(?:ai[_-]?)?api[_-]?key|kimi[_-]?(?:ai[_-]?)?api[_-]?key|moonshot[_-]?key)["'\]]{0,2}\s*[:=]\s*["']?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})["']?
       address_pattern: ""
       endpoint_pattern: ""
       model_pattern: ""
     conditions:
       # International open platform (platform.kimi.ai / kimi.ai): api.moonshot.ai
+      # Every dork below names a Moonshot/Kimi host, so each one widens to the
+      # Bearer/quoted variadic (the query itself is the context anchor).
       - query: '"api.moonshot.ai"'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|["']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})
       - query: '"api.moonshot.ai" "Authorization"'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|["']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})
       - query: '"api.moonshot.ai" "api_key"'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|["']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})
       - query: '"MOONSHOT_API_KEY" "api.moonshot.ai"'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|["']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})
       - query: '"platform.kimi.ai"'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|["']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})
       - query: '"moonshot.ai" "api_key"'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|["']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})
       - query: '"kimi.ai" "api_key"'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|["']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})
       - query: '"sk-" "api.moonshot.ai"'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|["']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})
       - query: '"api.moonshot.ai" language:Python'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|["']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})
       - query: '"api.moonshot.ai" language:JavaScript'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|["']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})
       - query: '"api.moonshot.ai" extension:env'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|["']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})
       - query: '"api.moonshot.ai" extension:json'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|["']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})
       - query: '"api.moonshot.ai" extension:yaml'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|["']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})
       - query: '"MOONSHOT_API_KEY" language:Python "api.moonshot.ai"'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|["']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})
     rate_limit:
       base_rate: 0.2
       burst_limit: 2
