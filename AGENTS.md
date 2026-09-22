@@ -732,6 +732,20 @@ update preserves intentional local changes (reverts, port/volume tweaks).
   event is only checked before `app.run()`). The only way to stop one is a
   container restart; startup reconciliation then records it as `failed:
   interrupted by service restart`.
+- **Restart-safety check: query `run_records`, NEVER `ps`/`/proc` (learned
+  2026-09-23, the hard way)**: scans run as THREADS inside `web_main.py`, so a
+  process listing shows only `web_main.py` even with 6 scans live — and
+  `docker compose restart` kills them all. Before ANY restart run
+  `SELECT provider_name FROM run_records WHERE status='running';` (or check the
+  UI runs page); an empty result is the only safe window. With the daily chain
+  01:00-17:00 that window is roughly 18:30-01:00. The 2026-09-23 restart
+  mid-chain silently discarded groq 3h21m / deepseek 2h21m / ollama 1h21m /
+  kimi 21m of scanning (startup reconciliation then recorded them `failed:
+  interrupted by service restart` WITH duration + own-provider valid counts —
+  the new accounting made the loss measurable instead of invisible). Leftover
+  work after any restart: check each killed provider's `valid-keys.txt` and
+  push it manually with `PushService.push_valid_keys(<provider>, <run_id>)`
+  (on 2026-09-23 ollama held 55 keys, all already pooled → nothing lost).
 - **`data/queue_state/*.json` is shared by every concurrent run** and gets
   overwritten in turn — never use its size as a per-run progress signal; read
   the per-run display tables from the container logs instead.
