@@ -72,11 +72,12 @@ class AzureOpenAIProvider(OpenAILikeProvider):
     def _judge(self, code: int, message: str) -> CheckResult:
         """Judge Azure OpenAI API response."""
         if code == 404:
-            message = trim(message)
-            if re.finditer(r"The API deployment for this resource does not exist", message, flags=re.I):
-                return CheckResult.fail(ErrorReason.NO_MODEL)
-
-            return CheckResult.fail(ErrorReason.INVALID_KEY)
+            # Any 404 means the deployment name in the probe URL is wrong or
+            # absent (the api-key header is not even evaluated for routing
+            # failures) -> NO_MODEL (wait-check), never a dead-key verdict. The
+            # old body-text match on one exact English sentence judged every
+            # other 404 as INVALID_KEY, permanently burning live keys.
+            return CheckResult.fail(ErrorReason.NO_MODEL)
 
         return super()._judge(code, message)
 

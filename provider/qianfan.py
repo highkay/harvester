@@ -38,7 +38,9 @@ class QianFanProvider(OpenAILikeProvider):
     def _judge(self, code: int, message: str) -> CheckResult:
         """Judge QianFan API response."""
         if code == 404:
-            return CheckResult.fail(ErrorReason.INVALID_KEY)
+            # 404 means the model/appid route is unknown, not that the key is
+            # dead -> NO_MODEL (wait-check), never a permanent discard.
+            return CheckResult.fail(ErrorReason.NO_MODEL)
 
         return super()._judge(code, message)
 

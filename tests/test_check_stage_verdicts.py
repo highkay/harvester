@@ -54,6 +54,38 @@ class TestCheckStageVerdictRouting(unittest.TestCase):
                 kinds = [kind for _provider, kind, _data in output.results]
                 self.assertEqual(kinds, [ResultType.WAIT_CHECK.value])
 
+    def test_bad_request_goes_to_wait_check(self):
+        """BAD_REQUEST means the probe/request was rejected, not the credential
+        (provider/base.py HTTP 400 mapping, qwen non-Arrearage 400, deepseek
+        400, opencode 401-ModelError) — it must land in the recoverable
+        wait-check bucket, never in the permanent invalid discard."""
+        output = _run(CheckResult.fail(ErrorReason.BAD_REQUEST))
+
+        kinds = [kind for _provider, kind, _data in output.results]
+        self.assertEqual(kinds, [ResultType.WAIT_CHECK.value])
+
+    def test_no_model_and_no_access_go_to_wait_check(self):
+        for reason in (ErrorReason.NO_MODEL, ErrorReason.NO_ACCESS):
+            with self.subTest(reason=reason):
+                output = _run(CheckResult.fail(reason))
+
+                kinds = [kind for _provider, kind, _data in output.results]
+                self.assertEqual(kinds, [ResultType.WAIT_CHECK.value])
+
+    def test_no_quota_goes_to_no_quota(self):
+        output = _run(CheckResult.fail(ErrorReason.NO_QUOTA))
+
+        kinds = [kind for _provider, kind, _data in output.results]
+        self.assertEqual(kinds, [ResultType.NO_QUOTA.value])
+
+    def test_unknown_goes_to_invalid(self):
+        """UNKNOWN stays a permanent discard: the response was parsed but the
+        verdict is genuinely unknowable — it is not a retryable transport state."""
+        output = _run(CheckResult.fail(ErrorReason.UNKNOWN))
+
+        kinds = [kind for _provider, kind, _data in output.results]
+        self.assertEqual(kinds, [ResultType.INVALID.value])
+
     def test_invalid_key_goes_to_invalid(self):
         output = _run(CheckResult.fail(ErrorReason.INVALID_KEY))
 

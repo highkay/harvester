@@ -103,6 +103,12 @@ class OpenRouterProvider(OpenAILikeProvider):
             if not isinstance(key_info, dict):
                 return CheckResult.fail(ErrorReason.UNKNOWN)
 
+            # A bare 200 with an empty/unknown payload proves nothing (presence-
+            # only trap): require at least one genuine key-info field before
+            # accepting the key as valid.
+            if not any(field in key_info for field in ("label", "usage", "limit", "limit_remaining")):
+                return CheckResult.fail(ErrorReason.UNKNOWN)
+
             remaining = key_info.get("limit_remaining")
             if isinstance(remaining, (int, float)) and remaining <= 0:
                 return CheckResult.fail(ErrorReason.NO_QUOTA)
@@ -114,8 +120,13 @@ class OpenRouterProvider(OpenAILikeProvider):
 
             return CheckResult.success()
 
-        if code in (401, 403):
+        if code == 401:
             return CheckResult.fail(ErrorReason.INVALID_KEY)
+
+        if code == 403:
+            # A 403 with a well-formed key can be a policy/region/org restriction
+            # on an authentic credential -> NO_ACCESS (wait-check), not a dead key.
+            return CheckResult.fail(ErrorReason.NO_ACCESS)
 
         if code == 402 or re.findall(r"insufficient\s+credits?|quota|billing", message, flags=re.I):
             return CheckResult.fail(ErrorReason.NO_QUOTA)

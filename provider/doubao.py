@@ -26,6 +26,12 @@ class DoubaoProvider(OpenAILikeProvider):
                 "base_url": "https://ark.cn-beijing.volces.com",
                 "completion_path": "/api/v3/chat/completions",
                 "model_path": "/api/v3/models",
+                # Ark ids are versioned: real probes target per-deployment
+                # endpoint ids (ep-XXXXXXXXXXXXXX-XXXXX, see model_pattern) or
+                # version-suffixed model names. "doubao-pro-32k" is the legacy
+                # alias, kept as-is (no live probe available to pick a current
+                # one) — a 404 on it means "endpoint/model unknown", which
+                # _judge routes to NO_MODEL (wait-check), not INVALID_KEY.
                 "default_model": "doubao-pro-32k",
                 "model_pattern": r"ep-[0-9]{14}-[a-z0-9]{5}",
             },
@@ -36,7 +42,11 @@ class DoubaoProvider(OpenAILikeProvider):
     def _judge(self, code: int, message: str) -> CheckResult:
         """Judge Doubao API response."""
         if code == 404:
-            return CheckResult.fail(ErrorReason.INVALID_KEY)
+            # Ark answers 404 for an unknown/absent deployment or model id —
+            # the key itself is not condemned by a routing failure. NO_MODEL
+            # goes to wait-check (recoverable); INVALID_KEY would be a
+            # permanent discard.
+            return CheckResult.fail(ErrorReason.NO_MODEL)
 
         return super()._judge(code, message)
 

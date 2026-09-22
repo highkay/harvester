@@ -519,12 +519,22 @@ class CheckStage(BasePipelineStage):
                 elif result.reason in [
                     ErrorReason.NO_MODEL,
                     ErrorReason.NO_ACCESS,
+                    ErrorReason.BAD_REQUEST,
                 ] or result.reason.is_retryable():
                     # Retryable verdicts (rate limit / network / timeout / 5xx) are
                     # NOT key verdicts: measured 2026-09-22, ollama.com through the
                     # scan's socks exits answers TLS EOF/timeouts often enough that
                     # filing them as INVALID permanently burned live keys. The wait
                     # pool is recoverable (see the wait-pool recovery recipe).
+                    #
+                    # BAD_REQUEST is here on purpose too: providers emit it when
+                    # the probe itself was rejected rather than the credential —
+                    # provider/base.py maps HTTP 400 to BAD_REQUEST, qwen maps a
+                    # non-Arrearage 400 to it, deepseek maps 400 to it, and
+                    # opencode maps its 401-ModelError (model validated BEFORE
+                    # auth) to it. A malformed probe / mismatched model id must
+                    # not be a permanent discard. UNKNOWN stays invalid: the
+                    # response was parsed but the verdict is genuinely unknowable.
                     output.add_result(task.provider, ResultType.WAIT_CHECK.value, [task.service])
 
                 else:

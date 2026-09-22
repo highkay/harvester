@@ -23,6 +23,20 @@ from tools.utils import handle_exceptions, trim
 from .base import AIBaseProvider
 from .registry import register_provider
 
+# Case-insensitive markers for classifying HTTP-200-with-error bodies (see
+# OpenAILikeProvider._judge). Auth-flavoured -> the key itself was rejected
+# (permanent INVALID_KEY discard); quota/billing -> authentic key without
+# funds (NO_QUOTA); neither -> no key verdict can be made, so the body goes
+# to the recoverable wait-check bucket (BAD_REQUEST).
+_AUTH_ERROR_MARKERS = (
+    "invalid api key",
+    "incorrect api key",
+    "unauthorized",
+    "authentication",
+    "api key not valid",
+)
+_QUOTA_ERROR_MARKERS = ("insufficient", "quota", "billing", "credits", "balance")
+
 
 class OpenAILikeProvider(AIBaseProvider):
     """Base class for OpenAI-compatible providers."""
@@ -98,15 +112,35 @@ class OpenAILikeProvider(AIBaseProvider):
                 if data and isinstance(data, dict):
                     error = data.get("error", None)
                     if error and isinstance(error, dict):
-                        error_type = trim(error.get("type", ""))
-                        error_reason = trim(error.get("message", "")).lower()
-
-                        if error_type or "authorization" in error_reason:
+                        # A 200 carrying an error object is a failed request,
+                        # but the FAILURE KIND decides the bucket (matching how
+                        # stage/definition.py routes verdicts):
+                        #   auth-flavoured  -> the key itself was rejected ->
+                        #                      INVALID_KEY (permanent discard)
+                        #   quota/billing   -> authentic key without funds ->
+                        #                      NO_QUOTA
+                        #   anything else   -> a transient upstream/model fault,
+                        #                      NOT a key verdict -> BAD_REQUEST,
+                        #                      which CheckStage files in the
+                        #                      recoverable wait-check bucket.
+                        # The old blanket INVALID_KEY permanently burned valid
+                        # keys whenever a wrapper gateway answered a transient
+                        # upstream fault with HTTP 200 + error JSON.
+                        error_text = json.dumps(error, ensure_ascii=False).lower()
+                        if any(marker in error_text for marker in _AUTH_ERROR_MARKERS):
                             return CheckResult.fail(ErrorReason.INVALID_KEY)
+                        if any(marker in error_text for marker in _QUOTA_ERROR_MARKERS):
+                            return CheckResult.fail(ErrorReason.NO_QUOTA)
+                        return CheckResult.fail(ErrorReason.BAD_REQUEST)
             except:
                 logger.error(f"Failed to parse response, domain: {self._base_url}, message: {message}")
                 return CheckResult.fail(ErrorReason.UNKNOWN)
 
+            # Deliberately NOT tightening the success shape (no `choices`
+            # requirement): several OpenAI-compatible gateways return unusual
+            # success bodies, and demanding a canonical chat-completion shape
+            # would regress their live keys from valid to UNKNOWN. The rule is
+            # only "200 without an error object", nothing more.
             return CheckResult.success()
 
         message = trim(message)

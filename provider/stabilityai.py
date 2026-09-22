@@ -86,8 +86,13 @@ class StabilityAIProvider(AIBaseProvider):
                 filename, data = value
                 multipart_files[name] = (filename, data, "application/octet-stream")
 
-            # send request with retry
-            code, message, attempt, retries = 401, "", 0, max(1, retries)
+            # Send request with retry. code=0 is the transport-failure sentinel:
+            # provider/base.py::AIBaseProvider._judge maps code<=0 to
+            # TIMEOUT/NETWORK_ERROR, which CheckStage routes to wait-check. The
+            # old `code = 401` initialisation combined with a swallowing
+            # `except Exception: pass` judged every TLS/connection/timeout
+            # failure as INVALID_KEY, permanently burning live keys.
+            code, message, attempt, retries = 0, "", 0, max(1, retries)
             while attempt < retries:
                 try:
                     response = request(
@@ -118,8 +123,16 @@ class StabilityAIProvider(AIBaseProvider):
 
                     if code in NO_RETRY_ERROR_CODES:
                         break
-                except Exception:
-                    pass
+                except Exception as e:
+                    # Keep the transport-failure sentinel (code=0) and carry the
+                    # exception info so _judge can tell TIMEOUT from NETWORK_ERROR.
+                    code = 0
+                    is_timeout = isinstance(e, (requests.exceptions.Timeout, TimeoutError))
+                    message = "timeout" if is_timeout else (trim(str(e)) or e.__class__.__name__)
+                    if not is_timeout:
+                        logger.error(
+                            f"[chat] transport error for URL: {url}, token: {redact_api_key(token)}, message: {redact_api_keys_in_text(message)}"
+                        )
 
                 attempt += 1
                 time.sleep(1)

@@ -307,11 +307,13 @@ class VertexProvider(AIBaseProvider):
                     continue
 
                 data = json.loads(content)
-                models = data.get("models", [])
-
-                for model in models:
-                    name = model.get("name", "")
-                    display_name = model.get("displayName", "")
+                # Collect model ids into `models` (the returned list). The old
+                # code iterated the raw dict list while appending strings to
+                # the very same list, so the loop re-visited its own appended
+                # strings, blew up on `.get` and lost results via except.
+                for entry in data.get("models", []):
+                    name = entry.get("name", "")
+                    display_name = entry.get("displayName", "")
 
                     if name:
                         # Extract model ID from full resource name
@@ -343,10 +345,10 @@ class VertexProvider(AIBaseProvider):
                     content = http_get(url=url, headers=headers, interval=1, use_proxy=self._get_use_proxy())
                     if content:
                         data = json.loads(content)
-                        models = data.get("models", [])
-
-                        for model in models:
-                            name = model.get("name", "")
+                        # Same fix as the publisher loop: iterate the raw dict
+                        # list, append extracted ids to the separate result list.
+                        for entry in data.get("models", []):
+                            name = entry.get("name", "")
                             if name:
                                 parts = name.split("/")
                                 if len(parts) >= 6 and parts[-2] == "models":

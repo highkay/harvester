@@ -19,6 +19,7 @@ from core.models import CheckResult, Condition
 from search.client import http_error_message, http_error_status, http_get, request
 from tools.coordinator import get_user_agent
 from tools.logger import get_logger
+from tools.patterns import redact_api_key
 from tools.utils import handle_exceptions, trim
 
 from .base import AIBaseProvider
@@ -114,15 +115,31 @@ class AnthropicProvider(AIBaseProvider):
                             break
                 except Exception as e:
                     if not isinstance(e, requests.exceptions.Timeout):
-                        logger.error(f"Check Claude session error, key: {token}, message: {traceback.format_exc()}")
+                        logger.error(
+                            f"Check Claude session error, key: {redact_api_key(token)}, "
+                            f"message: {traceback.format_exc()}"
+                        )
 
                 attempt += 1
                 time.sleep(1)
 
-            if not content or re.findall(r"Invalid authorization", content, flags=re.I):
+            # Transport failure with retries exhausted (empty content, never got a
+            # response) is flaky egress, not a key verdict -> NETWORK_ERROR so
+            # CheckStage files it in the recoverable wait-check bucket. The old
+            # `not content -> INVALID_KEY` permanently burned live keys whenever
+            # the exit dropped connections. INVALID_KEY stays reserved for a real
+            # 401 (handled in the loop above) or an "Invalid authorization" body.
+            if not success and not content:
+                logger.error(
+                    f"Check Claude session transport failure after {retries} attempt(s), key: {redact_api_key(token)}"
+                )
+                return CheckResult.fail(ErrorReason.NETWORK_ERROR)
+
+            if re.findall(r"Invalid authorization", content, flags=re.I):
                 return CheckResult.fail(ErrorReason.INVALID_KEY)
-            elif not success:
-                logger.error(f"Check Claude session error, key: {token}, message: {content}")
+
+            if not success:
+                logger.error(f"Check Claude session error, key: {redact_api_key(token)}, message: {content}")
                 return CheckResult.fail(ErrorReason.UNKNOWN)
 
             try:
@@ -133,14 +150,19 @@ class AnthropicProvider(AIBaseProvider):
 
                     capabilities = data[0].get("capabilities", [])
                     if capabilities and isinstance(capabilities, list) and "claude_pro" in capabilities:
-                        logger.info(f"Found Claude Pro key: {token}")
+                        logger.info(f"Found Claude Pro key: {redact_api_key(token)}")
 
                 if not valid:
-                    logger.warning(f"Check error, Anthropic session key: {token}, message: {content}")
+                    logger.warning(f"Check error, Anthropic session key: {redact_api_key(token)}, message: {content}")
 
                 return CheckResult.success() if valid else CheckResult.fail(ErrorReason.INVALID_KEY)
             except:
-                return CheckResult.fail(ErrorReason.INVALID_KEY)
+                # A 200 whose body cannot be parsed proves nothing, so it must
+                # not be reported as a valid key; it is no longer reported as
+                # a definite key verdict either, and the classification is
+                # UNKNOWN (which routes to invalid-keys.txt like INVALID_KEY —
+                # it does NOT rescue keys behind HTML interstitials).
+                return CheckResult.fail(ErrorReason.UNKNOWN)
 
         return super().check(token=token, address=address, endpoint=endpoint, model=model)
 
