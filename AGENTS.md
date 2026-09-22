@@ -463,6 +463,62 @@ update preserves intentional local changes (reverts, port/volume tweaks).
 - Tripwire: if a future run shows near-zero candidates reaching the check
   stage, widen back (drop the anchor) and re-measure before trusting it.
 
+## Feature: ollama cloud provider — why it produced 0 NEW keys (fixed 2026-09-22)
+
+- **Symptom (measured)**: daily prod runs reported `valid_keys_found` 7–11 while
+  `run_new_keys` held ZERO ollama rows from 2026-09-03 to 09-22 — the same keys
+  were re-discovered and re-validated nightly. The provider itself is correct: all
+  7 keys in `valid-keys.txt` answered 200 on `POST ollama.com/v1/chat/completions`,
+  the 3 real-format keys in `invalid-keys.txt` answered 401, a random
+  `<32hex>.<24 base64ish>` key answers 401. `GET /v1/models` and `/api/tags` are
+  PUBLIC (200 without auth) — never use them to judge a key.
+- **Root cause = the search side never reached the files that hold keys**:
+  - `examples/config-ollama.yaml` carried the token dork
+    `"ollama" "api_key" extension:env` (3,144 results). Its refine partitions are
+    all `language:` variants of a file-type query and return 0
+    (`... language:Python` = 0, `language:Text` = 0, `language:Shell` = 5), and the
+    refine branch used to REPLACE pagination → only page 1 (100 links) was ever
+    walked. Swapped to `"OLLAMA_API_KEY" extension:env` (407 results → pages 2..5
+    walk the whole class; measured 24 pattern captures / 17 key-shaped on its page
+    1 alone, 5 of them live and absent from the harvest).
+  - `stage/definition.py::_handle_first_page_results` now emits page tasks for the
+    original query *in addition to* refined tasks — every dork with >1000 results
+    used to lose its tail (e.g. `"OLLAMA_API_KEY"` = 58,240 results).
+  - `CheckStage` now routes retryable reasons (NETWORK_ERROR / TIMEOUT / 5xx /
+    RATE_LIMITED) to `wait-check-keys.txt`; `search/client.py::chat` returns code 0
+    (the sentinel the provider probe loops already use) on transport failure
+    instead of 400, and `AIBaseProvider._judge` maps 0 → NETWORK_ERROR/TIMEOUT.
+    Before this a TLS EOF (measured: 8/25 first probes, container-direct)
+    permanently burned a live key into `invalid-keys.txt`.
+- **GitHub code-search semantics (measured 2026-09-22 + docs)**: `sort`/`order` are
+  inert — `sort=indexed&order=desc`, `order=asc` and no sort return identical
+  ordering (30/30) because the docs mark both "closing down" and default to
+  best match. Results are a stable relevance ranking: re-running a dork returns the
+  same files (corpus plateau ≈38k links, +1.8k/run, dropped=0), and
+  `created:`/`pushed:` do NOT exist in the legacy code-search qualifier set — so
+  the groq section's "created:>=… freshness window" dork is a no-op, and freshness
+  must come from dork/class diversity + cadence. The refine engine partitions only
+  by the 28 `POPULAR_LANGUAGES` then 4 size buckets, so `YAML` (2,688), `JSON`
+  (1,828), `Shell` (1,090), `Text`(.txt, 259) and `.env` classes stay unreachable
+  unless the dork itself carries `extension:`/`filename:`.
+- **Verification (bounded real run with the fixed config)**: 13 valid keys (10 not
+  previously in the harvest) plus the expected `generated 9 page tasks` +
+  `generated 27 refined tasks` pair for `"OLLAMA_API_KEY"` and `generated 4 page
+  tasks` for the env dork. Leaked ollama keys are NOT in GitHub's
+  supported-secret-scanning list (no push protection / partner revocation, unlike
+  groq), so the supply is real and durable — 14/21 page-3 candidates were live.
+- **Tripwires**: (1) do NOT add a bare `api[_-]?key=` branch to the ollama pattern —
+  ollama keys share the `<32hex>.<body>` shape with glm/z.ai keys, so it floods the
+  check stage with other vendors; (2) if a run reports 0 new keys while
+  `valid_keys_found` stays flat, inspect `run_new_keys` and the corpus `.env` count
+  before touching the provider.
+- **Bounded-run gotcha (cost an hour, 2026-09-22)**: `main.py` installs graceful
+  SIGTERM handlers, so `subprocess.terminate()` does NOT stop a CLI scan — one ran
+  67 min against the shared 10 req/min GitHub budget. Bound the wall clock
+  externally (`taskkill /PID <verified> /T /F`) and never leave a decrypted prod
+  token in a config a long-lived process holds. Pipeline logs are UTC; file mtimes
+  are local (+8).
+
 ## Ops: container egress, host networking & deploys (2026-09-21)
 
 - The harvester container now runs `network_mode: host` + `WEB_PORT=8002`
