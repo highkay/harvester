@@ -81,7 +81,13 @@ tasks:
     conditions:
       - query: '"OLLAMA_API_KEY"'
       - query: '"ollama.com/v1" "api_key"'
-      - query: '"ollama" "api_key" extension:env'
+      # The token form `"ollama" "api_key"` matches mostly code that *references*
+      # the env var; it is also oversized (>1000 results), so its refine partitions
+      # are all `language:` variants of a file-type query and return ~0 — measured
+      # 2026-09-22: 3144 results, only page 1 ever walked, 0 new keys. The phrase
+      # form below targets the files that actually assign a key and stays under the
+      # 1000-result cap, so pages 2..5 walk the whole class.
+      - query: '"OLLAMA_API_KEY" extension:env'
     rate_limit:
       base_rate: 2.0
       burst_limit: 10

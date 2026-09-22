@@ -275,7 +275,18 @@ class SearchStage(BasePipelineStage):
         return True
 
     def _handle_first_page_results(self, task: SearchTask, total: int, output: StageOutput) -> None:
-        """Handle first page results - decide pagination or refinement"""
+        """Handle first page results - refine and/or paginate.
+
+        Refinement never replaces pagination. The refine engine only partitions a
+        query along ``language:`` (popular programming languages) and ``size:``, so
+        a dork qualified by ``extension:``/``filename:``/``path:`` — exactly where
+        API keys live — has no satisfiable language partition at all. Measured
+        2026-09-22: ``"ollama" "api_key" extension:env`` returns 3144 results, its
+        27 refined ``language:`` queries return 0 (only ``language:Shell`` = 5), so
+        the dork was capped at its first page (100 links) and the tail of every
+        oversized dork was silently dropped. Pages 2..10 stay walkable, so always
+        emit them.
+        """
         per_page = API_RESULTS_PER_PAGE if task.use_api else WEB_RESULTS_PER_PAGE
         limit = self._max_pages(task) * per_page
         search_type = getattr(task, "search_type", "code") or "code"
@@ -286,7 +297,7 @@ class SearchStage(BasePipelineStage):
             partitions = int(math.ceil(total / limit))
             queries = RefineEngine.get_instance().generate_queries(query=task.query, partitions=partitions)
 
-            # Add new query tasks to output
+            generated = 0
             for query in queries:
                 if not query:
                     logger.warning(
@@ -313,13 +324,14 @@ class SearchStage(BasePipelineStage):
                 )
 
                 output.add_task(refined_task, PipelineStage.SEARCH.value)
+                generated += 1
 
             logger.info(
-                f"[{self.name}] generated {len(queries)} refined tasks for provider: {task.provider}, query: {task.query}"
+                f"[{self.name}] generated {generated} refined tasks for provider: {task.provider}, query: {task.query}"
             )
 
-        # Pagination when within budget (or non-code types that skip regex refine)
-        elif total > per_page:
+        # Pagination, independently of refinement (see docstring)
+        if total > per_page:
             page_tasks = self._generate_page_tasks(task, total, per_page)
             for page_task in page_tasks:
                 output.add_task(page_task, PipelineStage.SEARCH.value)
@@ -505,10 +517,14 @@ class CheckStage(BasePipelineStage):
                     output.add_result(task.provider, ResultType.NO_QUOTA.value, [task.service])
 
                 elif result.reason in [
-                    ErrorReason.RATE_LIMITED,
                     ErrorReason.NO_MODEL,
                     ErrorReason.NO_ACCESS,
-                ]:
+                ] or result.reason.is_retryable():
+                    # Retryable verdicts (rate limit / network / timeout / 5xx) are
+                    # NOT key verdicts: measured 2026-09-22, ollama.com through the
+                    # scan's socks exits answers TLS EOF/timeouts often enough that
+                    # filing them as INVALID permanently burned live keys. The wait
+                    # pool is recoverable (see the wait-pool recovery recipe).
                     output.add_result(task.provider, ResultType.WAIT_CHECK.value, [task.service])
 
                 else:

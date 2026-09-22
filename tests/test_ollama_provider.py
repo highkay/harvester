@@ -102,6 +102,23 @@ class TestOllamaProviderCheck(unittest.TestCase):
         self.assertFalse(result.available)
         self.assertEqual(result.reason, ErrorReason.SERVER_ERROR)
 
+    @mock.patch(UA_PATCH, return_value="test-agent")
+    def test_check_timeout_is_not_invalid(self, _ua):
+        """A transport timeout (chat code 0) must never be filed as an invalid key."""
+        with mock.patch("provider.base.chat", return_value=(0, "timeout")):
+            result = self.provider.check(token="some-key")
+
+        self.assertFalse(result.available)
+        self.assertEqual(result.reason, ErrorReason.TIMEOUT)
+
+    @mock.patch(UA_PATCH, return_value="test-agent")
+    def test_check_transport_failure_is_network_error(self, _ua):
+        with mock.patch("provider.base.chat", return_value=(0, "")):
+            result = self.provider.check(token="some-key")
+
+        self.assertFalse(result.available)
+        self.assertEqual(result.reason, ErrorReason.NETWORK_ERROR)
+
 
 class TestOllamaProviderInspect(unittest.TestCase):
     def setUp(self):

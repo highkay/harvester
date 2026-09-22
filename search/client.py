@@ -927,7 +927,12 @@ def chat(
     payload = json.dumps(params).encode("utf8")
     timeout = max(1, timeout)
     retries = max(1, retries)
-    code, message, attempt = 400, None, 0
+    # 0 means "no HTTP response at all" (timeout / connection / TLS failure) — the
+    # same sentinel the provider-level probes use (provider/agnes_ai.py,
+    # provider/kimi.py, ...). A transport failure must never masquerade as an HTTP
+    # status: the old `code = 400` start turned every timeout into a BAD_REQUEST,
+    # which CheckStage filed as INVALID (burning live keys on a flaky exit).
+    code, message, attempt = 0, None, 0
 
     while attempt < retries:
         try:
@@ -953,8 +958,12 @@ def chat(
 
             if code in NO_RETRY_ERROR_CODES:
                 break
+        except requests.exceptions.Timeout:
+            code, message = 0, "timeout"
+            output(code=code, message="timeout", debug=True)
         except Exception:
-            output(code=code, message=traceback.format_exc(), debug=True)
+            code, message = 0, traceback.format_exc()
+            output(code=code, message=message, debug=True)
 
         attempt += 1
         time.sleep(CHAT_RETRY_INTERVAL)

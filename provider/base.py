@@ -187,6 +187,13 @@ class AIBaseProvider(IProvider):
         """Judge API response and return check result."""
         message = trim(message)
 
+        if code <= 0:
+            # No HTTP response at all (timeout / connection / TLS failure). Provider
+            # probe loops already use 0 for this (provider/agnes_ai.py, kimi, ...);
+            # keep the sentinel out of the HTTP verdict space so a flaky exit can
+            # never file a live key as INVALID (CheckStage routes it to wait-check).
+            return CheckResult.fail(ErrorReason.TIMEOUT if message == "timeout" else ErrorReason.NETWORK_ERROR)
+
         if code == 200 and message:
             return CheckResult.success()
         elif code == 400:
