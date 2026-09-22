@@ -891,7 +891,13 @@ def chat(
         safe_headers = redact_api_keys_in_text(str(headers))
         safe_message = redact_api_keys_in_text(str(message))
         text = f"[chat] failed to request URL: {url}, headers: {safe_headers}, status code: {code}, message: {safe_message}"
-        if debug:
+        # Expected classification outcomes (auth / quota / rate-limit) are the
+        # NORM for the check stage — every invalid key answers 401 and the glm
+        # policy deliberately drives free-tier keys into 429/1113. Logging them
+        # at ERROR drowned the log: measured 2026-09-22, 1200 of 1713 ERROR
+        # lines in 6 h were policy-expected 429 no-quota responses. Keep them at
+        # debug; real failures (5xx, timeouts, connection errors) stay ERROR.
+        if debug or code in (400, 401, 402, 403, 404, 429):
             logger.debug(text)
         else:
             logger.error(text)
