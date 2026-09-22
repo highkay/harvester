@@ -55,20 +55,27 @@ class CompletionEventManager:
 
     @handle_exceptions(default_result=None, log_level="error")
     def notify_completion(self) -> None:
-        """Notify all listeners of completion"""
+        """Notify all listeners of completion exactly once.
+
+        The notified flag is latched (and the listener list snapshotted) under
+        the lock, then callbacks are invoked WITHOUT holding it. Consequences:
+        - a raising listener can no longer make the next is_finished() poll
+          re-fire every listener (the attempt itself counts as notified);
+        - a listener calling is_notified / add_listener / notify_completion
+          re-entrantly does not deadlock on the non-reentrant lock;
+        - listeners added mid-notification are not fired by this pass.
+        """
         with self._lock:
             if self._completion_notified:
                 return
+            self._completion_notified = True
+            callbacks = list(self._listeners)
 
-            success = True
-            for callback in self._listeners:
-                try:
-                    callback()
-                except Exception as e:
-                    success = False
-                    logger.error(f"Error in completion callback: {e}")
-
-            self._completion_notified = success
+        for callback in callbacks:
+            try:
+                callback()
+            except Exception as e:
+                logger.error(f"Error in completion callback: {e}")
 
     @property
     def is_notified(self) -> bool:

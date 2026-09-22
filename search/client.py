@@ -36,6 +36,12 @@ _TEXT_MATCH = True
 _CACHE_TTL_SEARCH = 60
 _CACHE_TTL_CORE = 300
 _ALLOWED_SEARCH_TYPES = frozenset({"code", "issues", "commits"})
+# Cap on Service candidates built from the keys x addresses x endpoints x
+# models cross-product for ONE collected page. The product is unbounded: a
+# broadly-matching metadata pattern can explode it (measured ~84 candidates
+# per link from a single broad branch in production). Key extraction itself
+# is never capped - only the combination fan-out.
+MAX_SERVICES_PER_PAGE = 512
 # Prefer text-match fragments so SearchStage can regex keys from API JSON
 _GITHUB_SEARCH_ACCEPT = "application/vnd.github.text-match+json"
 
@@ -1398,6 +1404,74 @@ def search_code(
         return [], ""
 
 
+def _build_service_candidates(
+    keys: List[str],
+    addresses: List[str],
+    endpoints: List[str],
+    models: List[str],
+    max_services: Optional[int] = None,
+) -> List[Service]:
+    """Build de-duplicated Service candidates from the dimension cross-product.
+
+    The four list parameters are the raw axes of itertools.product (keys x
+    addresses x endpoints x models); they stay explicit rather than grouped
+    into one container so the fairness rule below is readable.
+
+    The cap (MAX_SERVICES_PER_PAGE by default) is shared FAIRLY across keys:
+    each key gets at least one combination when the budget allows, so
+    truncation drops metadata breadth before it drops key coverage. Identical
+    (key, address, endpoint, model) tuples are emitted once. Truncation is
+    logged as a warning; below the cap the output is byte-for-byte the old
+    itertools.product order (key slowest-varying, model fastest). A
+    non-positive cap yields no candidates at all (logged at debug).
+    """
+    if not keys or not addresses or not endpoints or not models:
+        return []
+
+    cap = MAX_SERVICES_PER_PAGE if max_services is None else int(max_services)
+    if cap <= 0:
+        # A non-positive cap asks for zero candidates; honour it instead of
+        # the old max(1, cap) silently emitting one.
+        logger.debug(f"[search] service candidate cap is {cap} (<= 0), yielding no candidates")
+        return []
+
+    budget = cap
+    fair_share = max(1, budget // len(keys))
+
+    candidates: List[Service] = []
+    seen: set[Tuple[str, str, str, str]] = set()
+    truncated = False
+
+    for key in keys:
+        if budget <= 0:
+            truncated = True
+            break
+
+        share = min(fair_share, budget)
+        emitted = 0
+        for address, endpoint, model in itertools.product(addresses, endpoints, models):
+            if emitted >= share:
+                truncated = True
+                break
+
+            combo = (key, address, endpoint, model)
+            if combo in seen:
+                continue
+
+            seen.add(combo)
+            candidates.append(Service(address=address, endpoint=endpoint, key=key, model=model))
+            emitted += 1
+            budget -= 1
+
+    if truncated:
+        logger.warning(
+            f"service candidates truncated at cap {cap}: kept {len(candidates)} "
+            f"of {len(keys)} keys x {len(addresses)} addresses x {len(endpoints)} endpoints x {len(models)} models"
+        )
+
+    return candidates
+
+
 @handle_exceptions(default_result=[], log_level="error")
 def collect(
     key_pattern: str,
@@ -1463,13 +1537,10 @@ def collect(
     if not models:
         models.append("")
 
-    candidates = list()
-
-    # combine keys, addresses and endpoints
-    for key, address, endpoint, model in itertools.product(keys, addresses, endpoints, models):
-        candidates.append(Service(address=address, endpoint=endpoint, key=key, model=model))
-
-    return candidates
+    # combine keys, addresses and endpoints (de-duplicated, capped at
+    # MAX_SERVICES_PER_PAGE; see _build_service_candidates - the key
+    # extraction itself above is NOT capped)
+    return _build_service_candidates(keys, addresses, endpoints, models)
 
 
 @handle_exceptions(default_result=[], log_level="error")

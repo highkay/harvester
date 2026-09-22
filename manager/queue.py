@@ -466,29 +466,14 @@ class QueueManager(PeriodicTaskManager):
             logger.error(f"Failed to save empty state for {stage.value}: {e}")
 
     def _extract_tasks_from_queue(self, stage) -> List[ProviderTask]:
-        """Extract tasks from a queue object (fallback method)"""
-        task_list = []
-        # Try to get tasks without removing them
-        temp_tasks = []
+        """Extract tasks from a queue object (fallback method)
 
-        # Extract all tasks
-        while not stage.queue.empty():
-            try:
-                task = stage.queue.get_nowait()
-                if isinstance(task, ProviderTask):
-                    task_list.append(task)
-                    temp_tasks.append(task)
-            except:
-                break
-
-        # Put tasks back
-        for task in temp_tasks:
-            try:
-                stage.queue.put_nowait(task)
-            except:
-                pass
-
-        return task_list
+        Uses the same mutex-held snapshot as BasePipelineStage.get_pending_tasks:
+        the previous drain-and-reput could hit queue.Full against a concurrent
+        producer and silently drop tasks.
+        """
+        with stage.queue.mutex:
+            return [task for task in stage.queue.queue if isinstance(task, ProviderTask)]
 
 
 class GracefulShutdown:

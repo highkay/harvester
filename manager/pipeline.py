@@ -221,24 +221,24 @@ class Pipeline(IPipelineStats, StageRegistryMixin, LifecycleManager):
             return True
 
         ordered_stages = self.get_order()
-        all_finished = True
+        stages = [(name, self.stages[name]) for name in ordered_stages if name in self.stages]
 
-        # Check each stage and manage accepting state
-        for stage_name in ordered_stages:
-            stage = self.stages.get(stage_name)
-            if not stage:
-                continue
+        # Latching stop_accepting() requires the WHOLE DAG to be coherently
+        # drained in the same pass. A per-stage check alone can observe a
+        # transient empty queue plus a zero active_workers window and latch
+        # stop_accepting() permanently while upstream work is still in flight;
+        # every later put_task into that stage is then discarded. When the DAG
+        # is fully quiescent the latch is safe, and the dependency-ordered loop
+        # below propagates it to all stages in this single pass.
+        quiescent = all(stage.is_finished() for _, stage in stages)
 
-            # Stop accepting if stage can finish
-            if stage.accepting and self._can_stage_stop_accepting(stage_name):
-                stage.stop_accepting()
-                logger.info(f"[{stage_name}] stopped accepting new tasks")
+        if quiescent:
+            for stage_name, stage in stages:
+                if stage.accepting and self._can_stage_stop_accepting(stage_name):
+                    stage.stop_accepting()
+                    logger.info(f"[{stage_name}] stopped accepting new tasks")
 
-            # Check if stage is finished
-            if not stage.is_finished():
-                all_finished = False
-
-        return all_finished
+        return all(stage.is_finished() for _, stage in stages)
 
     def get_all_stats(self) -> PipelineStatus:
         """Get statistics for all stages"""

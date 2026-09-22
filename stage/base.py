@@ -226,7 +226,16 @@ class BasePipelineStage(ABC, WorkerManageable):
     def put_task(self, task: ProviderTask) -> bool:
         """Add task to queue with deduplication check"""
         if not self.accepting:
-            logger.warning(f"[{self.name}] not accepting tasks, discard: {task}")
+            # A discard here loses the task for good (callers like
+            # Pipeline._handle_stage_output ignore the return value), so it is
+            # surfaced as an error, not a warning. Log the task ID only: the
+            # dataclass repr embeds Service(key='<raw>') and the global
+            # RedactionFilter misses prefix-less key formats (SerpApi 64-hex
+            # has no entry on purpose), so a flood-time discard would
+            # otherwise write live keys into ERROR logs.
+            logger.error(f"[{self.name}] not accepting tasks, discard: {getattr(task, 'task_id', '?')}")
+            with self.stats_lock:
+                self.total_errors += 1
             return False
 
         # Generate task ID for deduplication
@@ -257,7 +266,11 @@ class BasePipelineStage(ABC, WorkerManageable):
 
             return True
         except queue.Full:
-            logger.warning(f"[{self.name}] queue is full")
+            # Same as the not-accepting branch: the task is dropped for good.
+            # Task ID only — never the repr, which would embed raw keys.
+            logger.error(f"[{self.name}] queue is full, task discarded: {getattr(task, 'task_id', '?')}")
+            with self.stats_lock:
+                self.total_errors += 1
             return False
 
     def is_finished(self) -> bool:
@@ -294,27 +307,18 @@ class BasePipelineStage(ABC, WorkerManageable):
         return len(self.zombie_threads)
 
     def get_pending_tasks(self) -> List[ProviderTask]:
-        """Get all pending tasks (for persistence)"""
-        tasks = []
-        temp_tasks = []
+        """Get all pending tasks (for persistence)
 
-        # Extract all tasks without blocking
-        while not self.queue.empty():
-            try:
-                task = self.queue.get_nowait()
-                tasks.append(task)
-                temp_tasks.append(task)
-            except queue.Empty:
-                break
-
-        # Put tasks back
-        for task in temp_tasks:
-            try:
-                self.queue.put_nowait(task)
-            except queue.Full:
-                logger.warning(f"[{self.name}] lost task during persistence: {task.task_id}")
-
-        return tasks
+        Snapshots the queue under its internal mutex instead of draining it
+        with get_nowait() and re-putting with put_nowait(). The old drain
+        momentarily freed slots (letting a concurrent producer put into the
+        queue) and then overflowed on re-put with queue.Full, silently
+        DROPPING tasks; it also made a live queue look momentarily empty so
+        Pipeline.is_finished() could latch stop_accepting(). A mutex-held
+        snapshot never mutates the queue, so neither window exists.
+        """
+        with self.queue.mutex:
+            return list(self.queue.queue)
 
     def is_busy(self) -> bool:
         """Check if stage is currently processing tasks"""
