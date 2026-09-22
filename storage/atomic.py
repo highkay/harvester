@@ -140,9 +140,16 @@ class AtomicFileWriter:
             raise
 
     @staticmethod
-    @handle_exceptions(default_result=None, log_level="error")
+    @handle_exceptions(default_result=None, log_level="error", reraise=True)
     def append_atomic(filepath: str, lines: List[str]) -> None:
-        """Append lines to file atomically with fsync and resource management"""
+        """Append lines to file atomically with fsync and resource management.
+
+        Raises:
+            OSError: propagated to the caller (mirrors write_atomic) so the
+                write path can re-queue the batch. Swallowing it here used to
+                turn a full disk / permission error / AV lock into a reported
+                success and silently lost the batch.
+        """
         directory = os.path.dirname(filepath)
         os.makedirs(directory, exist_ok=True)
 

@@ -4,6 +4,7 @@ Snapshot manager for building pretty JSON from NDJSON shards.
 
 import json
 import os
+import threading
 from typing import List
 
 from tools.logger import get_logger, log_aggregated_error
@@ -25,7 +26,13 @@ class SnapshotManager:
 
         Uses streaming JSON array output to avoid loading all records into memory.
         If sidecar indexes exist, use them to order and quickly estimate content.
+        The snapshot is written to a per-builder temp file and then renamed over
+        the target, so concurrent builders cannot corrupt each other's output.
+
         Returns: number of records written
+
+        Raises:
+            Exception: re-raised after cleaning up the temp file.
         """
         # First, try to use sidecar indexes to get a deterministic order of shards
         shards: List[str] = []
@@ -50,8 +57,11 @@ class SnapshotManager:
         indexed.sort(key=lambda t: (_ts(t[1], "first_ts"), _ts(t[1], "last_ts")))
         ordered = [fp for fp, _ in indexed] + sorted(shards)
 
-        # Stream write JSON array to avoid memory pressure
-        temp_path = self.snapshot_path + ".tmp"
+        # Stream write JSON array to avoid memory pressure.
+        # Unique per builder: two concurrent builds of the same snapshot (the
+        # periodic thread racing the shutdown path, or two processes sharing the
+        # directory) must never write - and rename away - one shared temp file.
+        temp_path = f"{self.snapshot_path}.{os.getpid()}.{threading.get_ident()}.tmp"
         record_count = 0
 
         try:

@@ -23,6 +23,13 @@ from .snapshot import SnapshotManager as BaseSnapshotManager
 
 logger = get_logger("storage")
 
+# Shutdown budget for the periodic snapshot thread, and the shared slice size
+# both this module and storage.persistence spend their join budget in: joining
+# in slices keeps a stuck thread reportable instead of blocking the whole
+# budget in one uninterruptible wait.
+SNAPSHOT_JOIN_TIMEOUT_SEC = 5.0
+_JOIN_SLICE_SEC = 0.5
+
 
 class PersistenceStrategy(ABC):
     """Abstract base class for persistence strategies.
@@ -45,6 +52,10 @@ class PersistenceStrategy(ABC):
     @abstractmethod
     def write_data(self, result_type: str, items: List[Any], stats: PersistenceMetrics) -> None:
         """Write data items to storage.
+
+        Implementations must raise on failure (after logging) rather than
+        swallow it: the caller re-queues the batch on exception, and a silent
+        return would be reported as a successful save.
 
         Args:
             result_type: Type of result being stored
@@ -82,6 +93,11 @@ class SimpleFileStrategy(PersistenceStrategy):
             result_type: Type of result being stored
             items: List of items to store
             stats: Metrics object to update
+
+        Raises:
+            Exception: re-raised after logging so the caller can re-queue the
+                batch. Swallowing it here reported a failed write as success
+                and the items (already removed from the buffer) were lost.
         """
         if not items:
             return
@@ -107,6 +123,7 @@ class SimpleFileStrategy(PersistenceStrategy):
 
         except Exception as e:
             logger.error(f"Failed to write {result_type} to simple file: {e}")
+            raise
 
     def supports_snapshots(self) -> bool:
         """Simple files do not support snapshots."""
@@ -142,6 +159,10 @@ class ShardStrategy(PersistenceStrategy):
             result_type: Type of result being stored
             items: List of items to store
             stats: Metrics object to update
+
+        Raises:
+            Exception: re-raised after logging so the caller can re-queue the
+                batch instead of reporting a failed write as a successful save.
         """
         if not items:
             return
@@ -169,6 +190,7 @@ class ShardStrategy(PersistenceStrategy):
 
         except Exception as e:
             logger.error(f"Failed to write {result_type} to shard: {e}")
+            raise
 
     def supports_snapshots(self) -> bool:
         """Shard files support snapshots."""
@@ -202,6 +224,11 @@ class SnapshotManager:
 
     Manages the lifecycle of snapshot generation including periodic
     background building and proper cleanup.
+
+    Locking contract: ``_lock`` guards thread state and statistics only, and is
+    never held while joining a thread or building a snapshot. ``_build_lock``
+    serialises builds so a periodic build and a shutdown build can never
+    interleave into the same snapshot file.
     """
 
     def __init__(self, directory: str, result_types: List[str], provider_name: str):
@@ -220,6 +247,8 @@ class SnapshotManager:
         self._periodic_thread: Optional[threading.Thread] = None
         self._running = False
         self._lock = threading.Lock()
+        self._build_lock = threading.Lock()
+        self._stop_event = threading.Event()
 
         # Statistics
         self.stats = {"last_snapshot": 0.0, "snapshot_count": 0, "total_snapshot_time": 0.0, "snapshot_operations": 0}
@@ -243,9 +272,13 @@ class SnapshotManager:
         snapshot_path = os.path.join(snapshots_dir, f"{result_type}.json")
 
         try:
-            manager = BaseSnapshotManager(shard_root, snapshot_path)
             start_time = time.time()
-            count = manager.build_snapshot()
+            # Serialised: the periodic thread and the shutdown path build the
+            # same result types, and two concurrent builders would race on the
+            # snapshot's temp file.
+            with self._build_lock:
+                manager = BaseSnapshotManager(shard_root, snapshot_path)
+                count = manager.build_snapshot()
             duration = time.time() - start_time
 
             # Update statistics
@@ -289,6 +322,8 @@ class SnapshotManager:
                 return
 
             self._running = True
+            # Cleared so a restart after stop() is not aborted by the old signal
+            self._stop_event.clear()
             self._periodic_thread = threading.Thread(
                 target=self._periodic_loop, args=(interval_sec,), daemon=True, name=f"snapshot-{self.provider_name}"
             )
@@ -296,21 +331,37 @@ class SnapshotManager:
             logger.info(f"Started periodic snapshots for {self.provider_name} (interval: {interval_sec}s)")
 
     def stop(self) -> None:
-        """Stop periodic snapshot building and cleanup."""
+        """Stop periodic snapshot building and cleanup.
+
+        The thread reference is taken under ``_lock`` but joined *outside* it:
+        ``build_snapshot()`` needs ``_lock`` for its statistics update, so
+        holding the lock across the join used to deadlock against an in-flight
+        periodic build and always burned the full join timeout.
+        """
         with self._lock:
-            if not self._running:
-                return
-
+            was_running = self._running
+            thread = self._periodic_thread
             self._running = False
-
-            if self._periodic_thread and self._periodic_thread.is_alive():
-                # Wait for thread to finish
-                self._periodic_thread.join(timeout=5.0)
-                if self._periodic_thread.is_alive():
-                    logger.warning(f"Snapshot thread for {self.provider_name} did not stop gracefully")
-
             self._periodic_thread = None
-            logger.info(f"Stopped periodic snapshots for {self.provider_name}")
+            self._stop_event.set()
+
+        if not was_running:
+            return
+
+        # Joined outside _lock, in bounded slices so a stuck thread is reported
+        # instead of blocking shutdown in one uninterruptible wait.
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            deadline = time.monotonic() + SNAPSHOT_JOIN_TIMEOUT_SEC
+            while thread.is_alive():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                thread.join(timeout=min(remaining, _JOIN_SLICE_SEC))
+
+            if thread.is_alive():
+                logger.warning(f"Snapshot thread for {self.provider_name} did not stop gracefully")
+
+        logger.info(f"Stopped periodic snapshots for {self.provider_name}")
 
     def get_stats(self) -> Dict[str, Any]:
         """Get snapshot statistics.
@@ -324,15 +375,17 @@ class SnapshotManager:
     def _periodic_loop(self, interval_sec: int) -> None:
         """Periodic snapshot building loop.
 
+        Sleeps on the stop event instead of ``time.sleep`` so ``stop()`` returns
+        immediately rather than waiting out a whole (up to 300s) interval.
+
         Args:
             interval_sec: Interval between snapshots
         """
-        while self._running:
-            try:
-                time.sleep(interval_sec)
-                if not self._running:
-                    break
+        while not self._stop_event.wait(interval_sec):
+            if not self._running:
+                break
 
+            try:
                 self.build_all_snapshots()
 
             except Exception as e:

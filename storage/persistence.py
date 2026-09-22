@@ -13,6 +13,7 @@ import tempfile
 import threading
 import time
 from collections import deque
+from collections.abc import Hashable
 from typing import Any, Dict, List, Optional, Union
 
 from constant.runtime import RESULT_MAPPINGS
@@ -23,18 +24,50 @@ from state.models import PersistenceMetrics
 from tools.logger import get_logger
 
 from .atomic import AtomicFileWriter
-from .strategies import ShardStrategy, SimpleFileStrategy, SnapshotManager
+from .strategies import _JOIN_SLICE_SEC, ShardStrategy, SimpleFileStrategy, SnapshotManager
 
 logger = get_logger("storage")
+
+# Re-queue bound for a batch whose write failed: enough headroom to ride out a
+# transient disk/AV problem, small enough that a permanently full disk cannot
+# exhaust RAM on a box that already runs 6-8 concurrent scans.
+_REQUEUE_CAP_MULTIPLIER = 100
+_REQUEUE_CAP_FLOOR = 1000
+
+# Minimum gap between two flush attempts of the same result type after a
+# failure, so a broken disk cannot become a retry/error-log storm on the hot
+# add path. flush_all() forces its way past it.
+_FLUSH_RETRY_COOLDOWN_SEC = 30.0
 
 
 class ResultBuffer:
     """Optimized buffer for batching results before writing to files"""
 
-    def __init__(self, result_type: str, batch_size: int = 100, flush_interval: float = 30.0):
+    def __init__(
+        self,
+        result_type: str,
+        batch_size: int = 100,
+        flush_interval: float = 30.0,
+        max_pending: int = 0,
+    ):
+        """Initialize the buffer.
+
+        Args:
+            result_type: Result type this buffer collects
+            batch_size: Number of items that triggers an immediate flush
+            flush_interval: Age (seconds) after which a partial batch is due
+            max_pending: Upper bound for items held after a failed write; ``0``
+                derives it from ``batch_size``. This is the only knob of the
+                four that does not describe the normal path - it exists purely
+                so a re-queued batch cannot grow without limit while a disk
+                stays broken.
+        """
         self.result_type = result_type
         self.batch_size = batch_size
         self.flush_interval = flush_interval
+        self.max_pending = (
+            max_pending if max_pending > 0 else max(_REQUEUE_CAP_FLOOR, batch_size * _REQUEUE_CAP_MULTIPLIER)
+        )
 
         self.buffer: deque = deque()
         self.last_flush = time.time()
@@ -61,6 +94,51 @@ class ResultBuffer:
             self.last_flush = time.time()
             self._total_flushes += 1
             return items
+
+    def requeue(self, items: List[Any]) -> int:
+        """Put a failed batch back so a later attempt can still write it.
+
+        ``flush()`` clears the buffer before the write happens, so on failure
+        these items exist nowhere else - dropping them would be silent data
+        loss. The batch is re-inserted at the head (items buffered while the
+        write was in flight are newer), bounded by ``max_pending``, and
+        hashable duplicates of items already buffered are merged.
+
+        Args:
+            items: Batch that could not be written, oldest first.
+
+        Returns:
+            Number of items lost because the ``max_pending`` bound was full.
+        """
+        with self.lock:
+            room = self.max_pending - len(self.buffer)
+            retained = items[:room] if room > 0 else []
+            merged = 0
+
+            if retained:
+                buffered = {item for item in self.buffer if isinstance(item, Hashable)}
+                restored: deque = deque()
+                for item in retained:
+                    # Unhashable records (e.g. Service objects) cannot be
+                    # compared cheaply, so they are always kept.
+                    if not isinstance(item, Hashable):
+                        restored.append(item)
+                        continue
+                    # Compare by VALUE, not by hash digests: distinct items
+                    # sharing a hash would be silently merged.
+                    if item in buffered:
+                        merged += 1
+                        continue
+                    buffered.add(item)
+                    restored.append(item)
+
+                # extendleft in reverse keeps the failed batch ahead, in order
+                self.buffer.extendleft(reversed(restored))
+
+            if merged:
+                logger.debug(f"[persist] re-queued {self.result_type}, merged {merged} already-buffered item(s)")
+
+            return len(items) - len(retained)
 
     def get_stats(self) -> Dict[str, Union[str, int, float]]:
         """Get buffer statistics"""
@@ -139,11 +217,18 @@ class ResultManager:
         # Statistics
         self.stats = PersistenceMetrics()
 
+        # Durability accounting: how many flush attempts failed and how many
+        # items were lost to a re-queue bound while a write stayed broken.
+        self.failed_flushes = 0
+        self.dropped_items = 0
+        self._retry_after: Dict[str, float] = {}
+
         # Thread safety
         self.lock = threading.Lock()
 
         # Start periodic flush thread
         self.running = True
+        self._stop_event = threading.Event()
         self.flush_thread = threading.Thread(target=self._periodic_flush, daemon=True)
         self.flush_thread.start()
 
@@ -220,7 +305,9 @@ class ResultManager:
     def flush_all(self):
         """Flush all buffers immediately"""
         for result_type in self.buffers.keys():
-            self._flush_buffer(result_type)
+            # Forced: this is the last write attempt of a run, so it must not be
+            # skipped by the failure cooldown armed by an earlier broken write.
+            self._flush_buffer(result_type, force=True)
 
         # Save models data
         self._save_models()
@@ -532,6 +619,9 @@ class ResultManager:
     def stop(self):
         """Stop the result manager and flush all data, then build snapshots."""
         self.running = False
+        # Wake the periodic flush thread at once: it must not write again after
+        # the flush_all() and strategy cleanup below have run.
+        self._stop_event.set()
 
         # Stop periodic snapshot thread first to avoid concurrent builds
         try:
@@ -539,9 +629,22 @@ class ResultManager:
         except Exception as e:
             logger.error(f"[persist] failed to stop periodic snapshot for {self.name}: {e}")
 
-        # Wait for flush thread to complete
-        if self.flush_thread.is_alive():
-            self.flush_thread.join(timeout=self.shutdown_timeout)
+        # Wait for flush thread to complete, spending the shutdown budget in
+        # bounded slices and never joining the thread from within itself.
+        thread = self.flush_thread
+        if thread.is_alive() and thread is not threading.current_thread():
+            deadline = time.monotonic() + self.shutdown_timeout
+            while thread.is_alive():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                thread.join(timeout=min(remaining, _JOIN_SLICE_SEC))
+
+            if thread.is_alive():
+                logger.warning(
+                    f"[persist] flush thread for {self.name} still running after "
+                    f"{self.shutdown_timeout:.0f}s shutdown budget"
+                )
 
         # Flush all remaining data
         self.flush_all()
@@ -573,24 +676,50 @@ class ResultManager:
         self.snapshot_manager.stop()
 
     def _periodic_flush(self):
-        """Periodic flush thread"""
-        while self.running:
-            try:
-                time.sleep(self.save_interval)
+        """Periodic flush thread.
 
-                # Check each buffer for time-based flush
+        Sleeps on the stop event instead of ``time.sleep`` so ``stop()`` wakes it
+        immediately, and re-checks ``running`` once it wakes: the stop path owns
+        the final ``flush_all()`` and the strategy cleanup, so this thread must
+        never write again after shutdown began.
+        """
+        while not self._stop_event.wait(self.save_interval):
+            if not self.running:
+                break
+
+            try:
+                # Check each buffer for time-based flush; should_flush() reads
+                # last_flush under the buffer's own lock (and is fed the same
+                # save_interval the old inline comparison used).
                 for result_type, buffer in self.buffers.items():
-                    if buffer.size() > 0 and time.time() - buffer.last_flush >= self.save_interval:
+                    if buffer.size() > 0 and buffer.should_flush():
                         self._flush_buffer(result_type)
 
             except Exception as e:
                 logger.error(f"[persist] error in periodic flush for {self.name}: {e}")
 
-    def _flush_buffer(self, result_type: str):
-        """Flush a specific buffer using persistence strategy"""
+    def _flush_buffer(self, result_type: str, force: bool = False):
+        """Flush a specific buffer using persistence strategy.
+
+        A failed write is never silent: ``flush()`` has already emptied the
+        buffer, so the batch is re-queued for a later attempt, ``stats.last_save``
+        only advances on a successful write, and the failure is counted and
+        logged at ERROR. Attempts of the same result type are spaced by
+        ``_FLUSH_RETRY_COOLDOWN_SEC`` so a permanently broken disk cannot turn
+        the hot add path into a retry/log storm.
+
+        Args:
+            result_type: Result type whose buffer should be written
+            force: Ignore the failure cooldown (shutdown path)
+        """
         buffer = self.buffers.get(result_type)
         if not buffer:
             return
+
+        if not force:
+            with self.lock:
+                if time.monotonic() < self._retry_after.get(result_type, 0.0):
+                    return
 
         items = buffer.flush()
         if not items:
@@ -600,11 +729,23 @@ class ResultManager:
             # Delegate to persistence strategy
             self.strategy.write_data(result_type, items, self.stats)
 
-            with self.lock:
-                self.stats.last_save = time.time()
-
         except Exception as e:
-            logger.error(f"[persist] failed to save {result_type} for {self.name}: {e}")
+            lost = buffer.requeue(items)
+            with self.lock:
+                self.failed_flushes += 1
+                self.dropped_items += lost
+                self._retry_after[result_type] = time.monotonic() + _FLUSH_RETRY_COOLDOWN_SEC
+                failures = self.failed_flushes
+
+            logger.error(
+                f"[persist] failed to save {result_type} for {self.name}: {e} "
+                f"(re-queued {len(items) - lost}, lost {lost}, failed flushes: {failures})"
+            )
+            return
+
+        with self.lock:
+            self._retry_after.pop(result_type, None)
+            self.stats.last_save = time.time()
 
     def _save_models(self):
         """Save models data to JSON file"""
