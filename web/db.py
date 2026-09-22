@@ -158,19 +158,64 @@ async def init_db(db_path: str | None = None) -> None:
         await db.close()
 
 
+def _count_valid_keys_for_provider(provider_name: str) -> int:
+    """Count non-empty lines in ``providers/{provider_name}/valid-keys.txt``.
+
+    Scoped strictly to this run's own provider directory — reconciliation
+    must never report another provider's count. Missing or unreadable file
+    → 0. Workspace resolution mirrors :func:`resolve_db_path`
+    (``HARVESTER_WORKSPACE``, default ``./data``).
+
+    Caveat: if the process died before the pipeline backed the old files
+    away, the count may include a previous run's leftovers — best effort
+    without touching provider directories, which are out of scope here.
+    """
+    workspace = Path(os.environ.get("HARVESTER_WORKSPACE", _DEFAULT_WORKSPACE))
+    keys_path = workspace / "providers" / provider_name / "valid-keys.txt"
+    try:
+        return sum(
+            1
+            for line in keys_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        )
+    except (OSError, UnicodeDecodeError):
+        return 0
+
+
 async def reconcile_running_runs(db_path: str | None = None) -> int:
-    """Mark rows left in 'running' by a dead process as failed. Returns rowcount."""
+    """Mark rows left in 'running' by a dead process as failed. Returns rowcount.
+
+    Each reconciled row also records:
+
+    - ``duration_seconds`` — wall clock from the row's own ``started_at``
+      to now, computed in SQL via ``julianday`` (the dead process's
+      Python-side start time is lost with it);
+    - ``valid_keys_found`` — counted from THIS row's provider directory
+      only (see :func:`_count_valid_keys_for_provider`).
+    """
     path = db_path if db_path is not None else resolve_db_path()
     db = await get_db(path)
     try:
         cursor = await db.execute(
-            "UPDATE run_records SET status='failed', "
-            "finished_at=datetime('now'), "
-            "error_message='interrupted by service restart' "
-            "WHERE status='running'"
+            "SELECT id, provider_name FROM run_records WHERE status='running'"
         )
+        rows = list(await cursor.fetchall())
+        for row in rows:
+            await db.execute(
+                "UPDATE run_records SET status='failed', "
+                "finished_at=datetime('now'), "
+                "duration_seconds=CAST((julianday('now') "
+                "- julianday(started_at)) * 86400 AS REAL), "
+                "valid_keys_found=?, "
+                "error_message='interrupted by service restart' "
+                "WHERE id=? AND status='running'",
+                (
+                    _count_valid_keys_for_provider(row["provider_name"]),
+                    row["id"],
+                ),
+            )
         await db.commit()
-        return cursor.rowcount
+        return len(rows)
     finally:
         await db.close()
 

@@ -25,6 +25,7 @@ from typing import Any
 import yaml
 
 from tools.logger import get_logger
+from tools.patterns import redact_api_keys_in_text
 
 from .crypto import _get_crypto, decrypt_str
 from .models import mask_token
@@ -131,16 +132,28 @@ class PipelineRunner:
 
             run_id = str(uuid.uuid4())
 
-            # Create initial DB record
-            temp_yaml_path = self._temp_yaml_path(provider_name, run_id)
-            await self._insert_run_record(
-                run_id=run_id,
-                provider_name=provider_name,
-                config_file=str(temp_yaml_path),
-                status="running",
-            )
+            # Register the cancel event BEFORE the row insert and thread
+            # start. cancel_run looks events up by run_id, and the scan
+            # thread honours a pre-set event before starting the pipeline;
+            # creating it only inside _execute used to drop cancels that
+            # arrived between the row insert and the thread body.
+            self._cancel_events[run_id] = threading.Event()
 
-            self._running[provider_name] = run_id
+            try:
+                # Create initial DB record
+                temp_yaml_path = self._temp_yaml_path(provider_name, run_id)
+                await self._insert_run_record(
+                    run_id=run_id,
+                    provider_name=provider_name,
+                    config_file=str(temp_yaml_path),
+                    status="running",
+                )
+
+                self._running[provider_name] = run_id
+            except BaseException:
+                # No thread will run for this run_id — don't leak the event.
+                self._cancel_events.pop(run_id, None)
+                raise
 
         # --- Submit to background thread ---
         t = threading.Thread(
@@ -187,10 +200,25 @@ class PipelineRunner:
         return rows[0] if rows else None
 
     async def cancel_run(self, run_id: str) -> bool:
-        """Cancel a running scan by *run_id*.
+        """Request cancellation of a running scan by *run_id*.
 
-        Returns True if the cancel event was set; False if the run was not
-        in 'running' state.
+        Cancellation is COOPERATIVE and best-effort: the scan thread checks
+        the cancel event only BEFORE starting the pipeline, so a mid-run
+        cancel CANNOT stop ``HarvesterApp.run()`` — the thread keeps
+        executing until the pipeline exits on its own.
+
+        Therefore this method deliberately does NOT release the provider
+        slot in ``self._running``: the scan thread's ``finally`` block is
+        the single owner of the guard release. Freeing the slot here would
+        let a second scan for the same provider start while the first is
+        still alive, with both writing the same ``providers/{task}/``
+        result files.
+
+        The status write is conditional on the row still being 'running'
+        so it cannot race a terminal write from the scan thread.
+
+        Returns True if the row was flipped to 'cancelled'; False if the
+        run was not (or no longer was) in 'running' state.
         """
         run = await self.get_run(run_id)
         if run is None:
@@ -198,26 +226,28 @@ class PipelineRunner:
         if run["status"] != "running":
             return False
 
-        # Set the cancel event if it exists
+        # Set the cancel event if it exists (run_scan registers it before
+        # the row insert, so an early cancel is never dropped).
         cancel_event = self._cancel_events.get(run_id)
         if cancel_event is not None:
             cancel_event.set()
 
-        provider_name = run["provider_name"]
-        with self._provider_lock(provider_name):
-            self._running.pop(provider_name, None)
-
         import aiosqlite
 
         async with aiosqlite.connect(self._db_path) as db:
-            await db.execute(
+            cursor = await db.execute(
                 """UPDATE run_records
                    SET status='cancelled',
                        finished_at=datetime('now')
-                   WHERE id=?""",
+                   WHERE id=? AND status='running'""",
                 (run_id,),
             )
             await db.commit()
+
+        if cursor.rowcount == 0:
+            # The row left 'running' between the read and the write (the
+            # scan thread finished/failed first) — nothing was cancelled.
+            return False
 
         logger.info(f"Run cancelled: run_id={run_id}")
         return True
@@ -237,10 +267,20 @@ class PipelineRunner:
         This method is **blocking** and must run in a background thread.
         """
         temp_yaml_path: Path | None = None
-        cancel_event = threading.Event()
-        self._cancel_events[run_id] = cancel_event
+        # run_scan pre-registers the event before the row insert/thread
+        # start so an early cancel is never dropped; setdefault keeps
+        # direct _execute calls (tests) working.
+        cancel_event = self._cancel_events.setdefault(
+            run_id, threading.Event()
+        )
 
         try:
+            # Honour a cancel that landed between run_scan registering this
+            # event and the thread body starting — the row already reads
+            # 'cancelled', and the conditional failed-write below is a no-op.
+            if cancel_event.is_set():
+                raise RuntimeError("Run cancelled before start")
+
             # 1. Read enabled API tokens from DB
             tokens = self._get_enabled_api_tokens()
             if not tokens:
@@ -307,15 +347,18 @@ class PipelineRunner:
 
             # 4. Collect stats
             duration = round(time.time() - start_time, 2)
-            valid_keys = self._count_valid_keys(app)
+            valid_keys = self._count_valid_keys(app, task_names)
 
-            # 5. Update DB — completed
+            # 5. Update DB — completed. Conditional on the row still being
+            # 'running': a cancel_run that landed mid-scan has already
+            # written 'cancelled', and this write must not flip it back.
             self._update_run_sync(
                 run_id=run_id,
                 status="completed",
                 finished_at=True,
                 duration_seconds=duration,
                 valid_keys_found=valid_keys,
+                only_if_running=True,
             )
             logger.info(
                 f"Scan completed: provider={provider_name} "
@@ -355,16 +398,32 @@ class PipelineRunner:
             self._push_completed_tasks(provider_name, run_id, temp_yaml_path)
 
         except Exception as exc:
-            error_msg = f"{type(exc).__name__}: {exc}"
+            # The same text is surfaced in the runs UI and persisted to
+            # run_records.error_message. Exception strings can embed tokens
+            # (e.g. a URL with an api_key query string from a failed request),
+            # and the DB write bypasses the logger's RedactionFilter — so
+            # redact before the message leaves this branch.
+            error_msg = redact_api_keys_in_text(f"{type(exc).__name__}: {exc}")
             logger.error(
                 f"Scan failed: provider={provider_name} run_id={run_id} "
                 f"error={error_msg}"
+            )
+            # Failed runs still get their wall-clock duration (started_at →
+            # now, computed in SQL — the Python-side start_time may never
+            # have been set) and a valid-key count scoped to THIS run's own
+            # tasks. Conditional on 'running' so a 'cancelled' row written
+            # by cancel_run is never flipped to 'failed'.
+            failed_valid_keys = self._count_valid_keys_for_failed_run(
+                provider_name, temp_yaml_path
             )
             self._update_run_sync(
                 run_id=run_id,
                 status="failed",
                 finished_at=True,
+                valid_keys_found=failed_valid_keys,
                 error_message=error_msg,
+                duration_from_started_at=True,
+                only_if_running=True,
             )
 
         finally:
@@ -385,9 +444,14 @@ class PipelineRunner:
                 except OSError:
                     pass
 
-            # Remove from running dict
+            # Release the provider guard — only if the slot still belongs
+            # to THIS run. cancel_run deliberately does NOT free the guard
+            # (a mid-run cancel cannot stop this thread; see cancel_run),
+            # and popping a foreign run_id's entry here would hand out a
+            # slot that a different scan owns (cascading guard loss).
             with self._provider_lock(provider_name):
-                self._running.pop(provider_name, None)
+                if self._running.get(provider_name) == run_id:
+                    self._running.pop(provider_name, None)
 
             # Remove cancel event
             self._cancel_events.pop(run_id, None)
@@ -796,11 +860,14 @@ class PipelineRunner:
                 )
         return tokens
 
-    def _count_valid_keys(self, app: Any) -> int:
+    def _count_valid_keys(self, app: Any, task_names: list[str]) -> int:
         """Extract valid key count from a completed HarvesterApp instance.
 
-        Tries ``task_manager.stats().resource.valid`` first;
-        falls back to reading ``valid-keys.txt``.
+        Tries ``task_manager.stats().resource.valid`` first; falls back to
+        reading ``valid-keys.txt`` — but ONLY for the given *task_names* of
+        this run. The fallback never iterates foreign provider directories:
+        reading the first ``valid-keys.txt`` found under ``providers/`` made
+        a run report another provider's count.
         """
         try:
             if app.task_manager is not None:
@@ -812,35 +879,47 @@ class PipelineRunner:
         except Exception:
             pass
 
-        # Fallback: read valid-keys.txt from workspace
+        # Fallback: read this run's own task dirs only. A multi-task config
+        # (e.g. mimo-cn + mimo-sg) sums across its tasks; unrelated provider
+        # dirs and backup-* folders are never touched.
         try:
             workspace = app.config.global_config.workspace if app.config else "./data"
-            provider_dir = (
-                Path(workspace) / "providers"
-            )
-            if provider_dir.exists():
-                for child in provider_dir.iterdir():
-                    vk = child / "valid-keys.txt"
-                    if vk.exists():
-                        text = vk.read_text(encoding="utf-8")
-                        return sum(
-                            1 for line in text.splitlines() if line.strip()
-                        )
+            snapshot = self._snapshot_valid_keys(task_names, Path(workspace))
+            return sum(len(keys) for keys in snapshot.values())
         except Exception:
             pass
 
         return 0
 
+    def _count_valid_keys_for_failed_run(
+        self, provider_name: str, temp_yaml_path: Path | None
+    ) -> int:
+        """Best-effort valid-key count for a FAILED run, scoped to its tasks.
+
+        Uses the task names from the run's generated config (falling back to
+        *provider_name*), so a failed run reports at worst a stale count for
+        its own provider directory and never another provider's numbers.
+        Reads via :meth:`_snapshot_valid_keys`, which is non-raising.
+        """
+        task_names = (
+            self._task_names_from_config(temp_yaml_path)
+            if temp_yaml_path is not None
+            else []
+        ) or [provider_name]
+        snapshot = self._snapshot_valid_keys(task_names)
+        return sum(len(keys) for keys in snapshot.values())
+
     def _snapshot_valid_keys(
-        self, task_names: list[str]
+        self, task_names: list[str], workspace: Path | None = None
     ) -> dict[str, set[str]]:
         """Read each task's ``valid-keys.txt`` into a set of non-empty lines.
 
-        Path: ``{workspace}/providers/{task_name}/valid-keys.txt``. Missing
-        directory/file → empty set. Only the named tasks are read, so
-        ``backup-*`` and stray folders under providers are never touched.
+        Path: ``{workspace}/providers/{task_name}/valid-keys.txt``; the
+        workspace defaults to the runner's own. Missing directory/file →
+        empty set. Only the named tasks are read, so ``backup-*`` and stray
+        folders under providers are never touched.
         """
-        providers_dir = Path(self._workspace) / "providers"
+        providers_dir = Path(workspace or self._workspace) / "providers"
         snapshots: dict[str, set[str]] = {}
         for name in task_names:
             keys_path = providers_dir / name / "valid-keys.txt"
@@ -927,8 +1006,20 @@ class PipelineRunner:
         duration_seconds: float | None = None,
         valid_keys_found: int | None = None,
         error_message: str | None = None,
+        duration_from_started_at: bool = False,
+        only_if_running: bool = False,
     ) -> None:
-        """Update a run record from the scan thread (synchronous sqlite3)."""
+        """Update a run record from the scan thread (synchronous sqlite3).
+
+        ``duration_from_started_at`` computes the wall-clock duration in SQL
+        (``started_at`` → now) — used by the failure path, where the
+        Python-side start time may never have been recorded and the row's
+        own ``started_at`` is the authoritative start.
+
+        ``only_if_running`` restricts the UPDATE to rows still in 'running'
+        state so a terminal write from the scan thread can never overwrite
+        a 'cancelled' (or otherwise terminal) row.
+        """
         conn = sqlite3.connect(self._db_path)
         try:
             parts = ["status = ?"]
@@ -939,16 +1030,26 @@ class PipelineRunner:
             if duration_seconds is not None:
                 parts.append("duration_seconds = ?")
                 params.append(duration_seconds)
+            if duration_from_started_at:
+                parts.append(
+                    "duration_seconds = CAST((julianday('now') "
+                    "- julianday(started_at)) * 86400 AS REAL)"
+                )
             if valid_keys_found is not None:
                 parts.append("valid_keys_found = ?")
                 params.append(valid_keys_found)
             if error_message is not None:
                 parts.append("error_message = ?")
-                params.append(error_message)
+                # Redact at the DB boundary too: error_message strings can
+                # embed tokens and run_records is surfaced in the runs UI.
+                params.append(redact_api_keys_in_text(error_message))
 
+            where = "WHERE id = ?"
+            if only_if_running:
+                where += " AND status = 'running'"
             params.append(run_id)
             conn.execute(
-                f"UPDATE run_records SET {', '.join(parts)} WHERE id = ?",
+                f"UPDATE run_records SET {', '.join(parts)} {where}",
                 params,
             )
             conn.commit()
