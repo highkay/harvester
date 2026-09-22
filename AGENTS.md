@@ -456,6 +456,19 @@ update preserves intentional local changes (reverts, port/volume tweaks).
 - **`data/queue_state/*.json` is shared by every concurrent run** and gets
   overwritten in turn — never use its size as a per-run progress signal; read
   the per-run display tables from the container logs instead.
+- **Per-exit-IP throttling hits ANY provider, not just groq (tavily measured
+  2026-09-22)**: `api.tavily.com/usage` answered
+  `429 {"detail":{"error":"Your request has been blocked due to excessive
+  requests"}}` for **every** key once that exit's IP was throttled — measured:
+  exit `1080` blocked (429 for a valid key AND a dead key in the same probe),
+  exits `1090`/`1091` fine (valid key -> 200, dead key -> 401). Symptom is a
+  wait bucket that balloons (a run showed ~2374 wait of ~2400 checks) so the
+  pool looks "mostly dead" when it is mostly FALSE-wait; the earlier wait-pool
+  recovery then salvages ~47% as valid. Fix = per-provider override:
+  `HARVESTER_PROXY_TAVILY=socks5://192.168.1.18:1090,socks5://192.168.1.18:1091`
+  (docker-compose passes it through; takes effect on the next restart). Lesson:
+  when a provider's wait bucket explodes, A/B the three exits before blaming
+  the keys.
 - **gpt-load test-model mismatch → "keys cannot be verified" (measured
   2026-09-21)**: the `glm`/`zai` groups had `test_model: glm-5.3-flash`, but the
   harvested free-tier keys answer **429 code 1113 ("余额不足或无可用资源包")**

@@ -55,6 +55,10 @@ services:
       # NETWORK_ERROR, while socks5h:// resolves at the tunnel and works
       # (measured on fnos 2026-09-04: socks5=ConnectionError, socks5h=200).
       - HARVESTER_PROXY_AGNES_AI=${HARVESTER_PROXY_AGNES_AI:-socks5h://192.168.1.18:1080,socks5h://192.168.1.18:1090,socks5h://192.168.1.18:1091}
+      # Tavily override — the 1080 exit is IP-blocked by api.tavily.com (429
+      # "blocked due to excessive requests", measured 2026-09-22: the same key
+      # answers 200/401 correctly on 1090/1091). Empty = inherit HARVESTER_PROXY.
+      - HARVESTER_PROXY_TAVILY=${HARVESTER_PROXY_TAVILY:-}
       # --- Timezone ---
       - TZ=Asia/Shanghai
     healthcheck:
