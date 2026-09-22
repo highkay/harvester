@@ -475,6 +475,18 @@ update preserves intentional local changes (reverts, port/volume tweaks).
   (docker-compose passes it through; takes effect on the next restart). Lesson:
   when a provider's wait bucket explodes, A/B the three exits before blaming
   the keys.
+  **These per-exit blocks are TEMPORARY** (exit 1080 was 429-blocked at 10:30
+  and healthy again by 10:48 on 2026-09-22) **and bulk re-checking trips them**:
+  a wait-pool recovery probing at ~1-2 s/key got exit 1090 blocked after ~100
+  keys. Re-probe the exits (one request each) before pinning a provider to one,
+  and keep bulk re-checks at >=5-6 s/key for tavily.
+- **Tavily `/usage` 200 != usable (fixed 2026-09-22)**: `/usage` answers 200 for
+  ANY authentic key, including plan-exhausted ones (those answer 402 on real
+  `/search` calls), so exhausted keys were pooled as useless entries.
+  `provider/tavily.py::_judge_usage` now classifies
+  `account.plan_usage >= plan_limit` (unless paygo credits remain) or
+  `key.usage >= key.limit` as NO_QUOTA — never valid, never pushed
+  (`tests/test_tavily_provider.py`, 30 tests).
 - **gpt-load test-model mismatch → "keys cannot be verified" (measured
   2026-09-21)**: the `glm`/`zai` groups had `test_model: glm-5.3-flash`, but the
   harvested free-tier keys answer **429 code 1113 ("余额不足或无可用资源包")**
@@ -518,7 +530,13 @@ no-quota, everything else stays in wait), rewrite the result files (dedupe-union
 then **push immediately** — the next clean-start run resets the files, so
 recovered keys must not wait for the run cycle. Measured 2026-09-21: glm
 100 -> 5 wait (**+95 valid**), glm-ai 27 -> 4 (**+23**), tavily 2665 wait
-(mostly dead 401s, ~20% salvageable).
+(mostly dead 401s, ~20% salvageable). Caveats (tavily, 2026-09-22): keep the
+rate at >=5 s/key — faster probing trips the per-exit IP throttle (429 "blocked
+due to excessive requests") and the bucket then refills with FALSE-wait; and a
+resumable progress file must skip only TERMINAL buckets (valid/invalid) so its
+own wait entries are re-checked on the next pass. Recovered value is often
+smaller than it looks: of 1281 recovered tavily "valid" keys, 1059 were already
+in the proxy pool (only 222 were new).
 
 ## Tests & conventions
 
