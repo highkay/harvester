@@ -475,10 +475,12 @@ update preserves intentional local changes (reverts, port/volume tweaks).
   (docker-compose passes it through; takes effect on the next restart). Lesson:
   when a provider's wait bucket explodes, A/B the three exits before blaming
   the keys.
-  **These per-exit blocks are TEMPORARY** (exit 1080 was 429-blocked at 10:30
-  and healthy again by 10:48 on 2026-09-22) **and bulk re-checking trips them**:
-  a wait-pool recovery probing at ~1-2 s/key got exit 1090 blocked after ~100
-  keys. Re-probe the exits (one request each) before pinning a provider to one,
+  **These per-exit blocks are TEMPORARY and they ROTATE** (measured on
+  2026-09-22: exit 1080 blocked at 10:30 -> healthy by 10:48; exit 1091 blocked
+  by 11:00) **and bulk re-checking trips them**: a wait-pool recovery probing at
+  ~1-2 s/key got exit 1090 blocked after ~100 keys. Pinning a provider to a
+  fixed pair is therefore pointless — prefer inheriting the global trio (any
+  exit can be blocked at run start) or re-probe all exits right before pinning,
   and keep bulk re-checks at >=5-6 s/key for tavily.
 - **Tavily `/usage` 200 != usable (fixed 2026-09-22)**: `/usage` answers 200 for
   ANY authentic key, including plan-exhausted ones (those answer 402 on real
