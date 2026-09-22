@@ -54,7 +54,7 @@ class TestCronValidation(unittest.TestCase):
 class TestSeedData(unittest.TestCase):
     """Given an empty schedule_config table,
     When init_scheduler is called,
-    Then 15 default provider schedules are inserted.
+    Then 19 default provider schedules are inserted.
     """
 
     _EXPECTED_PROVIDERS = frozenset(
@@ -74,6 +74,13 @@ class TestSeedData(unittest.TestCase):
             "github",
             "serpapi",
             "agnes-ai",
+            # 2026-09-22: seeded providers that prod only had via manual/UI
+            # inserts (the seed list ran against an EMPTY table on prod long
+            # before these existed, so fresh installs never scheduled them).
+            "groq",
+            "ollama",
+            "openrouter",
+            "nvidia",
         }
     )
     _EXPECTED_CRONS = {
@@ -92,6 +99,10 @@ class TestSeedData(unittest.TestCase):
         "kimi-coding": "0 15 * * *",
         "mimo-sg": "0 16 * * *",
         "qwen-intl": "0 17 * * *",
+        "groq": "0 1 * * *",
+        "ollama": "20 3 * * *",
+        "openrouter": "40 8 * * *",
+        "nvidia": "50 11 * * *",
     }
     _EXPECTED_CONFIG_FILES = {
         "deepseek": "examples/config-deepseek.yaml",
@@ -109,6 +120,10 @@ class TestSeedData(unittest.TestCase):
         "kimi-coding": "examples/config-kimi-coding.yaml",
         "mimo-sg": "examples/config-mimo-sg.yaml",
         "qwen-intl": "examples/config-qwen-intl.yaml",
+        "groq": "examples/config-groq.yaml",
+        "ollama": "examples/config-ollama.yaml",
+        "openrouter": "examples/config-openrouter.yaml",
+        "nvidia": "examples/config-nvidia.yaml",
     }
 
     def test_seeds_defaults_on_empty_table(self) -> None:
@@ -134,7 +149,7 @@ class TestSeedData(unittest.TestCase):
                 settings = _make_settings(db_path)
                 svc = await init_scheduler(settings)
 
-                # -- Then: 15 default rows inserted --
+                # -- Then: 19 default rows inserted --
                 db2 = await get_db(db_path)
                 cursor2 = await db2.execute(
                     "SELECT provider_name, cron_expression, enabled, config_file "
@@ -177,6 +192,72 @@ class TestSeedData(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Test 2b: The seed constant itself (count, uniqueness, exact new tuples)
+# ---------------------------------------------------------------------------
+
+
+class TestSeedListShape(unittest.TestCase):
+    """Given the _DEFAULT_SCHEDULES seed constant,
+    When inspected directly,
+    Then providers are unique, every cron parses, every config file exists on
+    disk, and the 2026-09-22 additions carry the exact tuples pinned here.
+    """
+
+    # (provider, cron, config_file) — the 2026-09-22 seed additions, plus the
+    # github self-bootstrap entry whose cron AGENTS.md documents (already
+    # seeded before the change; pinned so it cannot drift silently).
+    _PINNED_ENTRIES = {
+        "groq": ("0 1 * * *", "examples/config-groq.yaml"),
+        "ollama": ("20 3 * * *", "examples/config-ollama.yaml"),
+        "openrouter": ("40 8 * * *", "examples/config-openrouter.yaml"),
+        "nvidia": ("50 11 * * *", "examples/config-nvidia.yaml"),
+        "github": ("50 */6 * * *", "examples/config-github.yaml"),
+    }
+
+    def test_no_duplicate_provider_names(self) -> None:
+        from web.scheduler import _DEFAULT_SCHEDULES
+
+        providers = [entry[0] for entry in _DEFAULT_SCHEDULES]
+        duplicates = {p for p in providers if providers.count(p) > 1}
+        self.assertEqual(
+            duplicates, set(), f"duplicate providers in seed list: {duplicates}"
+        )
+
+    def test_pinned_tuples_exact(self) -> None:
+        from web.scheduler import _DEFAULT_SCHEDULES
+
+        entries = {p: (cron, cfg) for p, cron, cfg in _DEFAULT_SCHEDULES}
+        for provider, expected in self._PINNED_ENTRIES.items():
+            self.assertIn(provider, entries, f"{provider} missing from seed list")
+            self.assertEqual(
+                entries[provider], expected, f"{provider} seed tuple drifted"
+            )
+
+    def test_every_seed_cron_parses(self) -> None:
+        from apscheduler.triggers.cron import CronTrigger
+
+        from web.scheduler import _DEFAULT_SCHEDULES
+
+        for provider, cron, _cfg in _DEFAULT_SCHEDULES:
+            try:
+                CronTrigger.from_crontab(cron)  # raises ValueError on garbage
+            except ValueError:
+                self.fail(f"{provider}: invalid cron expression {cron!r}")
+
+    def test_every_seed_config_file_exists(self) -> None:
+        from pathlib import Path
+
+        from web.scheduler import _DEFAULT_SCHEDULES
+
+        repo_root = Path(__file__).resolve().parents[1]
+        for provider, _cron, cfg in _DEFAULT_SCHEDULES:
+            self.assertTrue(
+                (repo_root / cfg).is_file(),
+                f"{provider}: seed config {cfg} does not exist",
+            )
+
+
+# ---------------------------------------------------------------------------
 # Test 3: Re-entrancy guard on trigger_manual
 # ---------------------------------------------------------------------------
 
@@ -211,50 +292,21 @@ class TestReentrancyGuard(unittest.TestCase):
 
     def test_returns_triggered_when_not_running(self) -> None:
         async def _scenario() -> None:
-            from web.scheduler import SchedulerService
+            fake = _FakeRunner()
 
             with tempfile.TemporaryDirectory() as tmpdir:
-                db_path = f"{tmpdir}/test.db"
-
-                # Create schedule_config table so trigger_manual can query it
-                conn = sqlite3.connect(db_path)
-                conn.execute(
-                    "CREATE TABLE IF NOT EXISTS schedule_config ("
-                    "id INTEGER PRIMARY KEY AUTOINCREMENT, "
-                    "provider_name TEXT NOT NULL UNIQUE, "
-                    "cron_expression TEXT NOT NULL DEFAULT '0 3 * * *', "
-                    "enabled INTEGER NOT NULL DEFAULT 1, "
-                    "config_file TEXT NOT NULL, "
-                    "created_at TEXT NOT NULL DEFAULT (datetime('now')), "
-                    "updated_at TEXT NOT NULL DEFAULT (datetime('now'))"
-                    ")"
+                svc = _make_service_with_row(
+                    tmpdir, "deepseek", "examples/config-deepseek.yaml"
                 )
-                conn.execute(
-                    "INSERT INTO schedule_config "
-                    "(provider_name, cron_expression, enabled, config_file) "
-                    "VALUES (?, ?, ?, ?)",
-                    ("deepseek", "0 3 * * *", 1, "examples/config-deepseek.yaml"),
-                )
-                conn.commit()
-                conn.close()
 
-                mock_scheduler = MagicMock()
-                mock_scheduler.get_job.return_value = MagicMock()
-                svc = SchedulerService(scheduler=mock_scheduler, db_path=db_path)
-
-                # trigger_manual fires asyncio.create_task — patch create_task
-                # to close the created coroutine (suppresses the "coroutine
-                # never awaited" RuntimeWarning) while patching the job itself
-                # with AsyncMock so no real background scan starts.
-                def _close_coro(coro: object) -> None:
-                    if hasattr(coro, "close"):
-                        coro.close()
-
-                with patch("asyncio.create_task", side_effect=_close_coro), patch(
-                    "web.scheduler._run_provider_job", new_callable=AsyncMock
-                ):
+                # trigger_manual now AWAITS the scan start (via start_scan);
+                # the fake runner stands in for web.runner.PipelineRunner and
+                # the watcher task it arms is cancelled by shutdown().
+                with patch("web.scheduler._lazy_get_runner", return_value=fake):
                     result = await svc.trigger_manual("deepseek")
                     self.assertEqual(result, "triggered")
+
+                await svc.shutdown()
 
         _run_async(_scenario())
 
@@ -269,6 +321,187 @@ class TestReentrancyGuard(unittest.TestCase):
         self.assertFalse(svc.is_running("deepseek"))
         svc._running.add("deepseek")
         self.assertTrue(svc.is_running("deepseek"))
+
+
+# ---------------------------------------------------------------------------
+# Test 3b: Guard held for the scan's FULL lifetime (2026-09-22 overlap bug)
+# ---------------------------------------------------------------------------
+
+
+class TestGuardHeldForScanLifetime(unittest.TestCase):
+    """Regression contract for the anti-overlap guard:
+
+    ``PipelineRunner.run_scan`` returns as soon as the scan *thread* starts.
+    The old ``_run_provider_job`` released ``_running`` in its ``finally``,
+    so during a live scan ``is_running()`` claimed idle, ``trigger_manual``
+    answered 202 "triggered", and the runner's own 409 was swallowed by a
+    broad except — the UI reported success for a run that never happened.
+
+    Fixed contract (pinned below): the scheduler guard lives while the
+    run_records row reads 'running' (watcher task polls ``get_run``),
+    start failures release the guard and propagate to the caller.
+    """
+
+    def test_guard_held_while_run_is_live_and_second_trigger_409s(self) -> None:
+        from fastapi import HTTPException
+
+        async def _scenario() -> None:
+            fake = _FakeRunner()  # status stays "running" until flipped
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                svc = _make_service_with_row(
+                    tmpdir, "deepseek", "examples/config-deepseek.yaml"
+                )
+                with patch("web.scheduler._lazy_get_runner", return_value=fake), patch(
+                    "web.scheduler._WATCH_POLL_SECONDS", 0.01
+                ):
+                    result = await svc.trigger_manual("deepseek")
+                    self.assertEqual(result, "triggered")
+
+                    # Regression: the guard SURVIVES run_scan returning ...
+                    self.assertTrue(svc.is_running("deepseek"))
+                    # ... and stays held across watcher polls of a live run.
+                    for _ in range(5):
+                        await asyncio.sleep(0.02)
+                    self.assertTrue(svc.is_running("deepseek"))
+
+                    # A second manual trigger while live must fail honestly.
+                    with self.assertRaises(HTTPException) as ctx:
+                        await svc.trigger_manual("deepseek")
+                    self.assertEqual(ctx.exception.status_code, 409)
+                    self.assertEqual(
+                        len(fake.run_scan_calls), 1, "no second scan may start"
+                    )
+
+                await svc.shutdown()
+
+        _run_async(_scenario())
+
+    def test_guard_released_when_run_reaches_terminal_status(self) -> None:
+        async def _scenario() -> None:
+            fake = _FakeRunner()
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                svc = _make_service_with_row(
+                    tmpdir, "deepseek", "examples/config-deepseek.yaml"
+                )
+                with patch("web.scheduler._lazy_get_runner", return_value=fake), patch(
+                    "web.scheduler._WATCH_POLL_SECONDS", 0.01
+                ):
+                    await svc.trigger_manual("deepseek")
+                    self.assertTrue(svc.is_running("deepseek"))
+
+                    # -- When: the run_records row turns terminal --
+                    fake.status = "completed"
+                    for _ in range(200):
+                        await asyncio.sleep(0.01)
+                        if not svc.is_running("deepseek"):
+                            break
+
+                    # -- Then: guard released, provider triggerable again --
+                    self.assertFalse(svc.is_running("deepseek"))
+                    result = await svc.trigger_manual("deepseek")
+                    self.assertEqual(result, "triggered")
+                    self.assertEqual(len(fake.run_scan_calls), 2)
+
+                await svc.shutdown()
+
+        _run_async(_scenario())
+
+    def test_trigger_manual_propagates_runner_409(self) -> None:
+        """The runner's own guard (scan thread alive but watcher released, or
+        a runner row from a pre-fix process) must surface as 409 — never a
+        false "triggered"."""
+        from fastapi import HTTPException
+
+        async def _scenario() -> None:
+            fake = _FakeRunner()
+            fake.run_scan_error = HTTPException(
+                status_code=409, detail="Provider 'deepseek' is already running"
+            )
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                svc = _make_service_with_row(
+                    tmpdir, "deepseek", "examples/config-deepseek.yaml"
+                )
+                with patch("web.scheduler._lazy_get_runner", return_value=fake):
+                    with self.assertRaises(HTTPException) as ctx:
+                        await svc.trigger_manual("deepseek")
+                    self.assertEqual(ctx.exception.status_code, 409)
+                    # A failed start must not leak the scheduler guard.
+                    self.assertFalse(svc.is_running("deepseek"))
+
+                await svc.shutdown()
+
+        _run_async(_scenario())
+
+    def test_trigger_manual_maps_missing_config_template_to_404(self) -> None:
+        """run_scan raises ValueError when the source YAML is missing — the
+        route must see a 404, not a silent success or a bare 500."""
+        from fastapi import HTTPException
+
+        async def _scenario() -> None:
+            fake = _FakeRunner()
+            fake.run_scan_error = ValueError(
+                "No example config for provider 'deepseek': expected examples/none.yaml"
+            )
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                svc = _make_service_with_row(
+                    tmpdir, "deepseek", "examples/none.yaml"
+                )
+                with patch("web.scheduler._lazy_get_runner", return_value=fake):
+                    with self.assertRaises(HTTPException) as ctx:
+                        await svc.trigger_manual("deepseek")
+                    self.assertEqual(ctx.exception.status_code, 404)
+                    self.assertIn("No example config", str(ctx.exception.detail))
+                    self.assertFalse(svc.is_running("deepseek"))
+
+                await svc.shutdown()
+
+        _run_async(_scenario())
+
+    def test_run_provider_job_holds_guard_for_scheduled_scan(self) -> None:
+        """The cron path must hold the guard too — the next firing during a
+        live scan skips instead of double-starting."""
+        async def _scenario() -> None:
+            import web.scheduler
+            from web.scheduler import _run_provider_job
+
+            fake = _FakeRunner()
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                svc = _make_service_with_row(
+                    tmpdir, "deepseek", "examples/config-deepseek.yaml"
+                )
+                web.scheduler._scheduler_service = svc
+                try:
+                    with patch(
+                        "web.scheduler._lazy_get_runner", return_value=fake
+                    ), patch("web.scheduler._WATCH_POLL_SECONDS", 0.01):
+                        await _run_provider_job("deepseek", "examples/config-deepseek.yaml")
+
+                        self.assertEqual(
+                            fake.run_scan_calls,
+                            [("deepseek", "examples/config-deepseek.yaml")],
+                        )
+                        self.assertTrue(svc.is_running("deepseek"))
+
+                        # A concurrent firing while live must skip (no 2nd scan).
+                        await _run_provider_job("deepseek", "examples/config-deepseek.yaml")
+                        self.assertEqual(len(fake.run_scan_calls), 1)
+
+                        fake.status = "failed"
+                        for _ in range(200):
+                            await asyncio.sleep(0.01)
+                            if not svc.is_running("deepseek"):
+                                break
+                        self.assertFalse(svc.is_running("deepseek"))
+                finally:
+                    web.scheduler._scheduler_service = None
+                await svc.shutdown()
+
+        _run_async(_scenario())
 
 
 # ---------------------------------------------------------------------------
@@ -490,42 +723,24 @@ class TestConfigFileThreading(unittest.TestCase):
 
     def test_trigger_manual_passes_config_file_to_job(self) -> None:
         """trigger_manual must read config_file from schedule_config and pass
-        it to _run_provider_job."""
+        it to the runner's run_scan (via start_scan)."""
         async def _scenario() -> None:
-            from web.scheduler import SchedulerService
+            fake = _FakeRunner()
 
             with tempfile.TemporaryDirectory() as tmpdir:
-                db_path = f"{tmpdir}/test.db"
-                conn = sqlite3.connect(db_path)
-                conn.execute(self._SCHEDULE_TABLE_DDL)
-                conn.execute(
-                    "INSERT INTO schedule_config "
-                    "(provider_name, cron_expression, enabled, config_file) "
-                    "VALUES (?, ?, ?, ?)",
-                    ("deepseek", "0 3 * * *", 1, "examples/config-deepseek.yaml"),
+                svc = _make_service_with_row(
+                    tmpdir, "deepseek", "examples/config-deepseek.yaml"
                 )
-                conn.commit()
-                conn.close()
 
-                mock_scheduler = MagicMock()
-                mock_scheduler.get_job.return_value = MagicMock()
-                svc = SchedulerService(scheduler=mock_scheduler, db_path=db_path)
-
-                # trigger_manual fires asyncio.create_task — patch create_task
-                # to close the created coroutine while patching the job itself
-                # with AsyncMock so no real background scan starts.
-                def _close_coro(coro: object) -> None:
-                    if hasattr(coro, "close"):
-                        coro.close()
-
-                with patch("asyncio.create_task", side_effect=_close_coro), patch(
-                    "web.scheduler._run_provider_job", new_callable=AsyncMock
-                ) as mock_job:
+                with patch("web.scheduler._lazy_get_runner", return_value=fake):
                     result = await svc.trigger_manual("deepseek")
                     self.assertEqual(result, "triggered")
-                    mock_job.assert_called_once_with(
-                        "deepseek", "examples/config-deepseek.yaml"
+                    self.assertEqual(
+                        fake.run_scan_calls,
+                        [("deepseek", "examples/config-deepseek.yaml")],
                     )
+
+                await svc.shutdown()
 
         _run_async(_scenario())
 
@@ -533,6 +748,65 @@ class TestConfigFileThreading(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # Helper
 # ---------------------------------------------------------------------------
+
+_SCHEDULE_TABLE_DDL = (
+    "CREATE TABLE IF NOT EXISTS schedule_config ("
+    "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+    "provider_name TEXT NOT NULL UNIQUE, "
+    "cron_expression TEXT NOT NULL DEFAULT '0 3 * * *', "
+    "enabled INTEGER NOT NULL DEFAULT 1, "
+    "config_file TEXT NOT NULL, "
+    "created_at TEXT NOT NULL DEFAULT (datetime('now')), "
+    "updated_at TEXT NOT NULL DEFAULT (datetime('now'))"
+    ")"
+)
+
+
+class _FakeRunner:
+    """Stand-in for web.runner.PipelineRunner.
+
+    ``run_scan`` resolves with a fixed run_id as soon as it is called — like
+    the real runner, which returns once the scan *thread* starts. The raised
+    error (if any) mirrors run_scan's failure modes: HTTPException(409) from
+    the runner's own guard, ValueError for a missing config template.
+    ``get_run`` reports the mutable ``status`` so tests can keep the watcher
+    polling ('running') and then flip it terminal to observe guard release.
+    """
+
+    def __init__(self, run_id: str = "run-fake-1") -> None:
+        self.run_id = run_id
+        self.status = "running"
+        self.run_scan_calls: list[tuple[str, str | None]] = []
+        self.run_scan_error: Exception | None = None
+
+    async def run_scan(
+        self, provider_name: str, config_file: str | None = None
+    ) -> str:
+        self.run_scan_calls.append((provider_name, config_file))
+        if self.run_scan_error is not None:
+            raise self.run_scan_error
+        return self.run_id
+
+    async def get_run(self, run_id: str) -> dict[str, object] | None:
+        return {"status": self.status}
+
+
+def _make_service_with_row(tmpdir: str, provider: str, config_file: str):
+    """Build a SchedulerService over a fresh DB holding one schedule row."""
+    from web.scheduler import SchedulerService
+
+    db_path = os.path.join(tmpdir, "test.db")
+    conn = sqlite3.connect(db_path)
+    conn.execute(_SCHEDULE_TABLE_DDL)
+    conn.execute(
+        "INSERT INTO schedule_config "
+        "(provider_name, cron_expression, enabled, config_file) "
+        "VALUES (?, ?, ?, ?)",
+        (provider, "0 3 * * *", 1, config_file),
+    )
+    conn.commit()
+    conn.close()
+    return SchedulerService(scheduler=MagicMock(), db_path=db_path)
 
 
 def _make_settings(db_path: str):

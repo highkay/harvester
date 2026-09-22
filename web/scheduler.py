@@ -4,7 +4,10 @@
 
 Schedule definitions are persisted in the ``schedule_config`` SQLite table.
 On startup jobs are rebuilt from that table.  A re-entrancy guard prevents
-concurrent runs of the same provider.
+concurrent runs of the same provider and is held for the scan's FULL
+lifetime: ``PipelineRunner.run_scan`` returns as soon as the scan *thread*
+starts, so a watcher task keeps the guard until the run_records row leaves
+the ``running`` state (see :meth:`SchedulerService.start_scan`).
 """
 
 # allow: SIZE_OK — single cohesive SchedulerService class; splitting would create
@@ -64,6 +67,21 @@ _DEFAULT_SCHEDULES: tuple[tuple[str, str, str], ...] = (
     ("kimi-coding", "0 15 * * *", "examples/config-kimi-coding.yaml"),
     ("mimo-sg", "0 16 * * *", "examples/config-mimo-sg.yaml"),
     ("qwen-intl", "0 17 * * *", "examples/config-qwen-intl.yaml"),
+    # 2026-09-22: providers with configs + prod history that were missing
+    # from the seed list (prod rows came from manual/UI inserts, and the
+    # seed only runs against an EMPTY schedule_config table — so fresh
+    # installs grew up without these scans). Each cron mirrors prod's hour
+    # chain (groq 01, ollama 03, openrouter 08, nvidia beside modelscope's
+    # 11) and picks a minute that collides with nothing else in this list:
+    # hour 01 is otherwise empty, hour 03 is never hit by the */4 cluster,
+    # the */4 cluster's 08 fires at :00/:15/:45, and modelscope's 11 fires
+    # at :00. groq mirrors the prod row inserted manually on 2026-09-03;
+    # a groq scan can never produce a valid key from a Cloudflare-blocked
+    # egress (AGENTS.md groq section), but the schedule itself is sound.
+    ("groq", "0 1 * * *", "examples/config-groq.yaml"),
+    ("ollama", "20 3 * * *", "examples/config-ollama.yaml"),
+    ("openrouter", "40 8 * * *", "examples/config-openrouter.yaml"),
+    ("nvidia", "50 11 * * *", "examples/config-nvidia.yaml"),
 )
 
 
@@ -83,6 +101,16 @@ def _lazy_get_runner() -> Any:
 # Job callback
 # ---------------------------------------------------------------------------
 
+# How often a guard-watcher polls the run_records row of the scan it tracks.
+# Scans run for hours; a 5 s SQLite primary-key read is noise, and it bounds
+# how long a finished scan keeps the scheduler-side re-entrancy guard held.
+_WATCH_POLL_SECONDS = 5.0
+
+# How many CONSECUTIVE poll failures escalate the watcher's log from debug to
+# ERROR (logged once at the threshold; the guard stays held and the watcher
+# keeps retrying either way).
+_WATCH_POLL_FAILURE_ESCALATION = 3
+
 
 async def _run_provider_job(
     provider_name: str, config_file: str | None = None
@@ -93,24 +121,27 @@ async def _run_provider_job(
     when unknown, e.g. for providers whose task name matches the default
     ``config-{provider_name}.yaml`` convention).
 
-    Uses a re-entrancy guard via ``SchedulerService._running`` to skip if the
-    same provider is already executing via the scheduler or a manual trigger.
-    When the runner module is missing (T5 not yet merged), the error is logged
-    and the scan is silently skipped.
+    Delegates to :meth:`SchedulerService.start_scan`, which holds the
+    re-entrancy guard for the scan's FULL lifetime — ``run_scan`` returns as
+    soon as the scan *thread* starts, so a guard released on that return
+    (the pre-2026-09-22 behaviour) let ``is_running()`` claim idle during a
+    live scan. When the runner module is missing (T5 not yet merged), the
+    error is logged and the scan is silently skipped.
     """
     svc = get_scheduler_service()
     if svc is None:
         logger.error(f"No SchedulerService — cannot run job for {provider_name}")
         return
 
-    if svc.is_running(provider_name):
-        logger.warning(f"Provider {provider_name} is already running — skipping")
-        return
-
-    svc._running.add(provider_name)
     try:
-        runner = _lazy_get_runner()
-        await runner.run_scan(provider_name, config_file)
+        await svc.start_scan(provider_name, config_file)
+    except HTTPException as exc:
+        # 409 from either guard (scheduler-side watcher or the runner's own
+        # provider lock): a previous scan is still live — skip this firing.
+        logger.warning(
+            f"Provider {provider_name} is already running — skipping "
+            f"({exc.detail})"
+        )
     except ImportError:
         logger.error(
             f"PipelineRunner not available (web.runner module missing) — "
@@ -118,8 +149,6 @@ async def _run_provider_job(
         )
     except Exception:
         logger.exception(f"Scheduled scan for {provider_name} failed")
-    finally:
-        svc._running.discard(provider_name)
 
 
 # ---------------------------------------------------------------------------
@@ -144,6 +173,101 @@ class SchedulerService:
         self._scheduler = scheduler
         self._db_path = db_path
         self._running: set[str] = set()
+        # provider → watcher task that keeps _running held for the scan's
+        # full lifetime (armed by start_scan, self-removing on release).
+        self._watch_tasks: dict[str, asyncio.Task[None]] = {}
+
+    # -- scan launch (shared by cron jobs + manual trigger) -------------------
+
+    async def start_scan(
+        self, provider_name: str, config_file: str | None
+    ) -> str:
+        """Start a scan and hold the re-entrancy guard until it ends.
+
+        Returns the runner's run_id.
+
+        Raises:
+            HTTPException(409): this service already tracks the provider, or
+                the runner still holds it (earlier scan thread alive).
+            ImportError / ValueError / ...: whatever
+                ``PipelineRunner.run_scan`` raises, propagated AFTER the
+                guard was released (a failed start must not leak the guard).
+
+        ``run_scan`` returns as soon as the scan *thread* starts, so the
+        guard is handed to a watcher task (:meth:`_watch_run`) that releases
+        it when the run_records row of *run_id* leaves the ``running`` state.
+        """
+        if provider_name in self._running:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Provider {provider_name} is already running",
+            )
+
+        self._running.add(provider_name)
+        try:
+            runner = _lazy_get_runner()
+            run_id: str = await runner.run_scan(provider_name, config_file)
+        except Exception:
+            self._running.discard(provider_name)
+            raise
+
+        self._watch_tasks[provider_name] = asyncio.create_task(
+            self._watch_run(provider_name, run_id)
+        )
+        return run_id
+
+    async def _watch_run(self, provider_name: str, run_id: str) -> None:
+        """Release the guard when run *run_id* leaves the ``running`` state.
+
+        Polls ``PipelineRunner.get_run`` — the run_records row that
+        ``run_scan`` inserts before returning — every ``_WATCH_POLL_SECONDS``
+        and returns once the row is terminal (completed / failed / cancelled,
+        i.e. anything else than ``running``, including a vanished row).
+        Transient poll errors keep the guard held: the scan is presumed live
+        until proven terminal; ``_WATCH_POLL_FAILURE_ESCALATION`` consecutive
+        poll failures escalate the log to ERROR (once, at the threshold) while
+        the guard stays held and the watcher keeps retrying.
+
+        Known residual: if the terminal DB write itself is lost (e.g. the scan
+        process dies after its last 'running' heartbeat but before the
+        terminal update lands), the row stays ``running`` forever and this
+        watcher holds the scheduler guard for *provider_name* until the
+        process restarts — startup ``web.db.reconcile_running_runs`` flips such
+        stale rows to failed and clears the state. Scheduled firings in the
+        meantime are skipped with a visible warning ("already running —
+        skipping"), never silently double-started.
+        """
+        consecutive_poll_failures = 0
+        try:
+            runner = _lazy_get_runner()
+            while True:
+                await asyncio.sleep(_WATCH_POLL_SECONDS)
+                try:
+                    record = await runner.get_run(run_id)
+                except Exception as exc:
+                    consecutive_poll_failures += 1
+                    if consecutive_poll_failures == _WATCH_POLL_FAILURE_ESCALATION:
+                        logger.error(
+                            f"Run watch poll failed {consecutive_poll_failures} consecutive "
+                            f"times ({run_id}): {exc} — keeping guard for "
+                            f"{provider_name}, retrying"
+                        )
+                    else:
+                        logger.debug(f"Run watch poll failed ({run_id}): {exc}")
+                    continue
+                consecutive_poll_failures = 0
+                if record is None or record.get("status") != "running":
+                    return
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                f"Run watch for {provider_name} ({run_id}) died — "
+                f"releasing guard"
+            )
+        finally:
+            self._running.discard(provider_name)
+            self._watch_tasks.pop(provider_name, None)
 
     # -- schedule_config CRUD ------------------------------------------------
 
@@ -299,8 +423,19 @@ class SchedulerService:
     async def trigger_manual(self, provider_name: str) -> str:
         """Immediately run a provider scan (manual trigger).
 
-        Raises HTTPException(409) if the provider is already running.
-        Returns ``"triggered"`` on success.
+        Awaits the scan START so failures reach the route — the old
+        fire-and-forget ``create_task`` answered ``"triggered"`` (HTTP 202)
+        for runs the scheduler then rejected and swallowed, leaving the UI
+        claiming success with no run_records row.
+
+        Raises:
+            HTTPException(409): the provider is already running (scheduler
+                guard, or the runner's own guard via :meth:`start_scan`).
+            HTTPException(404): no schedule row for the provider, or the
+                runner cannot find its source config template.
+
+        Returns ``"triggered"`` once the scan thread is up and the guard
+        watcher is armed; the guard stays held until the run is terminal.
         """
         if self.is_running(provider_name):
             raise HTTPException(
@@ -328,8 +463,11 @@ class SchedulerService:
 
         config_file: str | None = row["config_file"]
 
-        # Fire and forget — the re-entrancy guard in _run_provider_job handles it
-        asyncio.create_task(_run_provider_job(provider_name, config_file))
+        try:
+            await self.start_scan(provider_name, config_file)
+        except ValueError as exc:
+            # runner.run_scan: no source config template for this provider
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
         return "triggered"
 
     def is_running(self, provider_name: str) -> bool:
@@ -337,7 +475,13 @@ class SchedulerService:
         return provider_name in self._running
 
     async def shutdown(self) -> None:
-        """Gracefully shut down the underlying AsyncIOScheduler."""
+        """Gracefully shut down the scheduler and its run watchers."""
+        watchers = list(self._watch_tasks.values())
+        self._watch_tasks.clear()
+        for watcher in watchers:
+            watcher.cancel()
+        if watchers:
+            await asyncio.gather(*watchers, return_exceptions=True)
         self._scheduler.shutdown(wait=False)
         logger.info("Scheduler shut down")
 
