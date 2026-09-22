@@ -512,6 +512,32 @@ update preserves intentional local changes (reverts, port/volume tweaks).
   check stage with other vendors; (2) if a run reports 0 new keys while
   `valid_keys_found` stays flat, inspect `run_new_keys` and the corpus `.env` count
   before touching the provider.
+- **Measured negatives (2026-09-22, don't re-litigate)**: (a) widening the pattern to
+  `OLLAMA_CLOUD_API_KEY` / `OLLAMA_TOKEN` finds NO real keys — GitHub totals are
+  `"OLLAMA_CLOUD_API_KEY"` = 3,704 and `"OLLAMA_TOKEN"` = 1,444, and their page-1
+  fragments contain zero key-shaped strings (the widened alternation's extra captures
+  were placeholders that 401); the key-bearing files are the `.env` ones the
+  `extension:env` dork already covers. (b) `default_model: gpt-oss:20b` (no `-cloud`
+  suffix) is correct — `/api/tags` lists it and live keys answer 200; the mock's
+  `gpt-oss:20b-cloud` ids in `tests/test_ollama_provider.py` are just fixtures, and
+  prod never produced a wait-check file (zero NO_MODEL verdicts). (c) The `-cloud`/
+  suffix question and `GET /v1/models` presence-only behaviour are both moot for
+  judging keys: only the chat probe discriminates.
+- **Downstream visibility (where "扫不出有效键" shows up)**: `provider_group_mapping`
+  maps `ollama → gpt_load_config_id=1, group_id=10` (group name `ollama`), so the
+  generic `web/push.py` flow pushes each run's valid keys; `push_logs` for ollama read
+  `keys_count=7-11, added_count=0, ignored_count=7-11` every night — i.e. only
+  duplicates were ever pushed, which is exactly what an empty-looking pool looks like
+  from the UI. Check `push_logs.added_count` after a fix like this one, not just
+  `valid_keys_found`. Pool keys are re-verifiable at
+  `GET {gpt_load}/api/keys?group_id=10` and by a chat probe that asserts
+  `200 + "choices" + no "error"` in the body.
+- **Latent hole (not fixed, documented)**: `OpenAILikeProvider._judge`'s 200 branch
+  only treats a top-level `error` as a failure when it is a **dict**; a 200 body with a
+  *string* `error` (native-Ollama shape) would be accepted as success. Every pooled
+  key re-probed 2026-09-22 returned real completions (`choices`, no `error`), so it is
+  not firing — but re-check the body shape whenever a provider starts returning soft
+  errors with HTTP 200.
 - **Bounded-run gotcha (cost an hour, 2026-09-22)**: `main.py` installs graceful
   SIGTERM handlers, so `subprocess.terminate()` does NOT stop a CLI scan — one ran
   67 min against the shared 10 req/min GitHub budget. Bound the wall clock
