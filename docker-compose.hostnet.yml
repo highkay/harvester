@@ -1,0 +1,76 @@
+# Harvester Web — Docker Compose
+# Usage: docker compose up -d
+# Data persists in ./data (SQLite DB + provider results).
+
+services:
+  harvester-web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    image: harvester-web:latest
+    container_name: harvester-web
+    network_mode: host  # 2026-09-21: bypass docker NAT — container-direct egress to api.z.ai was lossy (host-direct 5/5 fast)
+    # ports:            # host networking: the app binds WEB_PORT directly
+    #   - "8002:8000"
+    volumes:
+      - "./data:/app/data"
+    environment:
+      # --- Auth ---
+      - WEB_AUTH_KEY=${WEB_AUTH_KEY:-}
+      - WEB_PORT=8002  # host networking: bind the app on the public port directly
+      # --- Encryption ---
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:-}
+      # --- gpt-load push service ---
+      - GPT_LOAD_AUTH_KEY=${GPT_LOAD_AUTH_KEY:-sk-}
+      - GPT_LOAD_BASE_URL=${GPT_LOAD_BASE_URL:-http://192.168.1.18:43001}
+      # --- Tavily push service ---
+      - TAVILY_PROXY_BASE_URL=${TAVILY_PROXY_BASE_URL:-}
+      - TAVILY_PROXY_AUTH_KEY=${TAVILY_PROXY_AUTH_KEY:-}
+      # --- SerpApi push service ---
+      - SERPAPI_PROXY_BASE_URL=${SERPAPI_PROXY_BASE_URL:-}
+      - SERPAPI_PROXY_AUTH_KEY=${SERPAPI_PROXY_AUTH_KEY:-}
+      # --- Agnes AI push service (to gpt-load add-multiple, group 19) ---
+      - AGNES_LOAD_BASE_URL=${AGNES_LOAD_BASE_URL:-http://107.172.141.203:43001}
+      - AGNES_LOAD_GROUP_ID=${AGNES_LOAD_GROUP_ID:-19}
+      - AGNES_LOAD_AUTH_KEY=${AGNES_LOAD_AUTH_KEY:-}
+      # --- ModelScope push service (to gpt-load add-multiple, group 13) ---
+      - MODELSCOPE_LOAD_BASE_URL=${MODELSCOPE_LOAD_BASE_URL:-http://192.168.1.18:43001}
+      - MODELSCOPE_LOAD_GROUP_ID=${MODELSCOPE_LOAD_GROUP_ID:-13}
+      - MODELSCOPE_LOAD_AUTH_KEY=${MODELSCOPE_LOAD_AUTH_KEY:-}
+      # --- GitHub self-bootstrap (default enabled; set 0 to disable) ---
+      - HARVESTER_SELF_BOOTSTRAP=${HARVESTER_SELF_BOOTSTRAP:-1}
+      # --- Storage ---
+      - HARVESTER_WORKSPACE=/app/data
+      - HARVESTER_DB_PATH=/app/data/harvester.db
+      # Outbound SOCKS5 proxies for GitHub fetches (comma-separated; the runner
+      # rotates one per scan). Benchmarked 1080/1090/1091 as fastest & stable.
+      - HARVESTER_PROXY=${HARVESTER_PROXY:-socks5://192.168.1.18:1080,socks5://192.168.1.18:1090,socks5://192.168.1.18:1091}
+      # Provider-specific override — replaces the global rotation ONLY for
+      # that provider's scans (comma-separated; empty = inherit HARVESTER_PROXY).
+      # Groq: api.groq.com's Cloudflare edge 403-blocks the 1080/1090/1091
+      # exits on EVERY request (even valid keys) — 192.168.1.18:7890 (VPS
+      # relay, egress 107.172.141.203) is the measured groq-acceptable route.
+      - HARVESTER_PROXY_GROQ=${HARVESTER_PROXY_GROQ:-}
+      # Agnes AI override — socks5h (REMOTE DNS) is required, not socks5:
+      # apihub.agnes-ai.com resolves via polluted DNS inside the container, so
+      # socks5:// (local DNS) connects to a dead IP and every check fails with
+      # NETWORK_ERROR, while socks5h:// resolves at the tunnel and works
+      # (measured on fnos 2026-09-04: socks5=ConnectionError, socks5h=200).
+      - HARVESTER_PROXY_AGNES_AI=${HARVESTER_PROXY_AGNES_AI:-socks5h://192.168.1.18:1080,socks5h://192.168.1.18:1090,socks5h://192.168.1.18:1091}
+      # Tavily override — the 1080 exit is IP-blocked by api.tavily.com
+      # (429 'blocked due to excessive requests', measured 2026-09-22);
+      # keep tavily on 1090/1091. Empty = inherit HARVESTER_PROXY.
+      - HARVESTER_PROXY_TAVILY=${HARVESTER_PROXY_TAVILY:-}
+      # --- Timezone ---
+      - TZ=Asia/Shanghai
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8002/health')\""
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped

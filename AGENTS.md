@@ -432,6 +432,12 @@ update preserves intentional local changes (reverts, port/volume tweaks).
   answer, the IPv4 addresses are blackholed (0/9 with IPv4 pinned). `glm-ai`
   runs `use_proxy: false`; watch its wait-check ratio and flip back to the
   socks5 rotation if it degrades.
+  **The fnos container runs the repo's `docker-compose.hostnet.yml`** (kept in
+  the repo for reproducibility; on the NAS it is copied over
+  `docker-compose.yml`). The repo's default compose stays bridge networking, so
+  a plain `git pull` + `docker compose up -d`/`--build` would REVERT prod to
+  bridge (and re-break z.ai direct egress) — re-apply the hostnet file
+  (`cp docker-compose.hostnet.yml docker-compose.yml`) when deploying.
 - **groq**: see the 2026-09-21 correction in the groq section — trio+socks5 now
   works, socks5h is the one that 403s, and the 7890 relay is gone.
 - **cerebras is Cloudflare-blocked on every tested path** (direct, socks5,
