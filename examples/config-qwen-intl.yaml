@@ -88,24 +88,62 @@ tasks:
       retries: 3
       use_proxy: true  # international endpoint — route through proxy
     patterns:
-      key_pattern: "sk-[0-9A-Za-z_-]{20,}"
+      # Real qwen format MEASURED `sk-` + 32 hex (n=315 authentic on the CN
+      # endpoint, prod 2026-09-22; same vendor key shape). The former naked
+      # sk- pattern measured 1441 invalid/run on the CN task (placeholders
+      # and other vendors' sk- keys). Format alone cannot separate DashScope
+      # from other sk- vendors, so the task-level pattern only fires on
+      # DASHSCOPE_*/QWEN_* env-name assignments; dashscope-intl host-named
+      # conditions override with a Bearer/quoted variadic below. The
+      # lookahead skips Anthropic / OpenAI project / service-account keys. No
+      # upper bound on the body: a fixed width silently drops keys if the
+      # provider rotates the format (serpapi lesson) — 32-hex is documented,
+      # not enforced.
+      key_pattern: >-
+        (?i)(?:dashscope[_-]?(?:api[_-]?)?key|DASHSCOPE_API_KEY|QWEN_API_KEY|qwen[_-]?api[_-]?key)[\"'\]]{0,2}\s*[:=]\s*[\"']?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})[\"']?
       address_pattern: ""
       endpoint_pattern: ""
       model_pattern: ""
     conditions:
       # International Model Studio (Alibaba Cloud Intl): dashscope-intl.
+      # Env-name dorks inherit the narrow task pattern above; dorks naming
+      # the dashscope-intl host override with a Bearer/quoted variadic.
       - query: '"dashscope-intl.aliyuncs.com"'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|[\"']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})
       - query: '"dashscope-intl.aliyuncs.com" "Authorization"'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|[\"']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})
       - query: '"dashscope-intl.aliyuncs.com" "api_key"'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|[\"']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})
       - query: '"DASHSCOPE_API_KEY" "intl"'
       - query: '"QWEN_API_KEY"'
       - query: '"qwen" "api_key" "alibaba"'
       - query: '"alibabacloud.com" "model-studio" "api_key"'
       - query: '"sk-" "dashscope-intl.aliyuncs.com"'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|[\"']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})
       - query: '"dashscope-intl.aliyuncs.com" language:Python'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|[\"']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})
       - query: '"dashscope-intl.aliyuncs.com" language:JavaScript'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|[\"']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})
       - query: '"dashscope-intl.aliyuncs.com" extension:env'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|[\"']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})
       - query: '"dashscope-intl.aliyuncs.com" extension:json'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|[\"']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})
       - query: '"dashscope" extension:yaml'
       - query: '"QWEN_API_KEY" language:Python'
     rate_limit:

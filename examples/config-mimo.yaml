@@ -90,26 +90,71 @@ tasks:
       retries: 3
       use_proxy: false  # domestic endpoint — connect directly
     patterns:
-      key_pattern: "tp-[0-9A-Za-z_-]{20,}"
+      # Real mimo Token Plan format MEASURED `tp-` + 48 alnum (n=1 authentic,
+      # prod 2026-09-22). The former naked tp- pattern measured 142 invalid/run
+      # — `tp-secret-` / `tp-your-` style hyphenated placeholders — against
+      # that 1 authentic key. The task-level pattern only fires on
+      # MIMO_*/XIAOMIMIMO_* env-name assignments, and the alnum-only body
+      # drops the hyphenated placeholders at extraction time. Host-named
+      # conditions override with a Bearer/quoted variadic below. The captured
+      # family stays `tp-` ONLY — never widen it to sk-: the pay-as-you-go
+      # surface is unmeasured and an sk- branch would re-flood the check stage
+      # with other vendors. No upper bound on the body: a fixed width silently
+      # drops keys if the provider rotates the format (serpapi lesson) —
+      # `tp-` + 48 is documented, not enforced.
+      # KNOWN COVERAGE GAP (TRIPWIRE): mimo pay-as-you-go `sk-` keys on
+      # api.xiaomimimo.com are scanned by NO config — the Token Plan endpoints
+      # here cannot validate them and no measured corpus exists. Do NOT invent
+      # a pattern/config for them from docs; if they ever need collecting,
+      # measure the real corpus first, then add a dedicated config.
+      key_pattern: >-
+        (?i)(?:mimo[_-]?(?:api[_-]?)?key|XIAOMIMIMO[_-]?API[_-]?KEY|MIMO_API_KEY|MIMO_TOKEN)[\"'\]]{0,2}\s*[:=]\s*[\"']?(tp-[A-Za-z0-9]{16,})[\"']?
       address_pattern: ""
       endpoint_pattern: ""
       model_pattern: ""
     conditions:
       # Each GitHub API search query has its own 1000-result window.
+      # Env-name dorks inherit the narrow task pattern above.
       - query: '"MIMO_API_KEY"'
       - query: '"MIMO_API_KEY="'
       - query: '"MIMO_API_KEY:"'
+      # Domain-anchored blobs: allow Bearer/quoted tp- keys without the env
+      # name (tp- only — an sk- variadic would re-flood the check stage).
       - query: '"token-plan-cn.xiaomimimo.com"'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|[\"']\s*)?(tp-[A-Za-z0-9]{16,})
       - query: '"xiaomimimo.com"'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|[\"']\s*)?(tp-[A-Za-z0-9]{16,})
       - query: '"xiaomimimo.com" "Authorization"'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|[\"']\s*)?(tp-[A-Za-z0-9]{16,})
       - query: '"xiaomimimo.com" "api_key"'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|[\"']\s*)?(tp-[A-Za-z0-9]{16,})
       - query: '"mimo" "api_key" "xiaomi"'
       - query: '"tp-" "xiaomimimo.com"'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|[\"']\s*)?(tp-[A-Za-z0-9]{16,})
       - query: '"mimo-v2.5"'
       - query: '"MIMO_API_KEY" language:Python'
       - query: '"xiaomimimo.com" language:JavaScript'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|[\"']\s*)?(tp-[A-Za-z0-9]{16,})
       - query: '"xiaomimimo.com" extension:env'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|[\"']\s*)?(tp-[A-Za-z0-9]{16,})
       - query: '"xiaomimimo.com" extension:json'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|[\"']\s*)?(tp-[A-Za-z0-9]{16,})
       - query: '"mimo" extension:yaml'
     rate_limit:
       base_rate: 0.2

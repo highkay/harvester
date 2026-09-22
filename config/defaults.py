@@ -41,6 +41,41 @@ def get_default_config() -> Dict[str, Any]:
         r"\s*=\s*[0-9A-Za-z._~+/=-]{20,})"
     )
 
+    # Context-anchored extraction patterns (lockstep with examples/, pinned by
+    # tests/test_deepseek_pattern.py, tests/test_qwen_pattern.py and
+    # tests/test_mimo_pattern.py). Task patterns fire only on provider env-name
+    # assignments; domain patterns widen host-named dorks to Bearer/quoted
+    # forms. The sk- lookahead skips Anthropic/OpenAI project/service-account
+    # keys; no upper bound on the body (serpapi lesson).
+    deepseek_task_pattern = (
+        r"(?i)(?:deepseek[_-]?(?:api[_-]?)?key|DEEPSEEK_KEY)"
+        r"[\"'\]]{0,2}\s*[:=]\s*[\"']?"
+        r"(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})"
+        r"[\"']?"
+    )
+    qwen_task_pattern = (
+        r"(?i)(?:dashscope[_-]?(?:api[_-]?)?key|DASHSCOPE_API_KEY|"
+        r"QWEN_API_KEY|qwen[_-]?api[_-]?key)"
+        r"[\"'\]]{0,2}\s*[:=]\s*[\"']?"
+        r"(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})"
+        r"[\"']?"
+    )
+    sk_domain_pattern = (
+        r"(?i)(?:Bearer\s+|[\"']\s*)?"
+        r"(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})"
+    )
+    mimo_task_pattern = (
+        r"(?i)(?:mimo[_-]?(?:api[_-]?)?key|XIAOMIMIMO[_-]?API[_-]?KEY|"
+        r"MIMO_API_KEY|MIMO_TOKEN)"
+        r"[\"'\]]{0,2}\s*[:=]\s*[\"']?"
+        r"(tp-[A-Za-z0-9]{16,})"
+        r"[\"']?"
+    )
+    tp_domain_pattern = (
+        r"(?i)(?:Bearer\s+|[\"']\s*)?"
+        r"(tp-[A-Za-z0-9]{16,})"
+    )
+
     # Add example rate limits for demonstration
     config["ratelimits"].update(
         {
@@ -625,12 +660,54 @@ def get_default_config() -> Dict[str, Any]:
                     "retries": 3,
                 },
                 "patterns": {
-                    "key_pattern": "sk-[0-9A-Za-z_-]{20,}",
+                    # Env-anchored extraction only (see deepseek_task_pattern);
+                    # domain conditions below widen to Bearer/quoted sk- keys.
+                    "key_pattern": deepseek_task_pattern,
                     "address_pattern": "",
                     "endpoint_pattern": "",
                     "model_pattern": "",
                 },
-                "conditions": [{"query": '"DEEPSEEK_API_KEY"'}],
+                "conditions": [
+                    {"query": '"DEEPSEEK_API_KEY"'},
+                    {"query": '"DEEPSEEK_API_KEY="'},
+                    {"query": '"DEEPSEEK_API_KEY:"'},
+                    {
+                        "query": '"api.deepseek.com"',
+                        "patterns": {"key_pattern": sk_domain_pattern},
+                    },
+                    {
+                        "query": '"api.deepseek.com" "Authorization"',
+                        "patterns": {"key_pattern": sk_domain_pattern},
+                    },
+                    {
+                        "query": '"api.deepseek.com" "api_key"',
+                        "patterns": {"key_pattern": sk_domain_pattern},
+                    },
+                    {"query": '"deepseek-chat"'},
+                    {
+                        "query": '"deepseek" "api_key"',
+                        "patterns": {"key_pattern": sk_domain_pattern},
+                    },
+                    {
+                        "query": '"sk-" "api.deepseek.com"',
+                        "patterns": {"key_pattern": sk_domain_pattern},
+                    },
+                    {"query": '"deepseek" language:Python'},
+                    {"query": '"DEEPSEEK_API_KEY" language:Python'},
+                    {
+                        "query": '"api.deepseek.com" language:JavaScript',
+                        "patterns": {"key_pattern": sk_domain_pattern},
+                    },
+                    {
+                        "query": '"api.deepseek.com" extension:env',
+                        "patterns": {"key_pattern": sk_domain_pattern},
+                    },
+                    {
+                        "query": '"api.deepseek.com" extension:json',
+                        "patterns": {"key_pattern": sk_domain_pattern},
+                    },
+                    {"query": '"deepseek" extension:yaml'},
+                ],
                 "rate_limit": {"base_rate": 0.2, "burst_limit": 2, "adaptive": True},
                 "storage": {
                     "directory": "",
@@ -736,12 +813,56 @@ def get_default_config() -> Dict[str, Any]:
                     "retries": 3,
                 },
                 "patterns": {
-                    "key_pattern": "tp-[0-9A-Za-z_-]{20,}",
+                    # Env-anchored extraction only (see mimo_task_pattern);
+                    # tp- family ONLY — host conditions widen to Bearer/quoted
+                    # tp- keys, never sk- (pay-as-you-go sk- surface on
+                    # api.xiaomimimo.com is unmeasured and scanned by no config).
+                    "key_pattern": mimo_task_pattern,
                     "address_pattern": "",
                     "endpoint_pattern": "",
                     "model_pattern": "",
                 },
-                "conditions": [{"query": '"MIMO_API_KEY"'}],
+                "conditions": [
+                    {"query": '"MIMO_API_KEY"'},
+                    {"query": '"MIMO_API_KEY="'},
+                    {"query": '"MIMO_API_KEY:"'},
+                    {
+                        "query": '"token-plan-cn.xiaomimimo.com"',
+                        "patterns": {"key_pattern": tp_domain_pattern},
+                    },
+                    {
+                        "query": '"xiaomimimo.com"',
+                        "patterns": {"key_pattern": tp_domain_pattern},
+                    },
+                    {
+                        "query": '"xiaomimimo.com" "Authorization"',
+                        "patterns": {"key_pattern": tp_domain_pattern},
+                    },
+                    {
+                        "query": '"xiaomimimo.com" "api_key"',
+                        "patterns": {"key_pattern": tp_domain_pattern},
+                    },
+                    {"query": '"mimo" "api_key" "xiaomi"'},
+                    {
+                        "query": '"tp-" "xiaomimimo.com"',
+                        "patterns": {"key_pattern": tp_domain_pattern},
+                    },
+                    {"query": '"mimo-v2.5"'},
+                    {"query": '"MIMO_API_KEY" language:Python'},
+                    {
+                        "query": '"xiaomimimo.com" language:JavaScript',
+                        "patterns": {"key_pattern": tp_domain_pattern},
+                    },
+                    {
+                        "query": '"xiaomimimo.com" extension:env',
+                        "patterns": {"key_pattern": tp_domain_pattern},
+                    },
+                    {
+                        "query": '"xiaomimimo.com" extension:json',
+                        "patterns": {"key_pattern": tp_domain_pattern},
+                    },
+                    {"query": '"mimo" extension:yaml'},
+                ],
                 "rate_limit": {"base_rate": 0.2, "burst_limit": 2, "adaptive": True},
                 "storage": {
                     "directory": "",
@@ -773,12 +894,50 @@ def get_default_config() -> Dict[str, Any]:
                     "retries": 3,
                 },
                 "patterns": {
-                    "key_pattern": "sk-[0-9A-Za-z_-]{20,}",
+                    # Env-anchored extraction only (see qwen_task_pattern);
+                    # host-named conditions below widen to Bearer/quoted.
+                    "key_pattern": qwen_task_pattern,
                     "address_pattern": "",
                     "endpoint_pattern": "",
                     "model_pattern": "",
                 },
-                "conditions": [{"query": '"DASHSCOPE_API_KEY"'}],
+                "conditions": [
+                    {"query": '"DASHSCOPE_API_KEY"'},
+                    {"query": '"DASHSCOPE_API_KEY="'},
+                    {"query": '"DASHSCOPE_API_KEY:"'},
+                    {
+                        "query": '"dashscope.aliyuncs.com"',
+                        "patterns": {"key_pattern": sk_domain_pattern},
+                    },
+                    {
+                        "query": '"dashscope.aliyuncs.com" "Authorization"',
+                        "patterns": {"key_pattern": sk_domain_pattern},
+                    },
+                    {
+                        "query": '"dashscope.aliyuncs.com" "api_key"',
+                        "patterns": {"key_pattern": sk_domain_pattern},
+                    },
+                    {"query": '"QWEN_API_KEY"'},
+                    {"query": '"qwen" "api_key" "aliyun"'},
+                    {
+                        "query": '"sk-" "dashscope.aliyuncs.com"',
+                        "patterns": {"key_pattern": sk_domain_pattern},
+                    },
+                    {"query": '"DASHSCOPE_API_KEY" language:Python'},
+                    {
+                        "query": '"dashscope.aliyuncs.com" language:JavaScript',
+                        "patterns": {"key_pattern": sk_domain_pattern},
+                    },
+                    {
+                        "query": '"dashscope.aliyuncs.com" extension:env',
+                        "patterns": {"key_pattern": sk_domain_pattern},
+                    },
+                    {
+                        "query": '"dashscope.aliyuncs.com" extension:json',
+                        "patterns": {"key_pattern": sk_domain_pattern},
+                    },
+                    {"query": '"dashscope" extension:yaml'},
+                ],
                 "rate_limit": {"base_rate": 0.2, "burst_limit": 2, "adaptive": True},
                 "storage": {
                     "directory": "",

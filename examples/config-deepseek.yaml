@@ -77,26 +77,64 @@ tasks:
       retries: 3
       use_proxy: false  # domestic endpoint — connect directly
     patterns:
-      key_pattern: "sk-[0-9A-Za-z_-]{20,}"
+      # Real DeepSeek format MEASURED `sk-` + 32 hex (n=401 authentic, prod
+      # 2026-09-22). The former naked sk- pattern made every sk- run on any
+      # fetched page a check candidate: measured 2572 invalid/run (sk-ant-
+      # 186, sk-or-… and other vendors) vs 477 authentic keys. Format alone
+      # cannot separate DeepSeek from other sk- vendors, so the task-level
+      # pattern only fires on DEEPSEEK_* env-name assignments; domain-named
+      # conditions override with a Bearer/quoted variadic below. The lookahead
+      # skips Anthropic / OpenAI project / service-account keys. No upper
+      # bound on the body: a fixed width silently drops keys if the provider
+      # rotates the format (serpapi lesson) — 32-hex is documented, not
+      # enforced.
+      key_pattern: >-
+        (?i)(?:deepseek[_-]?(?:api[_-]?)?key|DEEPSEEK_KEY)[\"'\]]{0,2}\s*[:=]\s*[\"']?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})[\"']?
       address_pattern: ""
       endpoint_pattern: ""
       model_pattern: ""
     conditions:
       # Each GitHub API search query has its own 1000-result window.
+      # Env-name dorks inherit the narrow task pattern above.
       - query: '"DEEPSEEK_API_KEY"'
       - query: '"DEEPSEEK_API_KEY="'
       - query: '"DEEPSEEK_API_KEY:"'
+      # Domain-anchored blobs: allow Bearer/quoted sk- keys without the env name.
       - query: '"api.deepseek.com"'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|[\"']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})
       - query: '"api.deepseek.com" "Authorization"'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|[\"']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})
       - query: '"api.deepseek.com" "api_key"'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|[\"']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})
       - query: '"deepseek-chat"'
       - query: '"deepseek" "api_key"'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|[\"']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})
       - query: '"sk-" "api.deepseek.com"'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|[\"']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})
       - query: '"deepseek" language:Python'
       - query: '"DEEPSEEK_API_KEY" language:Python'
       - query: '"api.deepseek.com" language:JavaScript'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|[\"']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})
       - query: '"api.deepseek.com" extension:env'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|[\"']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})
       - query: '"api.deepseek.com" extension:json'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|[\"']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})
       - query: '"deepseek" extension:yaml'
     rate_limit:
       base_rate: 0.2

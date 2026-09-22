@@ -88,25 +88,59 @@ tasks:
       retries: 3
       use_proxy: false  # domestic endpoint — connect directly
     patterns:
-      key_pattern: "sk-[0-9A-Za-z_-]{20,}"
+      # Real qwen-cn format MEASURED `sk-` + 32 hex (n=315 authentic, prod
+      # 2026-09-22). The former naked sk- pattern measured 1441 invalid/run
+      # (placeholders like sk-your… and other vendors' sk- keys) against
+      # those 315 authentic keys. Format alone cannot separate DashScope
+      # from other sk- vendors, so the task-level pattern only fires on
+      # DASHSCOPE_*/QWEN_* env-name assignments; host-named conditions
+      # override with a Bearer/quoted variadic below. The lookahead skips
+      # Anthropic / OpenAI project / service-account keys. No upper bound on
+      # the body: a fixed width silently drops keys if the provider rotates
+      # the format (serpapi lesson) — 32-hex is documented, not enforced.
+      key_pattern: >-
+        (?i)(?:dashscope[_-]?(?:api[_-]?)?key|DASHSCOPE_API_KEY|QWEN_API_KEY|qwen[_-]?api[_-]?key)[\"'\]]{0,2}\s*[:=]\s*[\"']?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})[\"']?
       address_pattern: ""
       endpoint_pattern: ""
       model_pattern: ""
     conditions:
       # Each GitHub API search query has its own 1000-result window.
+      # Env-name dorks inherit the narrow task pattern above.
       - query: '"DASHSCOPE_API_KEY"'
       - query: '"DASHSCOPE_API_KEY="'
       - query: '"DASHSCOPE_API_KEY:"'
+      # Domain-anchored blobs: allow Bearer/quoted sk- keys without the env name.
       - query: '"dashscope.aliyuncs.com"'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|[\"']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})
       - query: '"dashscope.aliyuncs.com" "Authorization"'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|[\"']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})
       - query: '"dashscope.aliyuncs.com" "api_key"'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|[\"']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})
       - query: '"QWEN_API_KEY"'
       - query: '"qwen" "api_key" "aliyun"'
       - query: '"sk-" "dashscope.aliyuncs.com"'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|[\"']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})
       - query: '"DASHSCOPE_API_KEY" language:Python'
       - query: '"dashscope.aliyuncs.com" language:JavaScript'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|[\"']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})
       - query: '"dashscope.aliyuncs.com" extension:env'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|[\"']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})
       - query: '"dashscope.aliyuncs.com" extension:json'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|[\"']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})
       - query: '"dashscope" extension:yaml'
     rate_limit:
       base_rate: 0.2

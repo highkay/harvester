@@ -367,7 +367,10 @@ tasks:
       timeout: 30
       retries: 3
     patterns:
-      key_pattern: gsk_[0-9A-Za-z_-]{20,}
+      # Hardened pattern, verbatim from examples/config-groq.yaml: WGdy
+      # honeypot-decoy filtering + doc-placeholder exclusions (2026-09-06 prod
+      # audit: the naked gsk_ pattern's whole check pool was placeholders).
+      key_pattern: 'gsk_(?!.*WGdy)(?!.*(?i:test|secret|example|demo|fake|dummy|sample|placeholder|keyhere|yourkey|localhost))(?!.*(?:abc123|xyz456|def789|ghi012|jkl345|mno678|pqr901|stu234|vwx567|1234567890|abcdefghijklmnopqrstuvwxyz|abcdefgh))(?!.*(?:X{4,}|x{4,}|A{4,}|a{4,}|B{4,}|0{4,}|9{4,}))[A-Za-z0-9]{20,}'
       address_pattern: ""
       endpoint_pattern: ""
       model_pattern: ""
@@ -564,7 +567,13 @@ tasks:
       timeout: 30
       retries: 3
     patterns:
-      key_pattern: sk-[0-9A-Za-z_-]{20,}
+      # Context-anchored, mirrors examples/config-deepseek.yaml: fires only on
+      # DEEPSEEK_* env assignments (the naked sk- pattern flooded the check
+      # stage with other vendors' bare sk- runs). The dedicated config carries
+      # the per-condition domain overrides; this template keeps the task-level
+      # anchored pattern only.
+      key_pattern: >-
+        (?i)(?:deepseek[_-]?(?:api[_-]?)?key|DEEPSEEK_KEY)[\"'\]]{0,2}\s*[:=]\s*[\"']?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})[\"']?
       address_pattern: ""
       endpoint_pattern: ""
       model_pattern: ""
@@ -613,7 +622,12 @@ tasks:
       timeout: 30
       retries: 3
     patterns:
-      key_pattern: sk-[0-9A-Za-z_-]{20,}
+      # Context-anchored, mirrors examples/config-kimi.yaml: fires only on
+      # MOONSHOT_*/KIMI_* env assignments; the dedicated config's domain-named
+      # dorks widen to Bearer/quoted sk-. The lookahead skips Anthropic /
+      # OpenAI project / service-account keys; no upper bound on the body.
+      key_pattern: >-
+        (?i)(?:moonshot[_-]?(?:ai[_-]?)?api[_-]?key|kimi[_-]?(?:ai[_-]?)?api[_-]?key|moonshot[_-]?key)["'\]]{0,2}\s*[:=]\s*["']?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})["']?
       address_pattern: ""
       endpoint_pattern: ""
       model_pattern: ""

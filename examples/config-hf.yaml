@@ -83,6 +83,11 @@ tasks:
       timeout: 30
       retries: 3
     patterns:
+      # NOTE (2026-09-22): this naked sk- pattern is deliberately UNANCHORED,
+      # unlike the provider configs (deepseek/qwen/mimo/kimi anchor extraction
+      # to env names). HF dataset files carry no reliable provider env-name
+      # context to anchor on, and this task targets OpenAI-family keys broadly
+      # on a measured ~0-yield secondary source. Do not "fix" it by anchoring.
       key_pattern: "sk-[0-9A-Za-z_-]{20,}"
       address_pattern: ""
       endpoint_pattern: ""
