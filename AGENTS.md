@@ -840,13 +840,23 @@ update preserves intentional local changes (reverts, port/volume tweaks).
   key)**: exit **1080 was blocked again** (`429 "blocked due to excessive
   requests"` for BOTH keys), **1090 clean** (good→200, dead→401), **1091 half**
   (good→200, dead→429), and container-direct to `api.tavily.com` times out
-  entirely. That run showed `wait 1327→1333` against `valid 67` — pure FALSE-wait
-  from the 1080 half of the pin. Note the running container's env still carries
-  the STALE pin `1080,1091` even though the compose default is now empty
-  (`${HARVESTER_PROXY_TAVILY:-}` = inherit the trio), because container env is
-  frozen at creation and a plain `restart` does not re-read it: dropping the pin
-  needs a `docker compose up -d` recreate — which wipes the `cp`-ed code layer,
-  so re-copy the deployed source files afterwards.
+  entirely. That day's live run (`415a13f9…`) showed `wait 1327→1333` against
+  `valid 67`; a scan uses ONE exit (`_pick_proxy` writes a single value into
+  `global.proxy` of the run's runtime YAML — check it with
+  `grep -i proxy /app/data/runtime/config-tavily-<run_id>.yaml`), and this run
+  drew **1091**, the half-throttled one — so its wait bucket is exit-throttle
+  artifact (429 lands for good and dead keys alike), recoverable via the
+  ≥5 s/key wait-pool recipe rather than being a dead pool.
+  Note the running container's env still carries the STALE pin `1080,1091` even
+  though both compose files now resolve `${HARVESTER_PROXY_TAVILY:-}` to empty
+  (= inherit the trio), because container env is frozen at creation and a plain
+  `restart` does not re-read it: dropping the pin needs a
+  `docker compose up -d` recreate — which rebuilds from the IMAGE and wipes the
+  whole `cp`-ed code overlay. Re-publish after any recreate with the whole tree,
+  not just your own files:
+  `for d in config constant core manager provider search stage storage tools web examples; do docker compose cp $d harvester-web:/app/; done`
+  plus `main.py` / `web_main.py`, then re-run the md5/marker verification. (A
+  working `--build` would end this drift, but fnos's registry proxy is dead.)
 - **Tavily `/usage` 200 != usable (fixed 2026-09-22)**: `/usage` answers 200 for
   ANY authentic key, including plan-exhausted ones (those answer 402 on real
   `/search` calls), so exhausted keys were pooled as useless entries.
