@@ -559,6 +559,14 @@ update preserves intentional local changes (reverts, port/volume tweaks).
   `examples/config-nvidia.yaml`, whose row was seeded 2026-09-22 20:23 and fires first at
   11:50). **Disabled by absence: `grok`** — `provider/grok.py` + `examples/config-grok.yaml`
   exist but there is no schedule row, no seed entry and no group mapping, so it never runs.
+  **Off by flag AND omission: `gemini`** — registered (`provider/__init__.py:14`) and mapped
+  (`provider_group_mapping` → rn cfg2 group 9, whose 306 keys are **263 invalid**), but there
+  is no `examples/config-gemini.yaml`, no scheduler seed and no prod row, and the bundled
+  preset in `config/defaults.py:317-319` sets `"enabled": False` (same shape as grok's, which
+  `config/defaults.py:249-250` also disables; grok's standalone example config sets its task
+  `enabled: true`, so a grok config CAN run once a schedule row exists). Consequence: both
+  pools are un-replenishable — gemini's surviving 43 keys decay with nothing able to refill
+  them, so either add config+schedule or retire the mapping/pool deliberately.
   gpt-load has no disabled key status anywhere (fnos: 1177 active / 2 invalid, both in
   `qwenchina`; rn: gemini2 306 keys = 263 invalid + 43 active, cerebras 28 active, groq 5,
   mimosg 1 active + 1 invalid, agnes 40 — **266 invalid keys in total across both**), groups
@@ -828,6 +836,17 @@ update preserves intentional local changes (reverts, port/volume tweaks).
   fixed pair is therefore pointless — prefer inheriting the global trio (any
   exit can be blocked at run start) or re-probe all exits right before pinning,
   and keep bulk re-checks at >=5-6 s/key for tavily.
+  **Re-measured 2026-09-23 with the exit A/B (one known-good + one known-dead
+  key)**: exit **1080 was blocked again** (`429 "blocked due to excessive
+  requests"` for BOTH keys), **1090 clean** (good→200, dead→401), **1091 half**
+  (good→200, dead→429), and container-direct to `api.tavily.com` times out
+  entirely. That run showed `wait 1327→1333` against `valid 67` — pure FALSE-wait
+  from the 1080 half of the pin. Note the running container's env still carries
+  the STALE pin `1080,1091` even though the compose default is now empty
+  (`${HARVESTER_PROXY_TAVILY:-}` = inherit the trio), because container env is
+  frozen at creation and a plain `restart` does not re-read it: dropping the pin
+  needs a `docker compose up -d` recreate — which wipes the `cp`-ed code layer,
+  so re-copy the deployed source files afterwards.
 - **Tavily `/usage` 200 != usable (fixed 2026-09-22)**: `/usage` answers 200 for
   ANY authentic key, including plan-exhausted ones (those answer 402 on real
   `/search` calls), so exhausted keys were pooled as useless entries.
