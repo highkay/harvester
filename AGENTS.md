@@ -1116,6 +1116,19 @@ in the proxy pool (only 222 were new).
   succeed but slowly (13-18 s on 2026-09-23 14:47 — the proxy is failing over
   across keys after 429/402 before landing a 200). Watch the `/search` latency
   mix if the message-analysis pipeline starts timing out.
+- **Exit blocks change flavour**: at 14:48 the SAME exit 1091 answered
+  `403 Forbidden` HTML on /usage for a known-good key AND a dead key at once —
+  the per-IP block rotates between `429 blocked due to excessive requests` and a
+  plain 403 interstitial. The discriminator is unchanged (control + dead key must
+  read 200/401; anything else is the exit, not the key), and `_judge_usage` maps
+  403 → NO_ACCESS → wait-check, i.e. recoverable rather than a permanent discard.
+- **Deploy state (2026-09-23 ~14:55)**: the three `examples/config-tavily*.yaml`
+  were `docker compose cp`-ed into the container after diff-verifying that ONLY
+  the rate change differs from the deployed copies — configs are read at run
+  start, so the 0.2/2 pace is live for the next run WITHOUT a restart. Still
+  needing the safe-window restart/recreate: `provider/tavily.py` (two-stage
+  check), `stage/definition.py` (limiter feedback), `config/defaults.py` (an
+  imported module), and any `.env` change (`HARVESTER_PROXY_TAVILY`).
 
 ### Resin: the pool's clean egress (measured 2026-09-23)
 
