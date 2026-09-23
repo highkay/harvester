@@ -1112,21 +1112,41 @@ in the proxy pool (only 222 were new).
   own probes; and before restarting the loop, confirm no `tavily_pool_evict.py`
   is mid-round (grep for a `round N start` without its `round N end`) so an
   `--apply` cycle is not cut in half.
-- **Effect verified, time-bounded (2026-09-23 15:0x)**: every `/search` row
-  since the first eviction (06:41:38 UTC) is **200** — 24 rows, zero 402, zero
-  503 — and each is a SINGLE upstream attempt (`request_id` grouping), so no
-  failover is involved. Two corrections to earlier readings: the 3×503 in the
-  "last 10 minutes" window were pre-cutoff rows (06:35), and the "13-18 s =
-  key failover" story was WRONG — the 200s take 2.7-11.2 s with attempts=1, i.e.
-  the latency is upstream-side. Track the latency mix separately.
+- **Effect verified, time-bounded**: every `/search` row since the first
+  eviction (06:41:38 UTC) is **200** — 24 rows, zero 402, zero 503 — and each is
+  a single upstream attempt (`request_id` grouping). The 3×503 quoted from the
+  "last 10 minutes" window were pre-cutoff rows (06:35), so that window could
+  not have shown the fix.
 - **Coverage, not "fully fixed"**: 16 pool keys were deactivated — exactly the
   set behind the newest upstream-402 rows (2520 2560 2670 2690 2698 2785 2789
   2807 3128 3129 3408 3477 3563 3586 3623 3624); the loop re-reads the 402 rows
   every 10 minutes and now finds 0 new targets. The remaining ~1244 keys were
-  NOT swept (a full pass is hours out by design — the sweep is targeted at the
-  keys clients are actually failing on, not exhaustive).
-  `GET /api/stats.active_key_count` is the proxy's own metric and does NOT equal
-  `COUNT(is_active=1)` (measured 1242 vs 1260) — never conflate the two.
+  NOT swept (a full pass is hours out by design: the sweep targets the keys
+  clients are actually failing on, it is not exhaustive). Re-check the
+  discriminator after any future 402: its `key_used` must not be an id already
+  set `is_active=false` — that would mean the proxy's selection ignores the flag.
+- **Latency: state the measured facts, not a story (2026-09-23 15:13)**.
+  Controlled probes through the proxy (3× `/search`, `max_results=1`) gave
+  client-observed 1.367 / 1.947 / 2.801 s against logged `latency_ms`
+  1332 / 1908 / 2764 ms — i.e. **the logged upstream leg ≈ what the client
+  waits** for normal requests, no systematic proxy-side overhead. What IS
+  measured: individual logged attempts can be slow (2.7-12.1 s, all `n=1` rows
+  per `request_id`, e.g. a 12112 ms row), and GIN durations up to 18.6 s exist
+  (06:47 rows). Those two sets CANNOT be paired by timestamp (both carry several
+  concurrent requests), so neither "the upstream is slow" nor "~10 s of proxy
+  overhead" is established — treat any residual gap as **unresolved** and, if it
+  ever matters, correlate properly (proxy request id in the GIN line is absent,
+  so add `X-Proxy-Request-Id` capture or compare latency distributions over a
+  window instead of row-by-row). Do NOT resurrect the earlier "13-18 s = failover
+  across keys" explanation: `request_id` grouping shows single attempts.
+- **`stats.active_key_count` semantics** (source
+  `stats_service.go`: `is_active AND NOT is_invalid AND used_quota < total_quota`
+  — the candidates-with-quota count, NOT `COUNT(is_active=1)`): measured
+  1260 active vs 1242 with quota, i.e. **18 keys are active but carry
+  `used_quota >= total_quota`** on the proxy's own (stale) counters. Those are
+  exactly the keys the sweep's counter refresh (`used_quota=plan_usage,
+  total_quota=plan_limit`) aligns; until it reaches them the proxy skips them as
+  "spent" candidates. Never quote one number for the other.
 - **Watcher guard**: a wait-bucket replay is published only when the chosen
   exit's OWN control probe answers 200; otherwise the cycle logs
   `replay[…] SKIPPED — exit-limited (control=403…)`. Rationale: exit 1091
