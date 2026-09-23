@@ -1172,7 +1172,28 @@ in the proxy pool (only 222 were new).
   stops advancing. When (re)starting any pidfile-guarded watcher: `rm -f` the
   pidfile first, then confirm a NEW `started … (pid N)` banner and one logged
   cycle. The 5-minute cadence makes a dead watcher look merely quiet.
-- **fnos tree is aligned** to `origin/main` (4fa18fe) with BOTH rate blocks at
+- **Restart deadlines (handoff, 2026-09-23 15:35 CST)**. The code fix
+  (`provider/tavily.py` two-stage check, `stage/definition.py` limiter feedback,
+  `config/defaults.py`) still needs the safe-window restart, and the pool is only
+  protected until then by the eviction loop — relaunched 15:35 for 72 × 10 min
+  (≈12 h, ends ~03:35). Two exposures expire the moment it stops:
+  1. the next scheduled tavily run (`0 1 * * *` UTC = **09:00 CST**) validates
+     with the PRE-fix provider, so disabled-account keys re-enter the pool as
+     fresh 402 sources;
+  2. the sibling session's wait-pool recovery (in the container since ~13:53)
+     pushes recovered keys immediately — validated by that same pre-fix provider.
+  So: restart **tonight, before ~09:00**, then relaunch the loop.
+- **Restart checklist**. Window = `SELECT provider_name FROM run_records WHERE
+  status='running'` returns nothing; at 15:20 CST an `nvidia` scan started
+  (wide-corpus profile, hours long) and the previous restart already cost
+  kimi-coding/kimi-ai/glm-ai (`failed` 07:02:19 UTC = 15:02 CST). A restart also
+  kills the sibling's in-container wait recovery (report it; do not take it over)
+  and both of my container pieces — relaunch `/tmp/tavily_watch_v2.py`
+  (`TAVILY_WATCH_CYCLES=120`, `RESIN_PROXY_TOKEN`; `rm -f` the pidfile first) and
+  `/tmp/tavily_evict_loop.sh` (`CYCLES=72`) afterwards.
+- **Deploy pre-validated**: a clean worktree at `origin/main` (58d3952) runs
+  **789 tests OK / 8 skipped**, so the whole-tree republish has its gate.
+- **fnos tree is aligned** to `origin/main` with BOTH rate blocks at
   0.2/2, and the container copies were re-copied FROM that tree and verified by
   md5 (tree ↔ container MATCH for all three tavily configs) — so following the
   documented republish recipe cannot silently revert them.
