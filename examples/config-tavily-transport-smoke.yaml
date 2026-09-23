@@ -73,8 +73,9 @@ ratelimits:
     burst_limit: 3
     adaptive: true
   tavily:
-    base_rate: 1.0
-    burst_limit: 5
+    # 0.2 req/s = 5 s/key: the measured safe bulk pace (see config-tavily.yaml).
+    base_rate: 0.2
+    burst_limit: 2
     adaptive: true
 
 tasks:
@@ -112,8 +113,8 @@ tasks:
       - query: '"tvly-" extension:env'
       - query: '"TAVILY_API_KEY"'
     rate_limit:
-      base_rate: 1.0
-      burst_limit: 5
+      base_rate: 0.2
+      burst_limit: 2
       adaptive: true
     storage:
       directory: ""

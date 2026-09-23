@@ -410,7 +410,12 @@ def get_default_config() -> Dict[str, Any]:
                     {"query": '"tavily-" language:Python'},
                     {"query": '"tavily-" extension:env'},
                 ],
-                "rate_limit": {"base_rate": 2.0, "burst_limit": 10, "adaptive": True},
+                # Measured 2026-09-23: 1 req/s sustained through one exit is the
+                # block trip point for tavily (a 1276-key sweep failed 1249/1251
+                # even at 6 s pacing); the hardened providers (kimi/mimo/qwen/
+                # glm) already run at 0.2/2 = 1 per 5 s. Keep lockstep with
+                # examples/config-tavily*.yaml.
+                "rate_limit": {"base_rate": 0.2, "burst_limit": 2, "adaptive": True},
                 "storage": {
                     "directory": "",
                     "plan": "",

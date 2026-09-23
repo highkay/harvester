@@ -99,5 +99,54 @@ class TestCheckStageVerdictRouting(unittest.TestCase):
         self.assertEqual([kind for _provider, kind, _data in output.results], [ResultType.VALID.value])
 
 
+class TestCheckStageLimiterFeedback(unittest.TestCase):
+    """CheckStage must report the REAL outcome to the adaptive limiter.
+
+    A retryable verdict (RATE_LIMITED / TIMEOUT / NETWORK_ERROR / 5xx) is a
+    transport signal, not a key verdict: it has to reach ``adjust_rate``'s
+    failure path. Reporting True unconditionally (before 2026-09-23) made that
+    path unreachable, so the bucket could only accelerate (x1.1 per 10
+    successes, capped at 2x base) and held the provider at the 1-2 req/s that
+    trips tavily's per-IP bulk-validation block (a 1276-key sweep failed
+    1249/1251 at 6 s pacing; the validated safe pace is >=5-6 s/key).
+    """
+
+    BASE_RATE = 5.0
+
+    def _bucket_after(self, result: CheckResult, calls: int = 3):
+        from core.models import RateLimitConfig
+        from tools.ratelimit import RateLimiter
+        from tools.utils import get_service_name
+
+        service = get_service_name("ollama")
+        limiter = RateLimiter({service: RateLimitConfig(base_rate=self.BASE_RATE, burst_limit=10, adaptive=True)})
+        provider = OllamaProvider(conditions=[])
+        resources = StageResources(
+            limiter=limiter,
+            providers={"ollama": provider},
+            config=mock.MagicMock(),
+            task_configs={"ollama": TaskConfig(name="ollama", provider_type="ollama", stages=StageConfig())},
+            auth=mock.MagicMock(),
+        )
+        stage = CheckStage(resources, handler=lambda _output: None)
+        with mock.patch.object(provider, "check", return_value=result):
+            for _ in range(calls):
+                stage._check_worker(CheckTask(provider="ollama", service=Service(key="candidate-key")))
+
+        return limiter.buckets[service]
+
+    def test_retryable_verdicts_engage_the_backoff(self):
+        bucket = self._bucket_after(CheckResult.fail(ErrorReason.RATE_LIMITED))
+
+        self.assertAlmostEqual(bucket.rate, self.BASE_RATE / 2)
+
+    def test_key_verdicts_do_not_back_off(self):
+        for result in (CheckResult.success(), CheckResult.fail(ErrorReason.INVALID_KEY)):
+            with self.subTest(reason=result.error_reason):
+                bucket = self._bucket_after(result)
+
+                self.assertAlmostEqual(bucket.rate, self.BASE_RATE)
+
+
 if __name__ == "__main__":
     unittest.main()

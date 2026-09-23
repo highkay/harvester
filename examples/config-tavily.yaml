@@ -74,8 +74,14 @@ ratelimits:
     burst_limit: 3
     adaptive: true
   tavily:
-    base_rate: 1.0
-    burst_limit: 5
+    # Measured 2026-09-23: tavily blocks an egress by cumulative distinct-key
+    # volume — a 1276-key sweep failed 1249/1251 (429 "blocked due to excessive
+    # requests") at both 0 s and 6 s pacing, while 25 keys at 6 s/key passed
+    # 56%. 1 req/s sustained through one exit IS the trip point (the validated
+    # wait-pool recovery pace is >=5-6 s/key), so tavily runs at the hardened
+    # provider rate (kimi/mimo/qwen/glm lineage), not the 1.0/5 default.
+    base_rate: 0.2
+    burst_limit: 2
     adaptive: true
 
 tasks:
@@ -137,8 +143,9 @@ tasks:
       - query: '"tavily-" language:Python'
       - query: '"tavily-" extension:env'
     rate_limit:
-      base_rate: 1.0
-      burst_limit: 5
+      # Same measured block as ratelimits.tavily above: 0.2 req/s = 5 s/key.
+      base_rate: 0.2
+      burst_limit: 2
       adaptive: true
     storage:
       directory: ""

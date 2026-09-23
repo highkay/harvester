@@ -643,8 +643,15 @@ class CheckStage(BasePipelineStage):
                 model=task.service.model,
             )
 
-            # Report rate limit success
-            self.resources.limiter.report_result(service_type, True)
+            # Feed the limiter the REAL outcome. A retryable verdict
+            # (RATE_LIMITED / TIMEOUT / NETWORK_ERROR / 5xx) is a transport
+            # signal, not a key verdict, and must engage adjust_rate's backoff
+            # path. Reporting True unconditionally (before 2026-09-23) made that
+            # path unreachable: the bucket could only accelerate (x1.1 per 10
+            # successes, capped at 2x base), which is exactly what holds a
+            # provider at the 1-2 req/s that trips tavily's per-IP
+            # bulk-validation block (and groq's/agnes' egress traps).
+            self.resources.limiter.report_result(service_type, not result.reason.is_retryable())
 
             # Create output object
             output = StageOutput(task=task)

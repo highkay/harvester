@@ -1060,6 +1060,92 @@ in the proxy pool (only 222 were new).
   `/tmp/tavily_key_recovery.py` hardcodes the proxy master key as a fallback
   default → rotate the master key (proxy `POST /api/settings/master-key/reset` +
   harvester `.env` `TAVILY_PROXY_AUTH_KEY`) or scrub that file.
+  **Rotation caveat**: the harvester container's env is frozen at creation, so
+  resetting the proxy key + editing `.env` WITHOUT a `docker compose up -d`
+  leaves harvester-web pushing the old key — every tavily push then 401s
+  silently (the push service never raises). And that recreate wipes the `cp`-ed
+  code overlay → re-publish the whole tree (see the republish skill).
+
+### Resin: the pool's clean egress (measured 2026-09-23)
+
+- **Resin** (`resinat/resin`) runs on fnos as container `resin`, dir
+  `/home/admin/resin`, port **2260**; an HTTP/SOCKS5 forward proxy + reverse
+  proxy over a node pool with **sticky sessions per `Platform.Account`**
+  (state at `data/state/state.db`: endpoints / platforms / subscriptions /
+  account_header_rules). Its compose holds `RESIN_ADMIN_TOKEN` /
+  `RESIN_PROXY_TOKEN`.
+- **Auth forms** (all measured): `-U "Default.<acct>:TOKEN"` for HTTP forward
+  (and the same for SOCKS5 per its README); the empty-account form `-U ":TOKEN"`
+  **rotates per request** — curl honours it, but Python `requests`/urllib3 DROP
+  credentials for `http://:pass@host` (ProxyError) — so from Python use the
+  non-empty form `http://Default.:TOKEN@192.168.1.18:2260` (Platform `Default`
+  + empty Account), which also rotates per request. 8 accounts × 1 probe →
+  8 distinct egress IPs; the same account 4× concurrently → 1 IP (stickiness
+  confirmed).
+- **Success rate per probe ≈ 75%** (measured 5/8, 3/4, 4/6 …): individual nodes
+  time out, so ALWAYS retry on a different account before treating a probe as a
+  verdict — one dead node is noise. This is the cheapest way to dilute tavily's
+  per-IP distinct-key block for paced sweeps/recoveries.
+- Harvester-side egress override (NOT yet applied — needs the safe-window
+  recreate, see below): `HARVESTER_PROXY_TAVILY=http://Default.:<TOKEN>@192.168.1.18:2260`
+  gives tavily scans per-request rotation.
+
+### tavily: fixes applied 2026-09-23 (repo + prod)
+
+- **Rate policy**: `examples/config-tavily*.yaml` (all three) and the
+  `config/defaults.py` tavily preset moved from 1.0-2.0 req/s to **0.2/2**
+  (1 per 5 s), pinned by `tests/test_tavily_rate_limit.py` — the defaults↔
+  examples lockstep test. Rationale: 1-2 req/s through one exit is the measured
+  trip point; the hardened providers already ran at 0.2/2.
+- **Limiter feedback bug (fixed)**: `CheckStage._check_worker` reported
+  `report_result(service_type, True)` unconditionally, so `adjust_rate`'s
+  failure branch (halve after 3 consecutive failures) was unreachable and the
+  bucket could only accelerate toward 2× base. It now reports
+  `not result.reason.is_retryable()`, pinned by
+  `tests/test_check_stage_verdicts.py::TestCheckStageLimiterFeedback`
+  (RATE_LIMITED ×3 halves the bucket; INVALID_KEY/success do not back off).
+- **Proxy auto-sync DISABLED** (`PUT /api/settings/auto-sync {"enabled":false}`):
+  the full-pool sync is ~98% blocked from the rq egress (1249/1251 × 429, at
+  both 0 s and 6 s pacing) and it cannot see `account.plan_usage` anyway, so it
+  only produced the error storm. Pool hygiene now runs as a paced external
+  sweep. Values kept for later: `request_interval_seconds` 4-6, `interval_minutes`
+  360.
+- **Eviction sweep** (the actual 402 fix): source
+  `.omo/evidence/tavily_watch/tavily_pool_evict.py`, deployed in the container as
+  `/tmp/tavily_pool_evict.py`; state + log on the bind mount
+  (`data/tavily_pool_evict_state.json` / `.log`) so recreates cannot wipe them.
+  Resumes; rotates 12 Resin accounts (`Default.a1..a12`); 1.5 s pace; retries a
+  transport error on another account (3 attempts) before filing anything;
+  control probe = classify a known-good key on THREE accounts before believing
+  an egress-limited window. `--order recent` walks the recently-used keys first
+  (those are the ones the proxy hands to clients and the only ones that can
+  402). Actions: `is_active=false` for 401-dead / `_is_quota_exhausted` keys;
+  counter refresh (`used_quota`/`total_quota` from `account.plan_usage/plan_limit`)
+  for usable keys, because the proxy's own accounting cannot read plan-level
+  usage. Verified live: `id=2807 exhausted plan=1000/1000 → is_active=false`,
+  `active_key_count` 1261 → 1259 → … (first 38 keys were all usable: the pool is
+  NOT mostly dead — the 402s come from a spent minority).
+- **Dead-key wording correction**: it is NOT true that the sync is the only
+  path that flags keys — live traffic (`tavily_proxy.go::Do`) also marks
+  `401 → MarkInvalid` / `432/433 → MarkExhausted`. The precise gap is that
+  **402 is handled by neither path and is absent from the failover switch**, so
+  it is returned to the client verbatim.
+- **Deployment mechanics for these fixes**: `examples/*.yaml` + `config/*.py`
+  changes land with `docker compose cp` and take effect on the next run (configs
+  are read at run start — no restart needed); `stage/definition.py` needs a
+  restart; an `.env` env change (e.g. `HARVESTER_PROXY_TAVILY`) needs a recreate
+  → do all three in one safe-window pass (no `run_records` row in `running`),
+  republishing the whole tree afterwards.
+- **Watchers (corrected, 2026-09-23)**: container
+  `/tmp/tavily_watch_v2.py` → **bind-mount** `data/tavily_validate_watch.log`
+  (+ `.pid` guard; the image has no `pgrep`): census, exit A/B (1091/1080/1090 +
+  Resin), stratified wait replay (head/middle/tail thirds) with a control probe
+  and pipeline-rule classification, plus proxy pool metrics (`/api/stats` +
+  sync job). rq `/tmp/tavily_proxy_watch.py`: fix the GIN parse — **parts[1] is
+  the status and parts[2] the latency**; filter to `POST` + `"/search"` or
+  healthz/stats 200s inflate the success rate. A sibling session runs its own
+  wait-pool recovery (`/tmp/tavily_wait_recovery.py`, ≥5 s/key, exports
+  1090/1091) — monitor it, do NOT start a second recovery over the same bucket.
 
 ## Hardening pass (2026-09-23, Oracle audit of the scanning path)
 

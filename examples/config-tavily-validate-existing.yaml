@@ -5,6 +5,11 @@
 global:
   workspace: "./data-tavily"
   max_retries_requeued: 3
+  # Standalone runs MUST set a socks exit here (or export HARVESTER_PROXY /
+  # HARVESTER_PROXY_TAVILY): api.tavily.com is unreachable container-direct
+  # (measured ReadTimeout) and a direct re-validation re-files live keys as
+  # NETWORK_ERROR -> wait-check. Web-triggered runs get the proxy injected by
+  # web/runner.py::_generate_temp_yaml, which overrides this value.
   proxy: ""
   github_credentials:
     sessions:
@@ -49,8 +54,10 @@ ratelimits:
     burst_limit: 3
     adaptive: true
   tavily:
-    base_rate: 1.0
-    burst_limit: 5
+    # Validation-only profile: 0.2 req/s = 5 s/key, the measured safe pace for
+    # bulk /usage sweeps (see examples/config-tavily.yaml).
+    base_rate: 0.2
+    burst_limit: 2
     adaptive: true
 
 tasks:
@@ -82,8 +89,8 @@ tasks:
     conditions:
       - query: '"tvly-"'
     rate_limit:
-      base_rate: 1.0
-      burst_limit: 5
+      base_rate: 0.2
+      burst_limit: 2
       adaptive: true
     storage:
       directory: ""
