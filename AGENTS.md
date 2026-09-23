@@ -1097,9 +1097,30 @@ in the proxy pool (only 222 were new).
 - The eviction sweep mirrors the same two-stage logic, so it evicts the
   disabled-account keys retroactively (`--from-402-logs N` targets exactly the
   ids behind the newest upstream 402 rows).
-- **Deployment note**: the container still runs the pre-fix provider (stacked
-  overlay) until the safe-window republish — scans keep mis-validating
-  disabled-account keys until then; the sweep does not wait for it.
+- **DEPLOYED 2026-09-23 18:09 CST** (user-directed restart; no recreate, so
+  `.env` untouched): fnos aligned to `d0b11f3` (backup `rollback-20260923-180830`,
+  0 local-only commits, `Dockerfile.web` restored + `docker-compose.hostnet.yml`
+  re-applied), whole tree `docker compose cp`-ed, `docker compose restart`,
+  `/health` = ok. Verified: md5 host↔container MATCH for
+  provider/tavily.py · stage/definition.py · config/defaults.py ·
+  examples/config-tavily.yaml · main.py · web/runner.py; in-container source
+  markers (`_check_usage`/`_check_search`/`_judge_search`, the disabled-account
+  regex, `not result.reason.is_retryable()`) all present; both tavily rate blocks
+  read 0.2/2; defaults preset 0.2/2.
+  **Functional proof** (`.omo/evidence/tavily_watch/post_deploy_proof.py`,
+  deployed provider, exit 1090): known-good key → `available=True`
+  ("Tavily /search probe accepted key"); pool id 3408 (the disabled account that
+  used to classify VALID) → `available=False reason=no_quota`.
+  Collateral, as predicted: nvidia / mimo-sg / qwen-intl were reconciled
+  `failed: interrupted by service restart` at 10:10:26 UTC (= 18:10 CST); the
+  in-container watcher died and was relaunched (new pid 106, banner 18:11:49);
+  the host-side eviction loop survived untouched.
+- **Restart vs recreate for the container's /tmp pieces**: a `restart` preserves
+  `/tmp` (the sweeper `/tmp/tavily_pool_evict.py` and the watcher
+  `/tmp/tavily_watch_v2.py` survive — only their PROCESSES die and need
+  relaunching); a **recreate** (`up -d`) wipes them, so after any recreate
+  re-copy both from `.omo/evidence/tavily_watch/` BEFORE relaunching the host
+  loop, or its remaining cycles fail through the whole tavily push window.
 - **Durable hygiene loop**: `/tmp/tavily_evict_loop.sh` →
   `data/tavily_evict_loop.log` — every 10 minutes it re-reads the newest
   upstream 402 rows (`--from-402-logs 200`) and evicts exactly those ids (12
@@ -1175,19 +1196,12 @@ in the proxy pool (only 222 were new).
   stops advancing. When (re)starting any pidfile-guarded watcher: `rm -f` the
   pidfile first, then confirm a NEW `started … (pid N)` banner and one logged
   cycle. The 5-minute cadence makes a dead watcher look merely quiet.
-- **Restart deadlines (handoff, 2026-09-23 16:10 CST)**. The code fix
-  (`provider/tavily.py` two-stage check, `stage/definition.py` limiter feedback,
-  `config/defaults.py`) still needs the safe-window restart. Pool hygiene is
-  covered meanwhile by the eviction loop, **relaunched 16:08 for 130 × 10 min —
-  its banner prints the computed expiry (`~2026-09-24 13:48`), sized past
-  tomorrow's tavily run (09:00 start, push at the END ≈11:25)**. Without the
-  restart, that run still validates with the PRE-fix provider, so
-  disabled-account keys re-enter the pool as fresh 402 sources — evicted on the
-  next loop cycle, but only until the loop's expiry:
-  1. next scheduled tavily run `0 1 * * *` UTC = 09:00 CST (push ≈11:25 CST);
-  2. the sibling session's wait-pool recovery (in the container since ~13:53)
-     pushes recovered keys immediately under that same pre-fix provider.
-  So: restart **tonight** (before 09:00), then relaunch the loop.
+- **Restart deadlines — CLOSED 2026-09-23 18:09 CST**: the code fix is live (see
+  the DEPLOYED bullet above), so the exposures below no longer apply. Kept for
+  the record: before the deploy, the pool was protected only by the eviction loop
+  and the next tavily run (09:00 CST, push ≈11:25) would have validated with the
+  PRE-fix provider; the sibling session's wait recovery (~13:53) pushed under
+  that same pre-fix provider.
 - **Resin probe discipline inside the loop**: a cycle's `ab[resin]` can read
   `EXC-ReadTimeout` for BOTH keys — that is one dead node, i.e. noise (≈75%
   per-probe success, retry on another account before believing it). Worth knowing
@@ -1197,26 +1211,29 @@ in the proxy pool (only 222 were new).
 - **Slowest logged leg observed: 14 395 ms** (a 200 at 07:23:32 UTC, single row)
   — supersedes the earlier 12.1 s figure. The attempt-count question stays OPEN
   (logger sink), see above.
-- **Restart checklist**. Window = `SELECT provider_name FROM run_records WHERE
-  status='running'` returns nothing; at 15:20 CST an `nvidia` scan started
-  (wide-corpus profile, hours long) and the previous restart already cost
-  kimi-coding/kimi-ai/glm-ai (`failed` 07:02:19 UTC = 15:02 CST). A restart also
-  kills the sibling's in-container wait recovery (report it; do not take it over)
-  and both of my container pieces — relaunch `/tmp/tavily_watch_v2.py`
-  (`TAVILY_WATCH_CYCLES=120`, `RESIN_PROXY_TOKEN`; `rm -f` the pidfile first) and
-  `/tmp/tavily_evict_loop.sh` (`CYCLES=130`, banner prints the expiry, currently
-  ~2026-09-24 14:22) afterwards.
-- **Deploy pre-validated**: a clean worktree at `origin/main` (58d3952) runs
-  **789 tests OK / 8 skipped**, so the whole-tree republish has its gate.
-- **fnos tree alignment is a POINT-IN-TIME fact, not a standing state**: it was
-  aligned as of `4fa18fe` while `origin/main` has since moved to 58d3952 (docs
-  only), and other sessions push to `origin/main` directly — so before any
-  republish, re-run step 1 of the recipe (`git fetch origin` + empty
-  `origin/main..HEAD` + `git reset --hard origin/main` + restore
-  `Dockerfile.web` + re-apply `docker-compose.hostnet.yml`) and re-verify the
-  md5s. Skipping that step is exactly what produced the earlier stale `1.0/5`
-  copy. Both rate blocks are 0.2/2 in the tree, and the container copies were
-  re-copied FROM the tree and verified by md5.
+- **Restart checklist (executed 18:09 CST; kept for the next one)**. Window =
+  `SELECT provider_name FROM run_records WHERE status='running'` returns nothing
+  (the 18:09 restart was user-directed with nvidia / mimo-sg / qwen-intl live —
+  all three were reconciled `failed: interrupted by service restart` at
+  10:10:26 UTC, so budget for that when planning one yourself). A restart also
+  kills any in-container jobs (the sibling's wait recovery did NOT appear in the
+  process list by then, but it ran earlier — report, never take over) and the
+  watcher PROCESS — relaunch `/tmp/tavily_watch_v2.py`
+  (`TAVILY_WATCH_CYCLES=120`, `RESIN_PROXY_TOKEN`; `rm -f` the pidfile first,
+  then confirm a NEW banner + pid and a fresh cycle). The host-side
+  `/tmp/tavily_evict_loop.sh` (`CYCLES=130`, banner prints its expiry) survives a
+  restart untouched; after a RECREATE re-copy the two container scripts instead
+  (see the restart-vs-recreate bullet above).
+- **Deploy pre-validated**: a clean worktree at the deployed SHA `d0b11f3` runs
+  **789 tests OK / 8 skipped**.
+- **fnos tree alignment is a POINT-IN-TIME fact, not a standing state** (this is
+  exactly what produced a stale `1.0/5` copy earlier): the tree was reset to
+  `d0b11f3` and the container files re-copied FROM it at 18:09 CST, with md5
+  MATCH verified for the six key files — but other sessions push to `origin/main`
+  directly, so BEFORE any future republish re-run step 1 of the recipe
+  (`git fetch origin` + empty `origin/main..HEAD` + `git reset --hard origin/main`
+  + restore `Dockerfile.web` + re-apply `docker-compose.hostnet.yml`) and
+  re-verify the md5s instead of trusting this note.
 - **Exit blocks change flavour**: at 14:48 the SAME exit 1091 answered
   `403 Forbidden` HTML on /usage for a known-good key AND a dead key at once —
   the per-IP block rotates between `429 blocked due to excessive requests` and a
