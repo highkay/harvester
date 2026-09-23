@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -61,6 +62,16 @@ class PushService:
 
         self._db_path: str = db_path
         self._workspace: Path = Path(workspace).resolve()
+        # Per-run idempotency guard — same pattern as the per-provider push
+        # services (web/tavily_push.py, web/agnes_ai_push.py). The runner can
+        # invoke the completion hook twice for one run (TaskManager completion
+        # listener + the direct _push_completed_tasks call), which without this
+        # guard duplicates the gpt-load HTTP push and the push_logs row.
+        # Keyed by (provider_name, run_id) — NOT run_id alone — because one
+        # config can define multiple tasks (e.g. mimo-cn + mimo-sg) that share
+        # a run_id but push different valid-keys files.
+        self._seen_run_keys: set[tuple[str, str]] = set()
+        self._lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Public API
@@ -76,6 +87,18 @@ class PushService:
             logger.info(
                 f"Push started: provider={provider_name} run_id={run_id}"
             )
+
+            # 0. Idempotency guard — prevents _on_completed double-fire from
+            # duplicating the push and the push_logs row (see __init__).
+            with self._lock:
+                seen_key = (provider_name, run_id)
+                if seen_key in self._seen_run_keys:
+                    logger.info(
+                        f"Push skipped: provider={provider_name} "
+                        f"run_id={run_id} already pushed"
+                    )
+                    return
+                self._seen_run_keys.add(seen_key)
 
             # 1. Resolve mapping
             mapping = self._get_mapping(provider_name)
