@@ -24,6 +24,13 @@ from .registry import register_provider
 
 logger = get_logger("provider")
 
+# Verdicts the FREE /usage pre-filter is allowed to end a check with: the states
+# /usage can actually see. Everything else falls through to the /search probe,
+# because /usage cannot see a disabled account (measured 2026-09-23).
+_USAGE_TERMINAL_REASONS = frozenset(
+    {ErrorReason.INVALID_KEY, ErrorReason.NO_ACCESS, ErrorReason.NO_QUOTA}
+)
+
 
 class TavilyProvider(AIBaseProvider):
     """Tavily API provider implementation."""
@@ -68,18 +75,54 @@ class TavilyProvider(AIBaseProvider):
         path = trim(endpoint) or self.model_path
         return urllib.parse.urljoin(base_url, path.removeprefix("/"))
 
-    def check(self, token: str, address: str = "", endpoint: str = "", model: str = "") -> CheckResult:
-        """Check Tavily token validity with the usage endpoint.
+    def _search_url(self, address: str = "", endpoint: str = "") -> str:
+        base_url = trim(address) or self._base_url
+        path = trim(endpoint) or self.completion_path
+        return urllib.parse.urljoin(base_url, path.removeprefix("/"))
 
-        The /usage endpoint returns 200 for any authentic key, including keys
-        whose plan quota is fully exhausted (those keys return 402 on actual
-        /search calls). We parse the response to detect exhaustion and classify
-        such keys as NO_QUOTA so they are never pushed to the proxy pool.
+    def _probe_body(self) -> Dict[str, Any]:
+        """Minimal /search payload: one result, basic depth = 1 search credit."""
+        return {"query": "harvester key validation probe", "max_results": 1, "search_depth": "basic"}
+
+    def check(self, token: str, address: str = "", endpoint: str = "", model: str = "") -> CheckResult:
+        """Validate a Tavily key against the REAL endpoint, in two stages.
+
+        Neither endpoint is sufficient alone (both measured 2026-09-23):
+
+        * ``GET /usage`` is FREE and answers 200 for any authentic key, but it
+          cannot see a **disabled account** — a key whose account Tavily turned
+          off for an unpaid pay-as-you-go balance reported
+          ``plan_usage 0/1000 paygo_usage 0/20000`` on /usage while
+          ``POST /search`` answered ``402 {"detail":{"error":"Your account is
+          currently disabled. This is likely due to unpaid pay-as-you-go
+          balance."}}``.
+        * ``POST /search`` is authoritative (it is what the proxy pool serves)
+          but consumes one search credit.
+
+        So: stage 1 reads /usage (free) and returns a terminal verdict for the
+        states it CAN see (spent plan / per-key limit -> NO_QUOTA, auth errors);
+        stage 2 only runs when stage 1 saw nothing terminal, and probes /search.
+        Keys from disabled accounts were previously classified VALID, pushed to
+        the pool, and then returned 402 to every client request.
         """
         headers = self._get_headers(token=token)
         if not headers:
             return CheckResult.fail(ErrorReason.INVALID_KEY)
 
+        usage_result = self._check_usage(headers=headers, address=address, endpoint=endpoint)
+        if usage_result is not None:
+            return usage_result
+
+        return self._check_search(headers=headers, address=address, endpoint=endpoint)
+
+    def _check_usage(self, headers: Dict[str, str], address: str = "", endpoint: str = "") -> Optional[CheckResult]:
+        """Free /usage pre-filter. Returns a TERMINAL failure, else None.
+
+        Only INVALID_KEY / NO_ACCESS / NO_QUOTA end the check here: they are the
+        states /usage can see, and they save the /search credit. A healthy (or
+        unreadable) /usage answer returns None so the authoritative /search probe
+        decides — that is the only way to see a disabled account.
+        """
         url = self._usage_url(address=address, endpoint=endpoint)
         timeout = self._get_timeout(default=10)
         retries = self._get_retries(default=2)
@@ -88,12 +131,49 @@ class TavilyProvider(AIBaseProvider):
         for attempt in range(max(1, retries)):
             try:
                 with request("GET", url, headers=headers, timeout=timeout, use_proxy=self._get_use_proxy()) as response:
-                    return self._judge_usage(response.status_code, response.text)
+                    result = self._judge_usage(response.status_code, response.text)
+                    return result if result.reason in _USAGE_TERMINAL_REASONS else None
             except requests.exceptions.HTTPError as e:
                 code = http_error_status(e)
                 message = http_error_message(e)
 
                 result = self._judge_usage(code, message)
+                if result.reason in _USAGE_TERMINAL_REASONS:
+                    return result
+            except requests.exceptions.Timeout:
+                code, message = 0, "timeout"
+            except Exception as e:
+                code, message = 0, str(e)
+
+            if attempt < retries - 1:
+                time.sleep(1)
+
+        logger.debug(f"Tavily /usage pre-filter inconclusive: {message or code}")
+        return None
+
+    def _check_search(self, headers: Dict[str, str], address: str = "", endpoint: str = "") -> CheckResult:
+        """Authoritative /search probe (1 credit) with the provider's retry budget."""
+        url = self._search_url(address=address, endpoint=endpoint)
+        timeout = self._get_timeout(default=10)
+        retries = self._get_retries(default=2)
+
+        code, message = 0, ""
+        for attempt in range(max(1, retries)):
+            try:
+                with request(
+                    "POST",
+                    url,
+                    headers=headers,
+                    json=self._probe_body(),
+                    timeout=timeout,
+                    use_proxy=self._get_use_proxy(),
+                ) as response:
+                    return self._judge_search(response.status_code, response.text)
+            except requests.exceptions.HTTPError as e:
+                code = http_error_status(e)
+                message = http_error_message(e)
+
+                result = self._judge_search(code, message)
                 if code in NO_RETRY_ERROR_CODES or result.reason in {
                     ErrorReason.INVALID_KEY,
                     ErrorReason.NO_ACCESS,
@@ -109,10 +189,56 @@ class TavilyProvider(AIBaseProvider):
                 time.sleep(1)
 
         if code == 0:
-            logger.debug(f"Check Tavily usage failed: {message}")
+            logger.debug(f"Check Tavily search probe failed: {message}")
             return CheckResult.fail(ErrorReason.TIMEOUT if message == "timeout" else ErrorReason.NETWORK_ERROR)
 
-        return self._judge_usage(code, message)
+        return self._judge_search(code, message)
+
+    def _judge_search(self, code: int, message: str) -> CheckResult:
+        """Judge the /search probe — the endpoint the proxy pool actually serves."""
+        message = trim(message)
+        text = self._message_text(message)
+
+        if code == 200:
+            try:
+                data = json.loads(message)
+            except Exception:
+                return CheckResult.fail(ErrorReason.UNKNOWN)
+
+            # A 200 without a results array is not a search answer (proxy
+            # interstitial / captive portal body) — never a valid verdict.
+            if not isinstance(data, dict) or not isinstance(data.get("results"), list):
+                return CheckResult.fail(ErrorReason.UNKNOWN)
+
+            return CheckResult.success(message="Tavily /search probe accepted key")
+
+        if code == 401 or re.findall(r"invalid\s+(api\s+)?key|unauthorized|unauthenticated", text, flags=re.I):
+            return CheckResult.fail(ErrorReason.INVALID_KEY)
+
+        if code == 403:
+            return CheckResult.fail(ErrorReason.NO_ACCESS)
+
+        # 402 = payment required: spent plan, spent per-key limit, or a disabled
+        # account ("account is currently disabled ... unpaid pay-as-you-go
+        # balance"), which /usage cannot see. 432/433 are Tavily's own limit
+        # codes (the proxy's own sync maps them to MarkExhausted).
+        if code in (402, 432, 433) or re.findall(
+            r"insufficient|quota|credit|billing|usage\s+limit|pay[- ]?as[- ]?you[- ]?go|account\s+is\s+(currently\s+)?disabled|plan\s+limit",
+            text,
+            flags=re.I,
+        ):
+            return CheckResult.fail(ErrorReason.NO_QUOTA)
+
+        if code == 429 or re.findall(r"rate\s*limit|too\s+many\s+requests", text, flags=re.I):
+            return CheckResult.fail(ErrorReason.RATE_LIMITED)
+
+        if code == 400:
+            return CheckResult.fail(ErrorReason.BAD_REQUEST)
+
+        if code >= 500:
+            return CheckResult.fail(ErrorReason.SERVER_ERROR)
+
+        return CheckResult.fail(ErrorReason.UNKNOWN)
 
     def _judge_usage(self, code: int, message: str) -> CheckResult:
         """Judge Tavily usage endpoint response.

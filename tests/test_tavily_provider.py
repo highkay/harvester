@@ -149,6 +149,28 @@ def _patch_request(response: FakeResponse):
     return mock.patch("provider.tavily.request", return_value=response)
 
 
+def _patch_two_stage(usage_response=None, search_response=None, usage_error=None, search_error=None):
+    """Patch provider.tavily.request, dispatching by HTTP method.
+
+    check() is two-stage since 2026-09-23: GET = the free /usage pre-filter,
+    POST = the authoritative /search probe. Returns (patcher, calls) so a test
+    can assert which stages actually ran.
+    """
+    calls = {"GET": 0, "POST": 0}
+
+    def fake(method, url, **kwargs):
+        calls[method] = calls.get(method, 0) + 1
+        if method == "POST":
+            if search_error is not None:
+                raise search_error
+            return search_response
+        if usage_error is not None:
+            raise usage_error
+        return usage_response
+
+    return mock.patch("provider.tavily.request", side_effect=fake), calls
+
+
 def _http_error(status_code: int, text: str) -> requests.exceptions.HTTPError:
     response = requests.Response()
     response.status_code = status_code
@@ -214,6 +236,9 @@ class TestIsQuotaExhausted(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
+_SEARCH_OK = '{"query": "harvester key validation probe", "results": [{"title": "probe"}]}'
+
+
 class TestTavilyProviderCheck(unittest.TestCase):
     def setUp(self):
         self.provider = TavilyProvider(
@@ -221,10 +246,16 @@ class TestTavilyProviderCheck(unittest.TestCase):
         )
 
     def test_check_success_with_remaining_quota(self):
-        with _patch_request(FakeResponse(200, json.dumps(_USAGE_WITH_REMAINING))):
+        """Valid = /usage healthy AND the /search probe returning a results array."""
+        patcher, calls = _patch_two_stage(
+            usage_response=FakeResponse(200, json.dumps(_USAGE_WITH_REMAINING)),
+            search_response=FakeResponse(200, _SEARCH_OK),
+        )
+        with patcher:
             result = self.provider.check(token="tvly-dev-testkey0123456789ABCDEF")
         self.assertTrue(result.ok)
         self.assertNotIn("testkey", result.message or "")
+        self.assertEqual(calls, {"GET": 1, "POST": 1})
 
     def test_check_exhausted_quota_returns_no_quota(self):
         """Key with plan_usage >= plan_limit must be NO_QUOTA, not valid."""
@@ -244,17 +275,34 @@ class TestTavilyProviderCheck(unittest.TestCase):
         self.assertEqual(result.reason, ErrorReason.NO_QUOTA)
 
     def test_check_exhausted_with_paygo_is_valid(self):
-        """Plan exhausted but paygo credits available → key is still usable."""
-        with _patch_request(
-            FakeResponse(200, json.dumps(_USAGE_EXHAUSTED_WITH_PAYGO))
-        ):
+        """Plan exhausted but paygo credits available → the /search probe decides."""
+        patcher, _ = _patch_two_stage(
+            usage_response=FakeResponse(200, json.dumps(_USAGE_EXHAUSTED_WITH_PAYGO)),
+            search_response=FakeResponse(200, _SEARCH_OK),
+        )
+        with patcher:
             result = self.provider.check(token="tvly-dev-testkey0123456789ABCDEF")
         self.assertTrue(result.ok)
 
     def test_check_no_plan_limit_is_valid(self):
-        with _patch_request(FakeResponse(200, json.dumps(_USAGE_NO_PLAN_LIMIT))):
+        """No plan limit in /usage → the /search probe decides."""
+        patcher, _ = _patch_two_stage(
+            usage_response=FakeResponse(200, json.dumps(_USAGE_NO_PLAN_LIMIT)),
+            search_response=FakeResponse(200, _SEARCH_OK),
+        )
+        with patcher:
             result = self.provider.check(token="tvly-dev-testkey0123456789ABCDEF")
         self.assertTrue(result.ok)
+
+    def test_check_200_without_results_is_unknown(self):
+        """A 200 that carries no results array is not a search answer."""
+        patcher, _ = _patch_two_stage(
+            usage_response=FakeResponse(200, json.dumps(_USAGE_WITH_REMAINING)),
+            search_response=FakeResponse(200, json.dumps(_USAGE_WITH_REMAINING)),
+        )
+        with patcher:
+            result = self.provider.check(token="tvly-dev-testkey0123456789ABCDEF")
+        self.assertEqual(result.reason, ErrorReason.UNKNOWN)
 
     def test_check_200_non_json_unknown(self):
         with _patch_request(FakeResponse(200, "<html>ok</html>")):
@@ -314,17 +362,140 @@ class TestTavilyProviderCheck(unittest.TestCase):
         self.assertEqual(result.reason, ErrorReason.TIMEOUT)
 
     def test_check_network_error_after_retries(self):
-        with mock.patch(
-            "provider.tavily.request",
-            side_effect=requests.exceptions.ConnectionError("boom"),
-        ) as req_mock:
+        """Both stages use the provider retry budget (2 usage + 2 search tries)."""
+        patcher, calls = _patch_two_stage(
+            usage_error=requests.exceptions.ConnectionError("boom"),
+            search_error=requests.exceptions.ConnectionError("boom"),
+        )
+        with patcher:
             result = self.provider.check(token="tvly-dev-testkey0123456789ABCDEF")
         self.assertEqual(result.reason, ErrorReason.NETWORK_ERROR)
-        self.assertEqual(req_mock.call_count, 2)
+        self.assertEqual(calls, {"GET": 2, "POST": 2})
 
     def test_check_empty_token_invalid(self):
         result = self.provider.check(token="")
         self.assertEqual(result.reason, ErrorReason.INVALID_KEY)
+
+
+# ---------------------------------------------------------------------------
+# /search probe stage — the disabled-account regression (measured 2026-09-23)
+# ---------------------------------------------------------------------------
+
+_DISABLED_ACCOUNT_402 = (
+    '{"detail":{"error":"Your account is currently disabled. This is likely due to '
+    'unpaid pay-as-you-go balance. Please update your payment method or contact '
+    'support@tavily.com"}}'
+)
+
+
+class TestTavilySearchProbe(unittest.TestCase):
+    """Measured 2026-09-23: /usage answered 200 with ``plan_usage 0/1000 paygo
+    0/20000`` for a key whose POST /search returned 402 "account is currently
+    disabled ... unpaid pay-as-you-go balance". Classifying such a key VALID
+    poisoned the proxy pool: the proxy cannot see the state either (its own
+    ``GetUsage`` reads only key.usage / account.plan_limit levels) and returned
+    the 402 to every client request (measured 16x402 + 3x503, no 200, in one
+    30-minute window).
+    """
+
+    def setUp(self):
+        self.provider = TavilyProvider(conditions=[_make_condition()], retries=2, timeout=5)
+
+    def test_disabled_account_is_no_quota_not_valid(self):
+        patcher, calls = _patch_two_stage(
+            usage_response=FakeResponse(200, json.dumps(_USAGE_WITH_REMAINING)),
+            search_error=_http_error(402, _DISABLED_ACCOUNT_402),
+        )
+        with patcher:
+            result = self.provider.check(token="tvly-dev-testkey0123456789ABCDEF")
+
+        self.assertEqual(result.reason, ErrorReason.NO_QUOTA)
+        self.assertEqual(calls, {"GET": 1, "POST": 1}, "healthy /usage must still be probed on /search")
+
+    def test_healthy_account_passes_the_search_probe(self):
+        patcher, calls = _patch_two_stage(
+            usage_response=FakeResponse(200, json.dumps(_USAGE_WITH_REMAINING)),
+            search_response=FakeResponse(200, '{"results":[{"title":"probe"}]}'),
+        )
+        with patcher:
+            result = self.provider.check(token="tvly-dev-testkey0123456789ABCDEF")
+
+        self.assertTrue(result.ok)
+        self.assertEqual(calls, {"GET": 1, "POST": 1})
+
+    def test_spent_plan_never_spends_a_search_credit(self):
+        """Stage 1 catches plan/key-limit exhaustion for free — no /search call."""
+        patcher, calls = _patch_two_stage(
+            usage_response=FakeResponse(200, json.dumps(_USAGE_EXHAUSTED)),
+            search_response=FakeResponse(200, "{}"),
+        )
+        with patcher:
+            result = self.provider.check(token="tvly-dev-testkey0123456789ABCDEF")
+
+        self.assertEqual(result.reason, ErrorReason.NO_QUOTA)
+        self.assertEqual(calls, {"GET": 1, "POST": 0})
+
+    def test_invalid_key_short_circuits_before_the_probe(self):
+        patcher, calls = _patch_two_stage(usage_error=_http_error(401, '{"detail":"Invalid API key"}'))
+        with patcher:
+            result = self.provider.check(token="tvly-dev-testkey0123456789ABCDEF")
+
+        self.assertEqual(result.reason, ErrorReason.INVALID_KEY)
+        self.assertEqual(calls, {"GET": 1, "POST": 0})
+
+    def test_search_probe_payload_is_minimal(self):
+        """One validated key costs at most 1 search credit: 1 result, basic depth."""
+        seen = {}
+
+        def fake(method, url, **kwargs):
+            if method == "POST":
+                seen["url"] = url
+                seen["body"] = kwargs.get("json")
+                return FakeResponse(200, "{}")
+            return FakeResponse(200, json.dumps(_USAGE_WITH_REMAINING))
+
+        with mock.patch("provider.tavily.request", side_effect=fake):
+            self.provider.check(token="tvly-dev-testkey0123456789ABCDEF")
+
+        self.assertTrue(seen["url"].endswith("/search"))
+        self.assertEqual(
+            seen["body"],
+            {"query": "harvester key validation probe", "max_results": 1, "search_depth": "basic"},
+        )
+
+
+class TestJudgeSearch(unittest.TestCase):
+    def setUp(self):
+        self.provider = TavilyProvider(conditions=[_make_condition()])
+
+    def test_200_is_valid(self):
+        self.assertTrue(self.provider._judge_search(200, '{"results":[]}').ok)
+
+    def test_401_is_invalid(self):
+        result = self.provider._judge_search(401, '{"detail":"Invalid API key"}')
+        self.assertEqual(result.reason, ErrorReason.INVALID_KEY)
+
+    def test_403_is_no_access(self):
+        self.assertEqual(self.provider._judge_search(403, "").reason, ErrorReason.NO_ACCESS)
+
+    def test_402_disabled_account_is_no_quota(self):
+        self.assertEqual(self.provider._judge_search(402, _DISABLED_ACCOUNT_402).reason, ErrorReason.NO_QUOTA)
+
+    def test_432_and_433_are_no_quota(self):
+        for code in (432, 433):
+            with self.subTest(code=code):
+                self.assertEqual(self.provider._judge_search(code, "").reason, ErrorReason.NO_QUOTA)
+
+    def test_429_is_rate_limited(self):
+        result = self.provider._judge_search(429, '{"detail":"Too many requests"}')
+        self.assertEqual(result.reason, ErrorReason.RATE_LIMITED)
+
+    def test_400_is_bad_request(self):
+        self.assertEqual(self.provider._judge_search(400, '{"detail":"Bad request"}').reason,
+                         ErrorReason.BAD_REQUEST)
+
+    def test_5xx_is_server_error(self):
+        self.assertEqual(self.provider._judge_search(503, "unavailable").reason, ErrorReason.SERVER_ERROR)
 
 
 # ---------------------------------------------------------------------------

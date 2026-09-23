@@ -1066,6 +1066,41 @@ in the proxy pool (only 222 were new).
   silently (the push service never raises). And that recreate wipes the `cp`-ed
   code overlay → re-publish the whole tree (see the republish skill).
 
+- **ROOT CAUSE of the client-visible 402s (found 2026-09-23, after the sweep
+  classified the 402 keys as "usable")**: the upstream body is
+  `{"detail":{"error":"Your account is currently disabled. This is likely due to
+  unpaid pay-as-you-go balance. Please update your payment method or contact
+  support@tavily.com"}}`, while `GET /usage` for the SAME key answers **200**
+  with `plan_usage 0/1000 paygo_usage 0/20000` — **/usage cannot see a disabled
+  account**. Verified end-to-end on pool id 3408: /usage 200 (plan 0/1000) vs
+  /search 402 disabled. The harvester therefore classified such keys VALID,
+  pushed them, and the proxy — whose own `GetUsage` also reads only
+  key.usage/plan_limit levels — could not see it either, so every client
+  request on such a key got a 402 with **no failover** (402 is absent from the
+  failover switch). Measured in one 30-minute window: 16×402 + 3×503 vs **0×200**.
+  Forensics shortcut: `request_logs.key_used` is the **pool key id** (not the key
+  material), so one read-only SQL query names the offending keys; the 402s
+  concentrated on ~19 ids (2789 / 3477 / 2560 / 3408 / 3623 / 2670 / …).
+- **Fix (two-stage check, `provider/tavily.py`)**: stage 1 `_check_usage`
+  (free) returns ONLY terminal `INVALID_KEY / NO_ACCESS / NO_QUOTA` — plan or
+  per-key limit exhaustion — so spent keys never cost a search credit; stage 2
+  `_check_search` POSTs a minimal probe
+  (`{"query": "harvester key validation probe", "max_results": 1,
+  "search_depth": "basic"}` = 1 credit) and judges the endpoint the pool actually
+  serves: 402/432/433 (and disabled / pay-as-you-go / plan-limit markers) →
+  NO_QUOTA, never valid, never pushed; 200 requires a JSON body **with a
+  `results` array** (a 200 without it is a proxy interstitial → UNKNOWN).
+  Pinned by `tests/test_tavily_provider.py::TestTavilySearchProbe` (the
+  disabled-account case is the regression) and `TestJudgeSearch`.
+  `/usage` stays the `inspect()` audit endpoint; `_is_quota_exhausted` stays the
+  documented /usage quota rule used by ops tooling.
+- The eviction sweep mirrors the same two-stage logic, so it evicts the
+  disabled-account keys retroactively (`--from-402-logs N` targets exactly the
+  ids behind the newest upstream 402 rows).
+- **Deployment note**: the container still runs the pre-fix provider (stacked
+  overlay) until the safe-window republish — scans keep mis-validating
+  disabled-account keys until then; the sweep does not wait for it.
+
 ### Resin: the pool's clean egress (measured 2026-09-23)
 
 - **Resin** (`resinat/resin`) runs on fnos as container `resin`, dir
