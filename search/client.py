@@ -441,8 +441,19 @@ class GitHubClient:
 
         # Apply rate limiting
         if service and not self._limit(service, credential):
-            logger.debug(f"Rate limit acquisition failed for {service}")
-            return "", {}
+            # A denial must NEVER masquerade as an empty response. The old
+            # `return "", {}` made a denied first page indistinguishable from a
+            # genuinely zero-result dork, so SearchStage's `total > 0` gate
+            # silently dropped the whole dork (its page tail AND its refinement
+            # branch) with an INFO line identical to a real empty result.
+            # _limit really can deny: it sleeps, re-acquires, and a competing
+            # search thread can take the refilled token (prod: base_rate 0.15,
+            # burst 3 per credential, 6-8 concurrent search threads). Raise the
+            # retry policy's retryable class (RetryCore.should_retry_error
+            # treats ConnectionError — and the "rate limit" marker in the
+            # message — as retryable) so the stage requeues the fetch.
+            logger.warning(f"Rate limiter denied request for {service} (no token after wait)")
+            raise ConnectionError(f"rate limiter denied for {service}")
 
         content, response_headers, status = self._http_get(
             url, headers, params, retries, interval, timeout, return_status=True
@@ -948,19 +959,25 @@ def chat(
                 break
         except requests.exceptions.HTTPError as e:
             code = http_error_status(e)
-            if code != 401:
-                try:
-                    # read response body
-                    message = http_error_message(e)
+            # Read the body for EVERY status — 401 included. The old
+            # `if code != 401` skip meant provider judges never saw a 401 body
+            # (a body-carried sub-code map, e.g. glm/Zhipu's 1000/1001/1003,
+            # could never fire), and worse: `message` was not reset, so a 401
+            # following a 429/5xx attempt returned the PREVIOUS attempt's body —
+            # a stale body travelling with a fresh status. output() routes 401
+            # to debug, so reading it adds no error-log noise.
+            try:
+                # read response body
+                message = http_error_message(e)
 
-                    # not a json string, use reason instead
-                    if not message.startswith("{") or not message.endswith("}"):
-                        message = e.response.reason if e.response is not None else str(e)
-                except Exception:
-                    message = str(e)
+                # not a json string, use reason instead
+                if not message.startswith("{") or not message.endswith("}"):
+                    message = e.response.reason if e.response is not None else str(e)
+            except Exception:
+                message = str(e)
 
-                # print http status code and error message
-                output(code=code, message=message, debug=False)
+            # print http status code and error message
+            output(code=code, message=message, debug=False)
 
             if code in NO_RETRY_ERROR_CODES:
                 break
@@ -1163,6 +1180,16 @@ def search_api_with_count(
 
     try:
         data = json.loads(content)
+    except ValueError as e:
+        # A non-blank body that is not valid JSON is a FETCH FAILURE (rate-limit
+        # interstitial, proxy junk, truncated response) — NOT a zero-result
+        # dork. Returning ([], 0, ...) here would let it pass SearchStage's
+        # first-page gate as "fetch succeeded, no results" and silently drop
+        # the dork's page tail + refinement; raise the retryable class instead
+        # (same contract as the rate-limiter denial in get_with_headers).
+        raise ConnectionError(f"search response was not valid JSON: {e}")
+
+    try:
         items = data.get("items", [])
         total = data.get("total_count", 0)
         # Flatten text_matches / issue body / commit message into content so regex
@@ -1424,6 +1451,18 @@ def _build_service_candidates(
     logged as a warning; below the cap the output is byte-for-byte the old
     itertools.product order (key slowest-varying, model fastest). A
     non-positive cap yields no candidates at all (logged at debug).
+
+    Determinism: when all three metadata axes are singletons — true for every
+    shipped config, which leaves address_pattern/endpoint_pattern/model_pattern
+    empty — each key yields exactly one candidate and the fair share collapses
+    to 1, so the cap degenerates to "first ``cap`` keys in INPUT order";
+    extract() returns list(set) whose iteration order varies per process, so
+    WHICH keys got dropped used to change per run. The keys are therefore
+    SORTED before the cap in that case (sorted order is also the emission
+    order). With multi-value metadata axes the fair-share path below is what
+    runs; NOTE that path is currently unreachable with shipped configs — it is
+    kept (and test-pinned in tests/test_service_product_cap.py) for generality,
+    do not delete it.
     """
     if not keys or not addresses or not endpoints or not models:
         return []
@@ -1438,11 +1477,17 @@ def _build_service_candidates(
     budget = cap
     fair_share = max(1, budget // len(keys))
 
+    # Deterministic truncation for the shipped-config shape (all metadata axes
+    # singletons): sort the keys so "which keys survive the cap" never depends
+    # on set iteration order. See the docstring.
+    singleton_metadata = len(addresses) == 1 and len(endpoints) == 1 and len(models) == 1
+    ordered_keys = sorted(keys) if singleton_metadata else keys
+
     candidates: List[Service] = []
     seen: set[Tuple[str, str, str, str]] = set()
     truncated = False
 
-    for key in keys:
+    for key in ordered_keys:
         if budget <= 0:
             truncated = True
             break
@@ -1464,15 +1509,17 @@ def _build_service_candidates(
             budget -= 1
 
     if truncated:
+        combinations = len(keys) * len(addresses) * len(endpoints) * len(models)
         logger.warning(
-            f"service candidates truncated at cap {cap}: kept {len(candidates)} "
-            f"of {len(keys)} keys x {len(addresses)} addresses x {len(endpoints)} endpoints x {len(models)} models"
+            f"service candidates truncated at cap {cap}: kept {len(candidates)}, "
+            f"dropped ~{max(combinations - len(candidates), 0)} of ~{combinations} pre-dedup combinations "
+            f"({len(keys)} keys x {len(addresses)} addresses x {len(endpoints)} endpoints x {len(models)} models)"
+            + ("; keys were sorted before truncation (deterministic drop order)" if singleton_metadata else "")
         )
 
     return candidates
 
 
-@handle_exceptions(default_result=[], log_level="error")
 def collect(
     key_pattern: str,
     url: str = "",
@@ -1483,7 +1530,17 @@ def collect(
     text: Optional[str] = None,
     headers: Optional[Dict] = None,
 ) -> List[Service]:
-    """Extract API keys and related information from URLs or text content
+    """Extract API keys and related information from URLs or text content.
+
+    Same contract as the old @handle_exceptions-decorated collect — invalid
+    input and non-transient errors (FileNotFoundError 404, NetworkError
+    401/403, pattern problems) log and return [] — EXCEPT that retryable
+    transport failures now propagate: ConnectionError (HTTP 429/5xx after
+    http_get's own network_retry budget is exhausted, request errors) and
+    TimeoutError. AcquisitionStage._acquisition_worker re-raises them so the
+    stage retry policy can requeue the fetch; the old swallow-to-[] lost the
+    URL for the whole run while still recording it in links.txt, making the
+    corpus look complete.
 
     Args:
         key_pattern: Regex pattern to match API keys
@@ -1498,7 +1555,45 @@ def collect(
 
     Returns:
         List[Service]: List of Service objects with extracted information
+
+    Raises:
+        ConnectionError: transient transport failure (retryable at the stage)
+        TimeoutError: request timed out on every attempt (retryable)
     """
+    try:
+        return _collect(
+            key_pattern=key_pattern,
+            url=url,
+            retries=retries,
+            address_pattern=address_pattern,
+            endpoint_pattern=endpoint_pattern,
+            model_pattern=model_pattern,
+            text=text,
+            headers=headers,
+        )
+    except (ConnectionError, TimeoutError):
+        # Retryable transport failures must reach the stage retry machinery
+        # (see the docstring) — never swallow them into [].
+        raise
+    except Exception as e:
+        # Mirrors handle_exceptions(default_result=[], log_level="error"):
+        # log and degrade to "nothing collected" for everything else.
+        logger.error(f"Exception in collect: {e}")
+        logger.debug(f"Traceback for collect:\n{traceback.format_exc()}")
+        return []
+
+
+def _collect(
+    key_pattern: str,
+    url: str = "",
+    retries: int = 3,
+    address_pattern: str = "",
+    endpoint_pattern: str = "",
+    model_pattern: str = "",
+    text: Optional[str] = None,
+    headers: Optional[Dict] = None,
+) -> List[Service]:
+    """Unguarded collect implementation; the public collect() wraps errors."""
     if (not isinstance(url, str) and not isinstance(text, str)) or not isinstance(key_pattern, str):
         return []
 

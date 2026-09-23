@@ -34,6 +34,7 @@ from search.github.refine.engine import RefineEngine
 from tools.coordinator import get_user_agent
 from tools.logger import get_logger
 from tools.patterns import extract_github_query_pattern
+from tools.retry import RetryCore
 from tools.state import GithubCredentialLimited
 from tools.utils import get_service_name, handle_exceptions
 
@@ -42,6 +43,21 @@ from .factory import TaskFactory
 from .registry import register_stage
 
 logger = get_logger("stage")
+
+
+def _is_retryable_for_requeue(error: Exception) -> bool:
+    """Whether the stage retry machinery should requeue on this error.
+
+    Reuses RetryCore.should_retry_error — the SAME predicate every RetryPolicy
+    delegates to (ConnectionError, TimeoutError, and "rate limit" / "too many
+    requests" messages; no local marker list). The search-side rate-limiter
+    denial and unparseable-body failures from search/client.py are raised as
+    ConnectionError precisely so this predicate catches them. The sentinel
+    budget (attempt=0, max_retries=1) makes the call answer "is this error
+    CLASS retryable"; real per-task attempt budgeting stays in
+    BasePipelineStage._worker_loop / the configured RetryPolicy.
+    """
+    return RetryCore.should_retry_error(error, attempt=0, max_retries=1)
 
 
 def _wait_for_rate_limit(resources: StageResources, service_type: str, label: str) -> None:
@@ -206,12 +222,22 @@ class SearchStage(BasePipelineStage):
                 # Persist all discovered links (including ones skipped for gather)
                 output.add_links(task.provider, results)
 
-            # Handle first page results for pagination/refinement
+            # Handle first page results for pagination/refinement.
+            # Reaching this gate with total == 0 now means the fetch SUCCEEDED
+            # and the dork genuinely has no results — the only case allowed to
+            # skip page tasks. Fetch failures can no longer masquerade as zero
+            # results: the search-side rate-limiter denial and unparseable
+            # bodies raise retryable ConnectionError inside search/client.py,
+            # and transport errors (429/5xx/timeout) already did; they are
+            # re-raised by the handler below so _worker_loop requeues the dork
+            # instead of silently dropping its page tail + refinement branch.
             if task.page == 1 and total > 0:
                 self._handle_first_page_results(task, total, output)
 
+            total_note = f", total: {total}" if task.page == 1 else ""
             logger.info(
-                f"[{self.name}] search completed for {task.provider}: {len(results) if results else 0} links, {len(keys)} keys"
+                f"[{self.name}] search completed for {task.provider}: "
+                f"{len(results) if results else 0} links, {len(keys)} keys{total_note}"
             )
 
             return output
@@ -222,7 +248,31 @@ class SearchStage(BasePipelineStage):
             # and the global RedactionFilter misses prefix-less formats
             # (SerpApi 64-hex). See BasePipelineStage._safe_task_identity.
             logger.error(f"[{self.name}] error, task: {self._safe_task_identity(task)}, message: {e}")
+            # Retryable transport failures (ConnectionError — which now also
+            # carries the rate-limiter denial and unparseable-body cases —
+            # TimeoutError, "rate limit" markers) must escape to
+            # BasePipelineStage._worker_loop: its requeue/retry_policy
+            # machinery only fires when processing RAISES. Everything else
+            # stays a logged drop (return None), as before.
+            if _is_retryable_for_requeue(e):
+                raise
             return None
+
+    def _handle_processing_error(self, task: ProviderTask, error: Exception) -> Optional[StageOutput]:
+        """Let retryable errors escape process_task so _worker_loop requeues.
+
+        BasePipelineStage.process_task catches everything _execute_task raises
+        and routes it here; the default implementation returns None, which is
+        why the loop's retry_policy / max_retries_requeued machinery was
+        unreachable for real stages — the worker-level re-raise alone would
+        still be swallowed one frame up. Same RetryCore predicate decides;
+        non-retryable errors stay swallowed (logged drop). CheckStage /
+        InspectStage deliberately do NOT override this — see the note on
+        CheckStage._check_worker (verdict routing is not idempotent).
+        """
+        if _is_retryable_for_requeue(error):
+            raise error
+        return None
 
     def _execute_first_page_search(self, task: SearchTask) -> Tuple[List[str], str, int]:
         """Execute first page search and get total count in single request"""
@@ -494,7 +544,28 @@ class AcquisitionStage(BasePipelineStage):
 
         except Exception as e:
             logger.error(f"[{self.name}] error, task: {self._safe_task_identity(task)}, message: {e}")
+            # Retryable transport failures must escape to _worker_loop's requeue
+            # path: search/client.py collect() propagates ConnectionError
+            # (HTTP 429/5xx after its own retry budget, TLS errors) and
+            # TimeoutError. Before this, a gather fetch that died transiently
+            # was lost for the run while its URL was still written to
+            # links.txt — the corpus looked complete. Non-retryable errors
+            # (404 FileNotFoundError, 401/403 NetworkError, ...) stay a logged
+            # drop; collect() already degrades those to [] itself.
+            if _is_retryable_for_requeue(e):
+                raise
             return None
+
+    def _handle_processing_error(self, task: ProviderTask, error: Exception) -> Optional[StageOutput]:
+        """Let retryable errors escape process_task so _worker_loop requeues.
+
+        Same contract as SearchStage._handle_processing_error: the default
+        (return None) would swallow the worker's re-raise inside
+        BasePipelineStage.process_task and the retry policy would never fire.
+        """
+        if _is_retryable_for_requeue(error):
+            raise error
+        return None
 
 
 @register_stage(
@@ -598,6 +669,19 @@ class CheckStage(BasePipelineStage):
             self.resources.limiter.report_result(get_service_name(task.provider), False)
             logger.error(f"[{self.name}] error, task: {self._safe_task_identity(task)}, message: {e}")
 
+            # CONSERVATIVE: retryable errors are deliberately NOT re-raised
+            # here (unlike SearchStage/AcquisitionStage), so the stage retry
+            # machinery never requeues a check. Reason: this stage's output
+            # routes verdicts into result files and the routing is NOT
+            # idempotent — storage's ResultBuffer.add does not dedupe, so a
+            # partial handler failure followed by a requeue would double-write
+            # the same key, and the requeued live probe can even return a
+            # DIFFERENT verdict (the same key in both valid- and
+            # invalid-keys.txt, confusing pool pushes). Recovery for
+            # transient probe failures already exists downstream: providers
+            # retry internally (search/client.py chat loop), retryable
+            # verdicts route to wait-check-keys.txt (ErrorReason.is_retryable
+            # branch above), and the wait-pool recovery recipe salvages them.
             return None
 
 
@@ -655,4 +739,8 @@ class InspectStage(BasePipelineStage):
 
         except Exception as e:
             logger.error(f"[{self.name}] inspect models error, task: {self._safe_task_identity(task)}, message: {e}")
+            # CONSERVATIVE: no retryable re-raise (see CheckStage._check_worker)
+            # — inspect output is routed by the same non-deduping ResultBuffer,
+            # and a lost model catalogue for one key is informational only
+            # (the key verdict was already written by CheckStage).
             return None
