@@ -5,6 +5,7 @@ Base classes for pipeline stages.
 Hybrid architecture with dependency injection and pure functional processing.
 """
 
+import hashlib
 import queue
 import threading
 import time
@@ -228,12 +229,9 @@ class BasePipelineStage(ABC, WorkerManageable):
         if not self.accepting:
             # A discard here loses the task for good (callers like
             # Pipeline._handle_stage_output ignore the return value), so it is
-            # surfaced as an error, not a warning. Log the task ID only: the
-            # dataclass repr embeds Service(key='<raw>') and the global
-            # RedactionFilter misses prefix-less key formats (SerpApi 64-hex
-            # has no entry on purpose), so a flood-time discard would
-            # otherwise write live keys into ERROR logs.
-            logger.error(f"[{self.name}] not accepting tasks, discard: {getattr(task, 'task_id', '?')}")
+            # surfaced as an error, not a warning. Digest identity only — see
+            # _safe_task_identity: raw ids/reprs can embed candidate keys.
+            logger.error(f"[{self.name}] not accepting tasks, discard: {self._safe_task_identity(task)}")
             with self.stats_lock:
                 self.total_errors += 1
             return False
@@ -247,7 +245,8 @@ class BasePipelineStage(ABC, WorkerManageable):
             if task_id in self.processed and (task.attempts == 0 or task.attempts > self.max_retries):
                 if task.attempts > self.max_retries:
                     logger.warning(
-                        f"[{self.name}] task=[{task_id}] discarded, max retries=[{self.max_retries}] reached"
+                        f"[{self.name}] task=[{self._safe_task_identity(task)}] discarded, "
+                        f"max retries=[{self.max_retries}] reached"
                     )
                 return False
 
@@ -267,8 +266,8 @@ class BasePipelineStage(ABC, WorkerManageable):
             return True
         except queue.Full:
             # Same as the not-accepting branch: the task is dropped for good.
-            # Task ID only — never the repr, which would embed raw keys.
-            logger.error(f"[{self.name}] queue is full, task discarded: {getattr(task, 'task_id', '?')}")
+            # Digest identity only — never the raw id or the repr.
+            logger.error(f"[{self.name}] queue is full, task discarded: {self._safe_task_identity(task)}")
             with self.stats_lock:
                 self.total_errors += 1
             return False
@@ -417,6 +416,22 @@ class BasePipelineStage(ABC, WorkerManageable):
         """Generate unique task identifier for deduplication"""
         pass
 
+    def _safe_task_identity(self, task: ProviderTask) -> str:
+        """Log-safe task identity: ``provider:TaskClass:sha256(dedup-id)[:12]``.
+
+        CHECK/INSPECT dedup ids embed the raw candidate key
+        (``check:<provider>:<key>:<address>:<endpoint>``) and task dataclass
+        reprs embed ``Service(key='<raw>')``; the global RedactionFilter
+        (tools/logger.py) deliberately misses prefix-less key formats —
+        SerpApi 64-hex has no entry in tools/patterns.py, ``ms-`` tokens only
+        redact inside env assignments — so neither the raw id nor the repr may
+        ever reach a log line. The 12-char digest keeps lines correlatable
+        without carrying key material.
+        """
+        dedup_id = self._generate_id(task)
+        digest = hashlib.sha256(dedup_id.encode("utf-8", "replace")).hexdigest()[:12]
+        return f"{task.provider}:{type(task).__name__}:{digest}"
+
     def _worker_loop(self) -> None:
         """Main worker thread loop with pure functional processing"""
         while self.running:
@@ -457,7 +472,10 @@ class BasePipelineStage(ABC, WorkerManageable):
                         task.attempts += 1
                         success = self.put_task(task)
                         status = "successfully" if success else "failed"
-                        logger.warning(f"[{self.name}] requeued {status} after {delay:.1f}s delay, task: {task}")
+                        logger.warning(
+                            f"[{self.name}] requeued {status} after {delay:.1f}s delay, "
+                            f"task: {self._safe_task_identity(task)}"
+                        )
 
                     # Update error statistics
                     with self.stats_lock:

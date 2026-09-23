@@ -13,20 +13,24 @@ Three code-verified defects (not yet observed in 24h of production logs):
    ``stop_accepting()`` on a stage that upstream work was about to feed
    again - every later ``put_task`` was then discarded.
 3. A discarded ``put_task`` was a warning whose return value the pipeline
-   ignored; it is now an ERROR plus a total_errors increment — and it logs the
-   task id, never the dataclass repr (``CheckTask``/``AcquisitionTask`` reprs
-   embed ``Service(key='<raw>')`` and the global RedactionFilter provably
-   misses prefix-less key formats).
+   ignored; it is now an ERROR plus a total_errors increment — and every
+   task-identity log site (discard / queue-full / requeue) prints the safe
+   identity ``provider:TaskClass:sha256(dedup-id)[:12]``, never the raw id or
+   the dataclass repr: CHECK/INSPECT dedup ids embed the raw candidate key
+   (``check:<provider>:<key>:<address>:<endpoint>``), reprs embed
+   ``Service(key='<raw>')``, and the global RedactionFilter provably misses
+   prefix-less key formats (SerpApi 64-hex has no pattern on purpose).
 """
 
 from __future__ import annotations
 
+import hashlib
 import queue as queue_mod
 import tempfile
 import threading
 import time
 import unittest
-from typing import Optional
+from typing import List, Optional
 from unittest import mock
 
 from core.models import CheckTask, ProviderTask, SearchTask, Service
@@ -34,10 +38,17 @@ from manager.pipeline import Pipeline
 from manager.queue import QueueManager
 from stage import base as stage_base
 from stage.base import BasePipelineStage, StageOutput, StageResources
+from tools.retry import RetryPolicy
 
 # Key-looking literal built by concatenation (repo convention) so secret
 # scanners never see a complete fake credential in one piece.
 _LIVE_LOOKING_KEY = "sk-live" + "key0123456789abcdef"
+
+
+def _identity(task: ProviderTask) -> str:
+    """Expected safe identity for _StubStage (its dedup id IS task_id)."""
+    digest = hashlib.sha256(task.task_id.encode("utf-8", "replace")).hexdigest()[:12]
+    return f"{task.provider}:{type(task).__name__}:{digest}"
 
 
 class _StubStage(BasePipelineStage):
@@ -53,7 +64,12 @@ class _StubStage(BasePipelineStage):
         return task.task_id
 
 
-def _make_stage(name: str = "search", queue_size: int = 1000) -> _StubStage:
+def _make_stage(
+    name: str = "search",
+    queue_size: int = 1000,
+    retry_policy: Optional[RetryPolicy] = None,
+    stage_cls: type[_StubStage] = _StubStage,
+) -> _StubStage:
     resources = StageResources(
         limiter=mock.MagicMock(),
         providers={},
@@ -61,7 +77,13 @@ def _make_stage(name: str = "search", queue_size: int = 1000) -> _StubStage:
         task_configs={},
         auth=mock.MagicMock(),
     )
-    return _StubStage(name=name, resources=resources, handler=lambda _output: None, queue_size=queue_size)
+    return stage_cls(
+        name=name,
+        resources=resources,
+        handler=lambda _output: None,
+        queue_size=queue_size,
+        retry_policy=retry_policy,
+    )
 
 
 def _task(query: str) -> SearchTask:
@@ -168,14 +190,16 @@ class TestPutTaskDiscardIsSurfaced(unittest.TestCase):
         with mock.patch.object(stage_base.logger, "error") as error_mock:
             accepted = stage.put_task(task)
 
-        # Then it is surfaced at ERROR, counted, and logged by task id only —
-        # never the repr, so the raw key cannot reach the log.
+        # Then it is surfaced at ERROR, counted, and logged with the digest
+        # identity only — never the raw task id and never the repr, so no key
+        # material can reach the log.
         self.assertFalse(accepted)
         self.assertEqual(1, stage.total_errors)
         error_mock.assert_called_once()
         message = error_mock.call_args[0][0]
         self.assertIn("not accepting tasks, discard", message)
-        self.assertIn(task.task_id, message)
+        self.assertIn(_identity(task), message)
+        self.assertNotIn(task.task_id, message)
         self.assertNotIn(_LIVE_LOOKING_KEY, message)
 
     def test_queue_full_discard_is_error_and_counted_without_raw_key(self):
@@ -188,14 +212,80 @@ class TestPutTaskDiscardIsSurfaced(unittest.TestCase):
         with mock.patch.object(stage_base.logger, "error") as error_mock:
             accepted = stage.put_task(doomed)
 
-        # Then ERROR + counted + task id only, raw key never logged
+        # Then ERROR + counted + digest identity only: neither raw key nor raw
+        # task id
         self.assertFalse(accepted)
         self.assertEqual(1, stage.total_errors)
         error_mock.assert_called_once()
         message = error_mock.call_args[0][0]
         self.assertIn("queue is full, task discarded", message)
-        self.assertIn(doomed.task_id, message)
+        self.assertIn(_identity(doomed), message)
+        self.assertNotIn(doomed.task_id, message)
         self.assertNotIn(_LIVE_LOOKING_KEY, message)
+
+
+class _FailingStage(_StubStage):
+    """Stage whose execution always fails and propagates to the worker loop."""
+
+    def _execute_task(self, task: ProviderTask) -> Optional[StageOutput]:
+        raise RuntimeError("probe exploded")
+
+    def _handle_processing_error(self, task: ProviderTask, error: Exception) -> Optional[StageOutput]:
+        # Re-raise so the failure reaches _worker_loop's requeue path (the
+        # default handler would swallow it inside process_task).
+        raise error
+
+
+class _OneShotRetryPolicy(RetryPolicy):
+    """Permits exactly one requeue; deterministic, no sleeping."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def should_retry(self, attempt: int, error: Exception) -> bool:
+        self.calls += 1
+        return self.calls == 1
+
+    def get_delay(self, attempt: int) -> float:
+        return 0.0
+
+
+class TestRequeueWarningIdentity(unittest.TestCase):
+    def test_requeue_warning_prints_digest_identity_never_raw_task(self):
+        # Given a failing check-stage task and a one-shot retry policy
+        stage = _make_stage(name="check", stage_cls=_FailingStage, retry_policy=_OneShotRetryPolicy())
+        task = _check_task(_LIVE_LOOKING_KEY)
+        stage.queue.put_nowait(task)
+        stage.running = True
+
+        seen = threading.Event()
+        warnings: List[str] = []
+
+        def _capture(message, *args) -> None:
+            warnings.append(message)
+            seen.set()
+
+        # When the real worker loop hits its requeue path
+        with mock.patch.object(stage_base.logger, "warning", side_effect=_capture), mock.patch.object(
+            stage_base.logger, "error"
+        ):
+            worker = threading.Thread(target=stage._worker_loop, name="requeue-test", daemon=True)
+            worker.start()
+            try:
+                self.assertTrue(seen.wait(timeout=5))
+            finally:
+                stage.running = False
+                worker.join(timeout=5)
+
+        # Then the requeue line carries the digest identity — never the repr
+        # (which embeds Service(key='<raw>')) and never the raw task id.
+        self.assertFalse(worker.is_alive())
+        message = warnings[0]
+        self.assertIn("requeued successfully", message)
+        self.assertIn(_identity(task), message)
+        self.assertNotIn(task.task_id, message)
+        self.assertNotIn(_LIVE_LOOKING_KEY, message)
+        self.assertNotIn("service=", message)
 
 
 class _FakeStageDefinition:

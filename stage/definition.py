@@ -174,7 +174,11 @@ class SearchStage(BasePipelineStage):
             return output
 
         except Exception as e:
-            logger.error(f"[{self.name}] error, provider: {task.provider}, task: {task}, message: {e}")
+            # Identity is provider:class:sha256-digest — never the task repr or
+            # the raw dedup id: CHECK/INSPECT ids embed the raw candidate key
+            # and the global RedactionFilter misses prefix-less formats
+            # (SerpApi 64-hex). See BasePipelineStage._safe_task_identity.
+            logger.error(f"[{self.name}] error, task: {self._safe_task_identity(task)}, message: {e}")
             return None
 
     def _execute_first_page_search(self, task: SearchTask) -> Tuple[List[str], str, int]:
@@ -442,7 +446,7 @@ class AcquisitionStage(BasePipelineStage):
             return output
 
         except Exception as e:
-            logger.error(f"[{self.name}] error for provider: {task.provider}, task: {task}, message: {e}")
+            logger.error(f"[{self.name}] error, task: {self._safe_task_identity(task)}, message: {e}")
             return None
 
 
@@ -545,7 +549,7 @@ class CheckStage(BasePipelineStage):
         except Exception as e:
             # Report rate limit failure
             self.resources.limiter.report_result(get_service_name(task.provider), False)
-            logger.error(f"[{self.name}] error for provider: {task.provider}, task: {task}, message: {e}")
+            logger.error(f"[{self.name}] error, task: {self._safe_task_identity(task)}, message: {e}")
 
             return None
 
@@ -603,5 +607,5 @@ class InspectStage(BasePipelineStage):
             return output
 
         except Exception as e:
-            logger.error(f"[{self.name}] inspect models error, provider: {task.provider}, task: {task}, message: {e}")
+            logger.error(f"[{self.name}] inspect models error, task: {self._safe_task_identity(task)}, message: {e}")
             return None
