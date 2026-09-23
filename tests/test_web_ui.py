@@ -131,7 +131,8 @@ def _make_client(db_path: str) -> TestClient:
     No default auth headers are attached — each request passes its own
     Bearer token explicitly (or none, to exercise the 401 path).
     """
-    os.environ["HARVESTER_DB"] = db_path
+    os.environ["HARVESTER_DB_PATH"] = db_path  # canonical (web/config.py reads this)
+    os.environ["HARVESTER_DB"] = db_path  # legacy alias for web/db.py
     os.environ["WEB_AUTH_KEY"] = _TEST_AUTH_KEY
 
     import web.deps

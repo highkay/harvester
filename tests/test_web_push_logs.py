@@ -38,7 +38,8 @@ def _setup_app(db_path: str) -> TestClient:
     import web.deps
 
     # Set HARVESTER_DB env var so resolve_db_path() returns our temp db
-    os.environ["HARVESTER_DB"] = db_path
+    os.environ["HARVESTER_DB_PATH"] = db_path  # canonical (web/config.py reads this)
+    os.environ["HARVESTER_DB"] = db_path  # legacy alias for web/db.py
 
     # Force re-read of settings after env change
     web.deps._settings = None  # type: ignore[attr-defined]
