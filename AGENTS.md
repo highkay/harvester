@@ -609,6 +609,20 @@ docker compose restart && curl -s http://localhost:8002/health
   pools are un-replenishable — gemini's surviving 43 keys decay with nothing able to refill
   them, so either add config+schedule or retire the mapping/pool deliberately
   (cerebras: retire/park — its keys cannot infer even though 28 are "active").
+  **Gemini invalid-marking audit (2026-09-23)**: a 10-key sample of the 263
+  `invalid` entries re-checked with the deployed `GeminiProvider` through exit
+  1090 gave 7 `invalid_key` + 3 `no_access`, 0 live — the marking is trustworthy,
+  so the pool holds no recoverable keys; deletion was deliberately skipped (the
+  group is parked and nothing consumes it — the open decision is retire vs
+  unpark, not cleanup). Id/hash export for rollback:
+  `/home/admin/harvester/rollback-gemini-invalid-keys.json`.
+  **Tavily wait-pool recovery is running** (started 2026-09-23 13:53, ~1,967
+  real entries at ≥5 s/key ≈ 3.5 h, alternate exits 1090/1091, resumable via
+  `/tmp/tavily_wait_recovery_progress.txt`, terminal buckets appended to the
+  result files and the recovered valid keys pushed immediately through
+  `web/tavily_push.py`). Script: `.omo/evidence/tavily_wait_recovery.py`
+  (copied to the container's `/tmp`; a container recreate wipes it — re-copy
+  from the repo evidence dir).
   gpt-load has no disabled key status anywhere (fnos: 1177 active / 2 invalid, both in
   `qwenchina`; rn: gemini2 306 keys = 263 invalid + 43 active, cerebras 28 active, groq 5,
   mimosg 1 active + 1 invalid, agnes 40 — **266 invalid keys in total across both**), groups
