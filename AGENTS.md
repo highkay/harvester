@@ -1100,6 +1100,22 @@ in the proxy pool (only 222 were new).
 - **Deployment note**: the container still runs the pre-fix provider (stacked
   overlay) until the safe-window republish — scans keep mis-validating
   disabled-account keys until then; the sweep does not wait for it.
+- **Verified effect (2026-09-23 14:47 CST)**: after the two-stage sweep evicted
+  the offenders (`--from-402-logs 200` picked 2560/2789/2520/3408/3477/3623/3624
+  on its own; 2670/2785 were cleaned by id), `POST /search` resumed answering
+  **200** — the first successes in hours (the preceding 30-minute window was
+  16×402 + 3×503 with zero 200s). Durable hygiene is the bounded loop
+  `/tmp/tavily_evict_loop.sh` → `data/tavily_evict_loop.log`: every 10 minutes it
+  re-reads the newest upstream 402 rows and evicts exactly those ids (12 cycles
+  = 2 h). Two traps: `data/` is root-owned, so a host-side `>>` redirect fails
+  with EACCES — append through
+  `docker compose exec -T harvester-web sh -c 'cat >> /app/data/…'`; and the
+  sweep's own `--threads` runs must stay small (≤4) so its Resin rotation does
+  not starve the harvester's own probes.
+- **Watched failure mode left open**: with the disabled keys gone, requests now
+  succeed but slowly (13-18 s on 2026-09-23 14:47 — the proxy is failing over
+  across keys after 429/402 before landing a 200). Watch the `/search` latency
+  mix if the message-analysis pipeline starts timing out.
 
 ### Resin: the pool's clean egress (measured 2026-09-23)
 
