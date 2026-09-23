@@ -179,7 +179,13 @@ class OpenAILikeProvider(AIBaseProvider):
             if code == 403:
                 if re.findall(r"model_not_found", message, flags=re.I):
                     return CheckResult.fail(ErrorReason.NO_MODEL)
-                elif re.findall(r"unauthorized|已被封禁", message, flags=re.I):
+                elif re.findall(r"unauthorized|已被封禁|authorization\s*failed", message, flags=re.I):
+                    # NVIDIA NIM answers 403 {"status":403,"title":"Forbidden",
+                    # "detail":"Authorization failed"} for a NEVER-REGISTERED
+                    # `nvapi-` key (measured 2026-09-23 through the scan exits;
+                    # pooled keys answered 200 in the same probes) — a key-level
+                    # rejection, not NO_ACCESS. Without this marker every dead
+                    # nvidia candidate would sit in wait-check forever.
                     return CheckResult.fail(ErrorReason.INVALID_KEY)
                 elif re.findall(r"unsupported_country_region_territory|该令牌无权访问模型", message, flags=re.I):
                     return CheckResult.fail(ErrorReason.NO_ACCESS)

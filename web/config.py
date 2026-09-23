@@ -58,8 +58,15 @@ class WebSettings:
     )
 
     # --- Database ---
+    # Same contract as web/db.py::resolve_db_path() (single source of truth):
+    # canonical HARVESTER_DB_PATH first, then the legacy HARVESTER_DB alias,
+    # then the workspace default. Reading only the canonical name meant a
+    # machine whose env carried the container paths made the UI open an empty
+    # DB → 35 false-red web tests (measured 2026-09-23).
     db_path: str = field(
-        default_factory=lambda: os.getenv("HARVESTER_DB_PATH") or _default_db_path()
+        default_factory=lambda: os.getenv("HARVESTER_DB_PATH")
+        or os.getenv("HARVESTER_DB")
+        or _default_db_path()
     )
 
     # --- Server ---

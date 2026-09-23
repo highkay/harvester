@@ -5,11 +5,12 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sqlite3
 import tempfile
 import unittest
 
-from web.db import get_db, init_db, reconcile_running_runs
+from web.db import get_db, init_db, reconcile_running_runs, resolve_db_path
 
 
 def _run_async(coro):
@@ -280,3 +281,56 @@ class TestReconcileRunningRuns(unittest.TestCase):
                 return await reconcile_running_runs(db_path)
 
             self.assertEqual(_run_async(_scenario()), 0)
+
+
+class TestDbPathEnvContract(unittest.TestCase):
+    """web/config.py and web/db.py must agree on how HARVESTER_DB_PATH /
+    HARVESTER_DB / HARVESTER_WORKSPACE resolve — a disagreement made a machine
+    whose env carried the container paths open an empty DB (35 false-red web
+    tests, measured 2026-09-23)."""
+
+    _KEYS = ("HARVESTER_DB_PATH", "HARVESTER_DB", "HARVESTER_WORKSPACE")
+
+    def _with_env(self, **values):
+        saved = {k: os.environ.get(k) for k in self._KEYS}
+        for key in self._KEYS:
+            os.environ.pop(key, None)
+        for key, value in values.items():
+            os.environ[key] = value
+        return saved
+
+    def _restore(self, saved):
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def test_legacy_alias_resolves_identically_in_both_modules(self) -> None:
+        from web.config import WebSettings
+
+        saved = self._with_env(HARVESTER_DB="/tmp/legacy-alias.db")
+        try:
+            self.assertEqual(WebSettings().db_path, "/tmp/legacy-alias.db")
+            self.assertEqual(resolve_db_path(), "/tmp/legacy-alias.db")
+        finally:
+            self._restore(saved)
+
+    def test_canonical_var_wins_and_workspace_is_the_fallback(self) -> None:
+        from web.config import WebSettings
+
+        saved = self._with_env(HARVESTER_DB_PATH="/tmp/canonical.db", HARVESTER_DB="/tmp/legacy-alias.db")
+        try:
+            self.assertEqual(WebSettings().db_path, "/tmp/canonical.db")
+            self.assertEqual(resolve_db_path(), "/tmp/canonical.db")
+        finally:
+            self._restore(saved)
+
+        saved = self._with_env(HARVESTER_WORKSPACE="/tmp/ws")
+        try:
+            settings_path = WebSettings().db_path
+            self.assertEqual(settings_path, resolve_db_path())
+            self.assertTrue(settings_path.endswith("harvester.db"))
+            self.assertIn("ws", settings_path)
+        finally:
+            self._restore(saved)

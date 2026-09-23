@@ -415,6 +415,24 @@ class TestOpenAILikeStatusMap(unittest.TestCase):
                 self.assertEqual(result.reason, ErrorReason.SERVER_ERROR)
                 self.assertTrue(result.reason.is_retryable())
 
+    def test_403_credential_rejection_is_invalid_key(self):
+        # NVIDIA NIM answers 403 {"status":403,"title":"Forbidden",
+        # "detail":"Authorization failed"} for a NEVER-REGISTERED `nvapi-` key
+        # (measured 2026-09-23 against integrate.api.nvidia.com through the scan
+        # exits; pooled keys answered 200 in the same probes). Before the marker
+        # this body fell through to NO_ACCESS -> wait-check, so every dead
+        # nvidia candidate would have sat in the recoverable bucket forever.
+        body = json.dumps({"status": 403, "title": "Forbidden", "detail": "Authorization failed"})
+        result = self.provider._judge(403, body)
+        self.assertFalse(result.available)
+        self.assertEqual(result.reason, ErrorReason.INVALID_KEY)
+
+    def test_403_region_block_stays_no_access(self):
+        # Geo/edge blocks are not key verdicts — keep them recoverable.
+        result = self.provider._judge(403, "unsupported_country_region_territory")
+        self.assertFalse(result.available)
+        self.assertEqual(result.reason, ErrorReason.NO_ACCESS)
+
     def test_200_non_json_is_unknown(self):
         result = self.provider._judge(200, "not-json")
         self.assertEqual(result.reason, ErrorReason.UNKNOWN)

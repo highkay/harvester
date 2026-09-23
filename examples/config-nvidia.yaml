@@ -1,6 +1,9 @@
 # NVIDIA NIM-only scan configuration
-# Wide GitHub collection profile: search/gather only by default.
-# Enable check/inspect only when you want slow API validation.
+# Full profile: search + gather + validate. Validation is the slow part
+# (thousands of candidates), so the run is long; it is enabled because the
+# scheduled 11:50 run is the ONLY producer for rn group 11 — with check:false
+# the schedule spent 12 dorks of the shared GitHub budget per day and produced
+# nothing pushable (audited 2026-09-23).
 # Results are written to ./data-nvidia-wide/providers/nvidia/*.txt
 
 global:
@@ -63,8 +66,8 @@ tasks:
     stages:
       search: true
       gather: true
-      check: false
-      inspect: false
+      check: true   # 2026-09-23: was false — the scheduled run produced no pushable keys
+      inspect: true
     api:
       base_url: https://integrate.api.nvidia.com/v1
       completion_path: /chat/completions

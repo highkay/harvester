@@ -59,10 +59,11 @@ deployed container is `image + whatever was cp'd`. Align + publish with:
 
 ```bash
 # on fnos, in /home/admin/harvester (repo must equal the SHA you validated)
-mkdir -p rollback-$(date +%Y%m%d-%H%M%S) && cp Dockerfile.web docker-compose.yml rollback-*/
+RB=rollback-$(date +%Y%m%d-%H%M%S); mkdir -p "$RB" && cp Dockerfile.web docker-compose.yml "$RB"/
 git fetch origin && git log --oneline origin/main..HEAD    # must be EMPTY
+git status --short                    # review uncommitted tracked edits: the reset destroys them
 git reset --hard origin/main
-cp rollback-*/Dockerfile.web Dockerfile.web
+cp "$RB/Dockerfile.web" Dockerfile.web
 cp docker-compose.hostnet.yml docker-compose.yml           # or prod reverts to bridge
 for d in config constant core manager provider search stage storage tools web examples; do
   docker compose cp "$d" harvester-web:/app/; done
@@ -1120,11 +1121,19 @@ An Oracle audit of the end-to-end scanning path found the following, all fixed t
   `env -u HARVESTER_DB_PATH -u HARVESTER_WORKSPACE python -m unittest …`.
   (Two resolvers disagreeing is the underlying defect —
   `resolve_db_path()` is the single source of truth to delegate to.)
-- **`examples/config-nvidia.yaml` is a collection-only profile**
-  (`check: false`, `inspect: false`, workspace `./data-nvidia-wide`): its
-  scheduled run harvests links/material on purpose and will never report
-  `valid_keys_found`. Don't read nvidia's 0-valid rows as a defect; enable
-  check/inspect there only if slow API validation is wanted.
+- **`examples/config-nvidia.yaml` now VALIDATES (2026-09-23)**: it used to be
+  collection-only (`check/inspect: false`) — so the scheduled 11:50 run spent
+  dorks daily and produced nothing pushable, while it is the ONLY producer for
+  fnos group 11 (891 keys, `meta/llama-3.2-11b-vision-instruct`). Egress was
+  measured before flipping: a never-registered `nvapi-` key answers **403
+  `{"status":403,"title":"Forbidden","detail":"Authorization failed"}`** (a
+  key-level rejection — that is NVIDIA's own body shape) while pooled keys
+  answer **200 in 2–6 s** through exits 1090/1091 (container-direct times out;
+  1080 gave the same 403, so the exits are fine for this host). The 403 branch
+  of `provider/openai_like.py` now maps `authorization\s*failed` → INVALID_KEY
+  (geo/Cloudflare blocks still → NO_ACCESS → wait-check), pinned by
+  `tests/test_provider_status_maps.py`. Expect long runs: validation is the slow
+  part of a wide-corpus profile.
 - One config file = one task. Do NOT bundle regional tasks into one config
   (2026-09-21: `glm`/`kimi`/`mimo`/`qwen` were split into per-task files). A
   bundled run aggregates 2-3 tasks into one `run_records.valid_keys_found` and
