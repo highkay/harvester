@@ -1481,6 +1481,7 @@ def collect(
     endpoint_pattern: str = "",
     model_pattern: str = "",
     text: Optional[str] = None,
+    headers: Optional[Dict] = None,
 ) -> List[Service]:
     """Extract API keys and related information from URLs or text content
 
@@ -1492,6 +1493,8 @@ def collect(
         endpoint_pattern: Regex pattern to match endpoints
         model_pattern: Regex pattern to match model names
         text: Text content to search (if provided, url is ignored)
+        headers: HTTP headers for the url fetch (None keeps http_get's
+            DEFAULT_HEADERS, so existing callers are byte-identical)
 
     Returns:
         List[Service]: List of Service objects with extracted information
@@ -1502,7 +1505,7 @@ def collect(
     if text:
         content = text
     else:
-        content = http_get(url=url, retries=retries, interval=COLLECT_RETRY_INTERVAL)
+        content = http_get(url=url, headers=headers, retries=retries, interval=COLLECT_RETRY_INTERVAL)
 
     if not content:
         return []

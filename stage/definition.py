@@ -6,7 +6,9 @@ Registers all standard pipeline stages with their dependencies.
 """
 
 import math
+import re
 import time
+import urllib.parse
 from typing import List, Optional, Tuple
 
 from constant.search import (
@@ -15,7 +17,7 @@ from constant.search import (
     WEB_MAX_PAGES,
     WEB_RESULTS_PER_PAGE,
 )
-from constant.system import SERVICE_TYPE_GITHUB_API, SERVICE_TYPE_GITHUB_WEB
+from constant.system import DEFAULT_HEADERS, SERVICE_TYPE_GITHUB_API, SERVICE_TYPE_GITHUB_WEB
 from core.enums import ErrorReason, PipelineStage, ResultType
 from core.models import (
     AcquisitionTask,
@@ -29,6 +31,7 @@ from core.models import (
 from core.types import IProvider
 from search import client
 from search.github.refine.engine import RefineEngine
+from tools.coordinator import get_user_agent
 from tools.logger import get_logger
 from tools.patterns import extract_github_query_pattern
 from tools.state import GithubCredentialLimited
@@ -49,6 +52,46 @@ def _wait_for_rate_limit(resources: StageResources, service_type: str, label: st
             wait_time = 0.1
         logger.debug(f"Rate limit hit for {label}, waiting {wait_time:.2f}s")
         time.sleep(wait_time)
+
+
+# https://github.com/<owner>/<repo>/blob/<ref>/<path> — ref is matched as a
+# single path segment (the shape GitHub search results carry); path is the rest.
+_GITHUB_BLOB_PATH_RE = re.compile(r"^/([^/]+)/([^/]+)/blob/([^/]+)/(.+)$")
+
+
+def github_blob_to_raw(url: str) -> str:
+    """Map a GitHub blob page URL to its raw.githubusercontent.com file URL.
+
+    The HTML blob page embeds the file text JSON-escaped inside its
+    ``rawLines`` payload (measured on production 2026-09-23: 268,952 bytes
+    with 444 ``\\"`` occurrences for a file whose raw body is 3,159 bytes
+    with plain quotes), so quote-anchored extraction patterns cannot match
+    it and every fetch pays an ~85x bandwidth amplification.
+
+    Only ``https://github.com/<owner>/<repo>/blob/<ref>/<path>`` (optionally
+    with a ``#L…`` fragment, which is stripped) is rewritten; the path is
+    percent-decoded. Everything else — non-github URLs, huggingface
+    ``resolve`` URLs, issue/commit pages, query-string URLs, malformed
+    input — is returned byte-identical.
+
+    Args:
+        url: Candidate fetch URL (trailing whitespace/newline tolerant).
+
+    Returns:
+        str: The raw equivalent for blob pages, else the original input.
+    """
+    candidate = url.strip()
+    try:
+        parsed = urllib.parse.urlsplit(candidate)
+    except ValueError:
+        return url
+    if parsed.scheme != "https" or parsed.netloc.lower() != "github.com" or parsed.query:
+        return url
+    match = _GITHUB_BLOB_PATH_RE.match(parsed.path)
+    if not match:
+        return url
+    owner, repo, ref, path = match.groups()
+    return f"https://raw.githubusercontent.com/{owner}/{repo}/{ref}/{urllib.parse.unquote(path)}"
 
 
 @register_stage(
@@ -418,14 +461,18 @@ class AcquisitionStage(BasePipelineStage):
     def _acquisition_worker(self, task: AcquisitionTask) -> Optional[StageOutput]:
         """Pure functional acquisition worker implementation"""
         try:
-            # Execute acquisition using global collect function
+            # Fetch the RAW file body for GitHub blob pages (see
+            # github_blob_to_raw): the HTML blob page is ~85x larger and its
+            # JSON-escaped quotes defeat the quote-anchored key patterns.
+            # links.txt and the dedup id below keep the ORIGINAL blob URL.
             services = client.collect(
                 key_pattern=task.key_pattern,
-                url=task.url,
+                url=github_blob_to_raw(task.url),
                 retries=task.retries,
                 address_pattern=task.address_pattern,
                 endpoint_pattern=task.endpoint_pattern,
                 model_pattern=task.model_pattern,
+                headers={**DEFAULT_HEADERS, "User-Agent": get_user_agent()},
             )
 
             # Create output object
