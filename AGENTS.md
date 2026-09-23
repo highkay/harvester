@@ -1100,22 +1100,42 @@ in the proxy pool (only 222 were new).
 - **Deployment note**: the container still runs the pre-fix provider (stacked
   overlay) until the safe-window republish — scans keep mis-validating
   disabled-account keys until then; the sweep does not wait for it.
-- **Verified effect (2026-09-23 14:47 CST)**: after the two-stage sweep evicted
-  the offenders (`--from-402-logs 200` picked 2560/2789/2520/3408/3477/3623/3624
-  on its own; 2670/2785 were cleaned by id), `POST /search` resumed answering
-  **200** — the first successes in hours (the preceding 30-minute window was
-  16×402 + 3×503 with zero 200s). Durable hygiene is the bounded loop
-  `/tmp/tavily_evict_loop.sh` → `data/tavily_evict_loop.log`: every 10 minutes it
-  re-reads the newest upstream 402 rows and evicts exactly those ids (12 cycles
-  = 2 h). Two traps: `data/` is root-owned, so a host-side `>>` redirect fails
-  with EACCES — append through
-  `docker compose exec -T harvester-web sh -c 'cat >> /app/data/…'`; and the
-  sweep's own `--threads` runs must stay small (≤4) so its Resin rotation does
-  not starve the harvester's own probes.
-- **Watched failure mode left open**: with the disabled keys gone, requests now
-  succeed but slowly (13-18 s on 2026-09-23 14:47 — the proxy is failing over
-  across keys after 429/402 before landing a 200). Watch the `/search` latency
-  mix if the message-analysis pipeline starts timing out.
+- **Durable hygiene loop**: `/tmp/tavily_evict_loop.sh` →
+  `data/tavily_evict_loop.log` — every 10 minutes it re-reads the newest
+  upstream 402 rows (`--from-402-logs 200`) and evicts exactly those ids (12
+  cycles = 2 h; the sweep picks them up on its own, e.g. 2560/2789/2520/3408/
+  3477/3623/3624). Three traps: `data/` is root-owned, so a host-side `>>`
+  redirect fails with EACCES — append through
+  `docker compose exec -T harvester-web sh -c 'cat >> /app/data/…'` (with a
+  `/tmp` host fallback, since a failed exec is otherwise silent); keep the
+  sweep's `--threads` ≤4 so its Resin rotation does not starve the harvester's
+  own probes; and before restarting the loop, confirm no `tavily_pool_evict.py`
+  is mid-round (grep for a `round N start` without its `round N end`) so an
+  `--apply` cycle is not cut in half.
+- **Effect verified, time-bounded (2026-09-23 15:0x)**: every `/search` row
+  since the first eviction (06:41:38 UTC) is **200** — 24 rows, zero 402, zero
+  503 — and each is a SINGLE upstream attempt (`request_id` grouping), so no
+  failover is involved. Two corrections to earlier readings: the 3×503 in the
+  "last 10 minutes" window were pre-cutoff rows (06:35), and the "13-18 s =
+  key failover" story was WRONG — the 200s take 2.7-11.2 s with attempts=1, i.e.
+  the latency is upstream-side. Track the latency mix separately.
+- **Coverage, not "fully fixed"**: 16 pool keys were deactivated — exactly the
+  set behind the newest upstream-402 rows (2520 2560 2670 2690 2698 2785 2789
+  2807 3128 3129 3408 3477 3563 3586 3623 3624); the loop re-reads the 402 rows
+  every 10 minutes and now finds 0 new targets. The remaining ~1244 keys were
+  NOT swept (a full pass is hours out by design — the sweep is targeted at the
+  keys clients are actually failing on, not exhaustive).
+  `GET /api/stats.active_key_count` is the proxy's own metric and does NOT equal
+  `COUNT(is_active=1)` (measured 1242 vs 1260) — never conflate the two.
+- **Watcher guard**: a wait-bucket replay is published only when the chosen
+  exit's OWN control probe answers 200; otherwise the cycle logs
+  `replay[…] SKIPPED — exit-limited (control=403…)`. Rationale: exit 1091
+  answered `403 Forbidden` HTML to a known-good key AND a dead key at once,
+  so anything it returns that cycle is exit-artifact, not a key verdict.
+- **fnos tree is aligned** to `origin/main` (4fa18fe) with BOTH rate blocks at
+  0.2/2, and the container copies were re-copied FROM that tree and verified by
+  md5 (tree ↔ container MATCH for all three tavily configs) — so following the
+  documented republish recipe cannot silently revert them.
 - **Exit blocks change flavour**: at 14:48 the SAME exit 1091 answered
   `403 Forbidden` HTML on /usage for a known-good key AND a dead key at once —
   the per-IP block rotates between `429 blocked due to excessive requests` and a
