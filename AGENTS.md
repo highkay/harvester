@@ -1012,6 +1012,43 @@ in the proxy pool (only 222 were new).
   default → rotate the master key (proxy `POST /api/settings/master-key/reset` +
   harvester `.env` `TAVILY_PROXY_AUTH_KEY`) or scrub that file.
 
+## Feature: gather fetches RAW file bytes (fixed 2026-09-23; was: HTML blob pages)
+
+- **The defect (found by an Oracle audit, then verified on prod)**: every gather
+  fetch used the search result's `html_url` verbatim —
+  `https://github.com/<o>/<r>/blob/<ref>/<path>` — i.e. GitHub's React HTML
+  blob PAGE, not the file. The page carries the source JSON-escaped inside its
+  `rawLines` payload, so every `"` in the file arrives as `\"`, and the page is
+  far larger than the file. Measured per link through the prod socks exit:
+  blob **268 952 B** vs raw **3 159 B** (85x); 1 115 687 vs 72 962; 508 794 vs
+  20 371; 262 564 vs 2 217 (**118x**). The fetched blob page contained **444
+  escaped quotes**; `github.com` direct connections time out from the container
+  (the page is only reachable through a socks exit).
+- **The damage**: the quote-anchored extraction patterns this repo converged on
+  (101/125 shipped `key_pattern`s carry a `["']`-style anchor) cannot match a
+  quoted assignment in that text — the repo's own deepseek task pattern matched
+  the RAW body and returned `[]` on the blob text; quoted forms
+  (`KEY="sk-…"`, `key: "sk-…"`) are the dominant shape in .env/python/yaml/json
+  files. Every blob fetch also burned 85-118x the bandwidth, a direct cause of
+  the measured multi-hour gather phases (a `github` run took 5.7 h) on the
+  4-core NAS.
+- **The fix**: `stage/definition.py::github_blob_to_raw()` maps
+  `https://github.com/<o>/<r>/blob/<ref>/<path>` (± `#L…` fragment) to
+  `https://raw.githubusercontent.com/<o>/<r>/<ref>/<unquoted path>` and leaves
+  every other URL (hf `resolve`, issue/commit pages, non-github, query strings,
+  malformed input) byte-identical. It runs in `_acquisition_worker` right
+  before `collect(...)`; `links.txt` and the dedup id keep the ORIGINAL blob
+  URL. `collect()` gained an optional `headers=None` passthrough so the gather
+  call site sends a real `User-Agent` (`get_user_agent()`) — gather had been
+  identifying as `python-requests/x.y.z` anonymously from one exit IP.
+  `raw.githubusercontent.com` is reachable DIRECTLY from the container (200 in
+  0.4 s) and via both socks exits.
+- **Verification recipe** (reuse for ANY pattern-anchoring change): fetch the
+  same link both ways and run the shipped pattern against both texts — raw must
+  match; if only the blob form matched, the pattern is anchored to escaped
+  text. Pinned by `tests/test_gather_raw_url.py` (15 tests: helper semantics,
+  the wiring, and two extraction regressions on quoted assignments).
+
 ## Tests & conventions
 
 - Run: `python -m unittest discover -s tests` (committed baseline 572 OK / 8
