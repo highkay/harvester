@@ -1046,6 +1046,22 @@ in the proxy pool (only 222 were new).
   default → rotate the master key (proxy `POST /api/settings/master-key/reset` +
   harvester `.env` `TAVILY_PROXY_AUTH_KEY`) or scrub that file.
 
+## Hardening pass (2026-09-23, Oracle audit of the scanning path)
+
+An Oracle audit of the end-to-end scanning path found the following, all fixed the same day (committed, deployed to prod; suite 809 OK / 8 skipped):
+
+- **Gather fetched the HTML blob page, not the file** — the day's biggest find; full story in the "Feature: gather fetches RAW file bytes" section above (85-118x bandwidth, 444 escaped quotes, 101/125 quote-anchored patterns defeated).
+- **Rate-limiter denial was indistinguishable from a zero-result dork** (`search/client.py`): a denied page-1 returned an empty result, silently dropping the dork's whole pagination + refine tail at DEBUG. It now raises a retryable `ConnectionError` at WARNING, and the first-page gate distinguishes "failed" from "genuinely empty".
+- **Stage retry machinery was dead**: all four workers swallowed exceptions before `_worker_loop` could requeue; search/gather workers now re-raise retryable errors (predicate reused from `RetryCore.should_retry_error`). check/inspect stay conservative because verdict routing is not idempotent.
+- **401 bodies were never read** (`chat()`): judges never saw a 401 body (so glm's documented 401 sub-code map could never fire), and a stale body could travel with a fresh status. Bodies are now read for every status.
+- **512-candidate cap truncated non-deterministically** (set iteration order) when metadata axes are singletons; keys are now sorted before capping.
+- **openai_like empty-200**: an empty HTTP-200 body was a permanent discard (UNKNOWN→invalid); now SERVER_ERROR (retryable→wait-check). Present-but-unparseable bodies keep UNKNOWN.
+- **`HarvesterApp.initialize()` was not idempotent**: every web scan initialised twice (config parsed twice, transport/shared limiter rebuilt and backoff reset, 2 extra sqlite connections, and the runner's completion listener silently discarded). It now early-returns once initialised; a failed init does not latch. Side effect: the completion listener is now live — hence the generic gpt-load push gained per-(provider, run_id) idempotency (mirroring the per-provider services, no shared base).
+- **Per-stage dedup window was smaller than its queue** (100k default vs 100-500k queues → id eviction re-gathered/re-validated the same URL/key): it now derives from the queue size (`max(2×, 1000)`).
+- **Periodic snapshots never started** (`start_periodic_snapshots` ran while the managers dict was lazily empty): they now start in `_on_start` (eagerly creating each provider's ResultManager; `_on_stop` also stops them for a stage-less run).
+- **Zero-yield observability (the recurring "healthy-looking scan, zero yield" class)**: `run_records` gains `links_total`/`materials_total` (migration included) + per-provider gather counters (`ok`/`empty`/`error_404`/`error_other` on `ResultManager`, bridged via a WeakKeyDictionary provider→manager registry). When a run gathers >1000 links and extracts 0 materials, one ERROR line fires and `run_records.error_message` records it (status stays `completed` — the UI's four-value constraint is respected). Counter bumps sit before the retryable re-raise so every attempt is counted.
+- **Deliberately left open (separate workstreams)**: per-run session transport (today one process-wide `set_proxy`/`configure_github_transport` rebinds egress for every in-flight scan — the agnes-ai 2026-09-04 mass-NETWORK_ERROR class), and link-index retention (measured 2026-09-23: `links.db` 888 MB / 1,896,671 rows with no eviction; `-wal` stays ~5 MB so no checkpoint starvation; `responses.db` was 551 MB because cached bodies were blob pages — the raw-bytes fix shrinks it ~180x).
+
 ## Feature: gather fetches RAW file bytes (fixed 2026-09-23; was: HTML blob pages)
 
 - **The defect (found by an Oracle audit, then verified on prod)**: every gather
