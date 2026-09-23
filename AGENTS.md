@@ -1111,7 +1111,10 @@ in the proxy pool (only 222 were new).
   sweep's `--threads` ≤4 so its Resin rotation does not starve the harvester's
   own probes; and before restarting the loop, confirm no `tavily_pool_evict.py`
   is mid-round (grep for a `round N start` without its `round N end`) so an
-  `--apply` cycle is not cut in half.
+  `--apply` cycle is not cut in half. It also separates "dead container" from
+  "quiet round": under `set -o pipefail`, a failed/empty `docker compose exec`
+  logs `cyc=N container-unavailable/exec-failed (rc=…, skipped) — NOT a
+  zero-target round`, so a restart window cannot be misread as "0 new 402 ids".
 - **Effect verified, time-bounded**: every `/search` row since the first
   eviction (06:41:38 UTC) is **200** — 24 rows, zero 402, zero 503 (the attempt
   count behind them is NOT readable from those rows; see the next-but-one
@@ -1201,7 +1204,8 @@ in the proxy pool (only 222 were new).
   kills the sibling's in-container wait recovery (report it; do not take it over)
   and both of my container pieces — relaunch `/tmp/tavily_watch_v2.py`
   (`TAVILY_WATCH_CYCLES=120`, `RESIN_PROXY_TOKEN`; `rm -f` the pidfile first) and
-  `/tmp/tavily_evict_loop.sh` (`CYCLES=130`, banner prints the expiry) afterwards.
+  `/tmp/tavily_evict_loop.sh` (`CYCLES=130`, banner prints the expiry, currently
+  ~2026-09-24 14:22) afterwards.
 - **Deploy pre-validated**: a clean worktree at `origin/main` (58d3952) runs
   **789 tests OK / 8 skipped**, so the whole-tree republish has its gate.
 - **fnos tree alignment is a POINT-IN-TIME fact, not a standing state**: it was
