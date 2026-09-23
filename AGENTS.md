@@ -1113,10 +1113,10 @@ in the proxy pool (only 222 were new).
   is mid-round (grep for a `round N start` without its `round N end`) so an
   `--apply` cycle is not cut in half.
 - **Effect verified, time-bounded**: every `/search` row since the first
-  eviction (06:41:38 UTC) is **200** — 24 rows, zero 402, zero 503 — and each is
-  a single upstream attempt (`request_id` grouping). The 3×503 quoted from the
-  "last 10 minutes" window were pre-cutoff rows (06:35), so that window could
-  not have shown the fix.
+  eviction (06:41:38 UTC) is **200** — 24 rows, zero 402, zero 503 (the attempt
+  count behind them is NOT readable from those rows; see the next-but-one
+  bullet). The 3×503 quoted from the "last 10 minutes" window were pre-cutoff
+  rows (06:35), so that window could not have shown the fix.
 - **Coverage, not "fully fixed"**: 43 pool keys have been deactivated this
   session — the 16 behind the newest upstream-402 rows (2520 2560 2670 2690 2698
   2785 2789 2807 3128 3129 3408 3477 3563 3586 3623 3624) plus 27 spent-counter
