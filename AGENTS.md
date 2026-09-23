@@ -934,6 +934,84 @@ in the proxy pool (only 222 were new).
   429/1113, which had produced 1200 of 1713 ERROR lines in 6 h. 5xx, timeouts
   and connection errors stay ERROR.
 
+## tavily: what "验证一直报错" actually is (measured 2026-09-23, prod)
+
+- **The error storm is a per-IP bulk-validation block, not key verdicts.** From
+  any of our egresses, bulk `/usage` requests eventually answer
+  `429 {"detail":{"error":"Your request has been blocked due to excessive
+  requests"}}` — for GOOD and DEAD keys alike. Proof method: always run a
+  control probe (a key known to answer 200) in the same window; if the control
+  also 429s, the sample says nothing about the keys (measured: control 429 in
+  1/5 probes during a burst).
+- **The block follows cumulative distinct-key volume, not a fixed inter-request
+  delay.** TavilyProxyManager's own hourly sync job (rq, 1276-key pool):
+  `pace=0` → 20 ok / 247 failed; after setting `request_interval_seconds=6` →
+  25 ok / 383 failed. Both >90% blocked. In contrast a 25-key sample at 6 s/key
+  through fnos exit 1090 → 56% usable / 8% exhausted / 36% 429 / **0 dead**.
+  So: small batches pass, a 1.3k-key sweep from one IP cannot, with or without
+  pacing.
+- **Consequence for the pool**: the sync job is the ONLY thing that flags dead
+  keys (`quota_sync_service.go::syncKey`: 401 → `MarkInvalid`, 432/433 →
+  `MarkExhausted`, 429 → **no state change**). Under a 429 block the pool keeps
+  dead keys `is_active=true / is_invalid=false` and quota stays stale — which is
+  why the proxy then serves `402` (exhausted key) and `503` (retry budget
+  exhausted, 30 s timeout) to clients.
+- **The harvester-side candidate pool IS mostly dead — a separate, genuine
+  finding.** Run `415a13f9` (tavily, 09:00→11:25 CST, auto-picked exit 1091):
+  123 valid / 2107 wait (1967 real-format, 140 junk) / 56 invalid / 39 no-quota,
+  push_logs 123 keys → **7 added**. Replay of 65 sampled wait keys at polite
+  pacing: **49% 401 dead, 34% alive-but-quota-exhausted, 14% usable** (≈275
+  recoverable), 3% timeouts. Those dead keys sit in wait (not invalid) only
+  because the throttled window answered 429 → RATE_LIMITED → wait.
+- **Exits at measurement time**: 1080 / 1090 / 1091 (+1082) all healthy
+  (good→200 `plan 100/1000`, dead→401); container-direct `api.tavily.com` still
+  lossy (`ReadTimeout`). Re-check before blaming keys — blocks rotate.
+- **Run-log noise is NOT tavily**: `ERROR` in `docker compose logs` =
+  GitHub-side 404 (60/30 min) + 502 HTML (11) + the continuous
+  `[GithubCrawl] GitHub API token rate limited` / `[github] all token
+  credentials …` WARNING storm (all 7 tokens in cooldown 10:39→11:25), during
+  which check-task generation stalled → tavily's counters froze. tavily check
+  failures log at **DEBUG** only (`provider/tavily.py`), so they never appear as
+  ERRORs.
+- **TavilyProxyManager deployment & API** (ghcr.io/xuncv/tavilyproxymanager,
+  rq `highkay@192.168.1.11` dir `/home/highkay/tavilyproxymanager`, port 48080,
+  DB `data/proxy.db`, `settings.master_key` = the key harvester's
+  `TAVILY_PROXY_AUTH_KEY` must match): `GET /api/keys` is **MASKED**
+  (`util.MaskAPIKey` → `tvly-****abcd`) — never probe or diff those, use
+  `GET /api/keys/export` (raw newline list); `GET|POST /api/keys/sync`
+  (job status / trigger, returns per-key `status|error`); `DELETE
+  /api/keys/invalid`; `PUT /api/settings/auto-sync` accepts
+  `{enabled, interval_minutes(1-1440), request_interval_seconds(0-60)}`;
+  `GET /api/stats` (`key_count`, `active_key_count`, `total_remaining`);
+  `GET /api/logs/status-codes`. Its Go client uses `http.DefaultTransport`, so
+  an `HTTP(S)_PROXY` env in its compose WOULD route upstream calls through
+  another egress (not applied; unverified).
+- **Applied 2026-09-23 on the proxy**: `request_interval_seconds` 0 → 6 and
+  `interval_minutes` 60 → 360 (cuts the blocked-request storm ~6×; neither value
+  makes the full-pool sync succeed). Revert = same PUT with the old values.
+  Beware: with pace=6 a 1276-key sync needs ~2.1 h, so interval ≥ 180 keeps the
+  job from running continuously.
+- **Orbital noise (optional cleanup)**: the shipped pattern
+  `(?:tvly|tavily)-[0-9A-Za-z_-]{20,}` also captures ~150 English prose tokens
+  (`tavily-search-provider-plugin`, `tavily-web-search--research`) and ~140
+  slug-shaped entries (`tvly-rec…`, `tvly-mcp…`, `tvly-test…`) per run — ≈7% of
+  candidates. Authentic keys measured: `tvly-dev-` (1511 entries; 41 chars =
+  `tvly-dev-` + 32) and `tvly-prod-` (5 valid, other widths) — narrow ONLY with
+  a fresh corpus measurement and a tripwire, per the serpapi lesson.
+- **Watchers deployed 2026-09-23 (all bounded, self-terminating)**: container
+  `/tmp/tavily_validate_watch.py` → `/tmp/tavily_validate_watch.log` (120×5 min:
+  bucket census, exit A/B, rotating 5-key wait replay); fnos host
+  `/tmp/tavily_validate_host.sh` → `/tmp/tavily_validate_host.log`
+  (search-side 429/5xx + GitHub-cooldown counts, tavily display row, check-task
+  activity); rq `/tmp/tavily_proxy_watch.py` → `/tmp/tavily_proxy_watch.log`
+  (sync job progress, auto-sync settings, pool stats, /search status mix).
+  Delete by explicit filename; do not touch other sessions' files
+  (`/tmp/recovered_*`, `/tmp/tavily_key_recovery.py`, `/app/data/harvest_watch.py`).
+- **Security note**: the other session's container script
+  `/tmp/tavily_key_recovery.py` hardcodes the proxy master key as a fallback
+  default → rotate the master key (proxy `POST /api/settings/master-key/reset` +
+  harvester `.env` `TAVILY_PROXY_AUTH_KEY`) or scrub that file.
+
 ## Tests & conventions
 
 - Run: `python -m unittest discover -s tests` (committed baseline 572 OK / 8
