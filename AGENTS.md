@@ -1161,9 +1161,17 @@ in the proxy pool (only 222 were new).
   1260 → ~1233. Never quote `active_key_count` as `COUNT(is_active=1)`.
 - **Watcher guard**: a wait-bucket replay is published only when the chosen
   exit's OWN control probe answers 200; otherwise the cycle logs
-  `replay[…] SKIPPED — exit-limited (control=403…)`. Rationale: exit 1091
+  `replay[…] SKIPPED — exit-limited (control=403…)`. Verified live 15:26
+  (`stats_active=1231`, exit 1091 control=403 → SKIPPED). Rationale: exit 1091
   answered `403 Forbidden` HTML to a known-good key AND a dead key at once,
   so anything it returns that cycle is exit-artifact, not a key verdict.
+- **Pidfile guard trap (cost a dead watcher at 15:11-15:26)**: the guard is
+  `os.kill(pid, 0)` on the pidfile, so a STALE pidfile whose pid got reused makes
+  the new instance exit instantly with `watcher already running` — and that line
+  goes to `/app/data/tavily_validate_watch.out`, not the log, so the log simply
+  stops advancing. When (re)starting any pidfile-guarded watcher: `rm -f` the
+  pidfile first, then confirm a NEW `started … (pid N)` banner and one logged
+  cycle. The 5-minute cadence makes a dead watcher look merely quiet.
 - **fnos tree is aligned** to `origin/main` (4fa18fe) with BOTH rate blocks at
   0.2/2, and the container copies were re-copied FROM that tree and verified by
   md5 (tree ↔ container MATCH for all three tavily configs) — so following the
