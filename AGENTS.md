@@ -551,22 +551,29 @@ update preserves intentional local changes (reverts, port/volume tweaks).
   (a wedged slot stays wedged for 10 min). Client-side advice: use the free models, or
   add group `model_redirect_rules` mapping the paid ids onto `gpt-oss:20b`.
 - **"Disabled" inventory (audited 2026-09-23, BOTH gpt-load instances)**: the only real
-  off-switch is `schedule_config.enabled` — exactly one row, `cerebras` (parked behind the
-  CF egress block; the rn group 12 that receives its keys holds 28 "active" keys that the
-  cerebras provider itself can no longer validate). Everything else is on: 16
-  `provider_group_mapping` rows, 7 GitHub tokens, both `gpt_load_config` rows, and every
+  off-switch is `schedule_config.enabled` — exactly one row, `cerebras`. Everything else is on:
+  16 `provider_group_mapping` rows, 7 GitHub tokens, both `gpt_load_config` rows, and every
   scheduled provider's config file exists in the running image (incl.
   `examples/config-nvidia.yaml`, whose row was seeded 2026-09-22 20:23 and fires first at
-  11:50). **Disabled by absence: `grok`** — `provider/grok.py` + `examples/config-grok.yaml`
-  exist but there is no schedule row, no seed entry and no group mapping, so it never runs.
-  **Off by flag AND omission: `gemini`** — registered (`provider/__init__.py:14`) and mapped
-  (`provider_group_mapping` → rn cfg2 group 9, whose 306 keys are **263 invalid**), but there
-  is no `examples/config-gemini.yaml`, no scheduler seed and no prod row, and the bundled
-  preset in `config/defaults.py:317-319` sets `"enabled": False` (same shape as grok's, which
+  11:50). **Verified pool states (measured, not inferred)**: rn group 12 (`cerebras`, upstream
+  `https://api.cerebras.ai`, test_model `gpt-oss-120b`) holds 28 keys all marked `active` but a
+  serve probe answers **402 `payment_required` "Visit your billing tab"** in 0.8 s, and only
+  1/28 was ever used (last use 2026-07-21) — gpt-load keeps them `active` because its validation
+  hits a non-billing endpoint (the auth-valid/402 split AGENTS already records), so this pool is
+  dead weight regardless of pruning. rn group 9 (`gemini2`, 306 keys = 263 invalid + 43 active)
+  has **0 keys ever used** and its serve probe answers **404** (openai channel against
+  `https://generativelanguage.googleapis.com` needs the `/v1beta/openai/...` base, so the group
+  is misconfigured on top of having no producer). **Disabled by absence: `grok`** —
+  `provider/grok.py` + `examples/config-grok.yaml` exist but there is no schedule row, no seed
+  entry and no group mapping, so it never runs. **Off by flag AND omission: `gemini`** —
+  registered (`provider/__init__.py:14`) and mapped (→ rn group 9), but there is no
+  `examples/config-gemini.yaml`, no scheduler seed and no prod row, and the bundled preset in
+  `config/defaults.py:317-319` sets `"enabled": False` (same shape as grok's, which
   `config/defaults.py:249-250` also disables; grok's standalone example config sets its task
   `enabled: true`, so a grok config CAN run once a schedule row exists). Consequence: both
   pools are un-replenishable — gemini's surviving 43 keys decay with nothing able to refill
-  them, so either add config+schedule or retire the mapping/pool deliberately.
+  them, so either add config+schedule or retire the mapping/pool deliberately
+  (cerebras: retire/park — its keys cannot infer even though 28 are "active").
   gpt-load has no disabled key status anywhere (fnos: 1177 active / 2 invalid, both in
   `qwenchina`; rn: gemini2 306 keys = 263 invalid + 43 active, cerebras 28 active, groq 5,
   mimosg 1 active + 1 invalid, agnes 40 — **266 invalid keys in total across both**), groups
