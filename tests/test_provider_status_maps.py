@@ -403,9 +403,30 @@ class TestOpenAILikeStatusMap(unittest.TestCase):
         result = self.provider._judge(200, '{"result":"ok","status":"fine"}')
         self.assertTrue(result.available)
 
+    def test_200_empty_body_is_server_error_not_unknown(self):
+        # An empty 200 body is a transport/proxy artefact, NOT a key verdict.
+        # UNKNOWN would file this *authenticated* key into invalid-keys.txt
+        # (a PERMANENT discard); SERVER_ERROR is retryable, so CheckStage
+        # routes it to the recoverable wait-check-keys.txt bucket instead.
+        for body in ("", "   ", "\r\n"):
+            with self.subTest(body=repr(body)):
+                result = self.provider._judge(200, body)
+                self.assertFalse(result.available)
+                self.assertEqual(result.reason, ErrorReason.SERVER_ERROR)
+                self.assertTrue(result.reason.is_retryable())
+
     def test_200_non_json_is_unknown(self):
         result = self.provider._judge(200, "not-json")
         self.assertEqual(result.reason, ErrorReason.UNKNOWN)
+
+    def test_200_html_proxy_page_stays_unknown(self):
+        # Present-but-unparseable body (HTML captive/error page from a
+        # transparent proxy exit) keeps the historical UNKNOWN classification
+        # — only the EMPTY-body case was reclassified to SERVER_ERROR.
+        result = self.provider._judge(200, "<html><body>Bad Gateway</body></html>")
+        self.assertFalse(result.available)
+        self.assertEqual(result.reason, ErrorReason.UNKNOWN)
+        self.assertFalse(result.reason.is_retryable())
 
 
 # ---------------------------------------------------------------------------

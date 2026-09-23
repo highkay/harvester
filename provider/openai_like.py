@@ -9,6 +9,7 @@ import re
 import urllib.parse
 
 from tools.logger import get_logger
+from tools.patterns import redact_api_keys_in_text
 
 logger = get_logger("provider")
 from typing import Dict, List, Optional
@@ -107,8 +108,18 @@ class OpenAILikeProvider(AIBaseProvider):
     def _judge(self, code: int, message: str) -> CheckResult:
         """Judge OpenAI-like API response."""
         if code == 200:
+            body = trim(message)
+            if not body:
+                # An EMPTY 200 body is a transport/proxy artefact (a truncated
+                # connection or a transparent proxy exit), NOT a key verdict.
+                # The old path raised inside json.loads and returned UNKNOWN,
+                # which CheckStage routes to invalid-keys.txt — a PERMANENT
+                # discard of an otherwise authenticated key. SERVER_ERROR is
+                # retryable, so the key lands in the recoverable
+                # wait-check-keys.txt bucket instead.
+                return CheckResult.fail(ErrorReason.SERVER_ERROR)
             try:
-                data = json.loads(trim(message))
+                data = json.loads(body)
                 if data and isinstance(data, dict):
                     error = data.get("error", None)
                     # Normalize both error shapes to lowercase marker text.
@@ -143,7 +154,17 @@ class OpenAILikeProvider(AIBaseProvider):
                             return CheckResult.fail(ErrorReason.NO_QUOTA)
                         return CheckResult.fail(ErrorReason.BAD_REQUEST)
             except:
-                logger.error(f"Failed to parse response, domain: {self._base_url}, message: {message}")
+                # Present-but-unparseable body (e.g. an HTML captive/error
+                # page served by a transparent proxy exit): no key verdict can
+                # be made, so the historical UNKNOWN classification is kept
+                # (permanent invalid-keys bucket — unchanged semantics).
+                # Redact before logging — this family can carry prefix-less
+                # keys that the global RedactionFilter misses — and cap the
+                # length so a huge body cannot flood the log.
+                logger.error(
+                    f"Failed to parse response, domain: {self._base_url}, "
+                    f"message: {redact_api_keys_in_text(message)[:200]}"
+                )
                 return CheckResult.fail(ErrorReason.UNKNOWN)
 
             # Deliberately NOT tightening the success shape (no `choices`
