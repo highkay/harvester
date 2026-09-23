@@ -111,8 +111,19 @@ class OpenAILikeProvider(AIBaseProvider):
                 data = json.loads(trim(message))
                 if data and isinstance(data, dict):
                     error = data.get("error", None)
-                    if error and isinstance(error, dict):
-                        # A 200 carrying an error object is a failed request,
+                    # Normalize both error shapes to lowercase marker text.
+                    # The string arm is the native-Ollama body
+                    # ({"error": "model not found"}) — the old dict-only gate
+                    # let it fall through to success and pool a soft-error
+                    # body as a VALID key. None / falsy / other types keep the
+                    # historical success fall-through.
+                    error_text = ""
+                    if isinstance(error, str):
+                        error_text = trim(error).lower()
+                    elif isinstance(error, dict) and error:
+                        error_text = json.dumps(error, ensure_ascii=False).lower()
+                    if error_text:
+                        # A 200 carrying an error body is a failed request,
                         # but the FAILURE KIND decides the bucket (matching how
                         # stage/definition.py routes verdicts):
                         #   auth-flavoured  -> the key itself was rejected ->
@@ -126,7 +137,6 @@ class OpenAILikeProvider(AIBaseProvider):
                         # The old blanket INVALID_KEY permanently burned valid
                         # keys whenever a wrapper gateway answered a transient
                         # upstream fault with HTTP 200 + error JSON.
-                        error_text = json.dumps(error, ensure_ascii=False).lower()
                         if any(marker in error_text for marker in _AUTH_ERROR_MARKERS):
                             return CheckResult.fail(ErrorReason.INVALID_KEY)
                         if any(marker in error_text for marker in _QUOTA_ERROR_MARKERS):

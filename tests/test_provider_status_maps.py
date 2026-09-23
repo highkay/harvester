@@ -363,6 +363,35 @@ class TestOpenAILikeStatusMap(unittest.TestCase):
         self.assertFalse(result.available)
         self.assertEqual(result.reason, ErrorReason.BAD_REQUEST)
 
+    def test_200_string_error_auth_marker_is_invalid_key(self):
+        # Native-Ollama shape: {"error": "<plain string>"}. The old dict gate
+        # (`isinstance(error, dict)`) let it fall through to success, pooling
+        # the soft-error body as a VALID key (ollama is a daily prod provider).
+        body = json.dumps({"error": "Unauthorized: invalid api key"})
+        result = self.provider._judge(200, body)
+        self.assertFalse(result.available)
+        self.assertEqual(result.reason, ErrorReason.INVALID_KEY)
+
+    def test_200_string_error_quota_marker_is_no_quota(self):
+        body = json.dumps({"error": "insufficient credits for this request"})
+        result = self.provider._judge(200, body)
+        self.assertFalse(result.available)
+        self.assertEqual(result.reason, ErrorReason.NO_QUOTA)
+
+    def test_200_string_error_generic_is_bad_request(self):
+        # The canonical native-Ollama soft error: model unknown/not pulled.
+        # Not a key verdict -> BAD_REQUEST -> recoverable wait-check bucket.
+        body = json.dumps({"error": "model 'probe-model' not found, try pulling it first"})
+        result = self.provider._judge(200, body)
+        self.assertFalse(result.available)
+        self.assertEqual(result.reason, ErrorReason.BAD_REQUEST)
+
+    def test_200_empty_string_error_stays_success(self):
+        # Only a NON-EMPTY string arm classifies; an empty/whitespace error
+        # keeps the historical "no error payload -> success" fall-through.
+        result = self.provider._judge(200, json.dumps({"error": "", "result": "ok"}))
+        self.assertTrue(result.available)
+
     def test_200_chat_completion_is_success(self):
         body = json.dumps({"id": "chatcmpl-1", "choices": [{"message": {"role": "assistant", "content": "hi"}}]})
         result = self.provider._judge(200, body)
