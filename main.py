@@ -57,6 +57,7 @@ class HarvesterApp:
         # Application state
         self.running = False
         self.start_time = 0.0
+        self._initialized = False
 
         # Enhanced shutdown control
         self.shutdown_event = threading.Event()
@@ -76,7 +77,23 @@ class HarvesterApp:
         logger.info(f"Initialized application with config: {config_path}")
 
     def initialize(self) -> bool:
-        """Initialize all application components"""
+        """Initialize all application components (idempotent).
+
+        web/runner.py calls initialize() and then run(), which calls
+        initialize() again. Re-initializing rebuilt the whole world: the
+        config was parsed twice, init_managers()/set_proxy/
+        configure_github_transport/init_github_client ran twice (rebuilding
+        the shared GitHub client and resetting adaptive backoff), a second
+        pair of sqlite connections was opened (LinkIndex/ResponseCache have
+        no production close() callers), and the TaskManager that callers had
+        registered completion listeners on was silently DISCARDED. Once
+        initialization has succeeded, later calls are truthful no-ops; a
+        failed initialization does not latch, so a retry still runs.
+        """
+        if self._initialized:
+            logger.info("Application already initialized, skipping re-initialization")
+            return True
+
         try:
             # Load configuration
             self.config = load_config(self.config_path)
@@ -154,6 +171,7 @@ class HarvesterApp:
             logger.info("Completion event listeners registered")
 
             logger.info("Application initialization completed")
+            self._initialized = True
             return True
 
         except Exception as e:
