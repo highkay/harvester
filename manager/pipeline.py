@@ -81,14 +81,11 @@ class Pipeline(IPipelineStats, StageRegistryMixin, LifecycleManager):
             shutdown_timeout=float(config.persistence.shutdown_timeout),
         )
 
-        # Start periodic snapshots for results
-        if not config.persistence.simple:
-            try:
-                self.result_manager.start_periodic_snapshots(config.persistence.snapshot_interval)
-            except Exception as e:
-                logger.error(f"Failed to start periodic snapshots: {e}")
-        else:
-            logger.debug("Skipping periodic snapshots in simple mode")
+        # Periodic snapshots are started in _on_start(), NOT here:
+        # MultiResultManager populates `managers` lazily, so a start call in
+        # __init__ iterated an empty dict and no snapshot thread ever existed
+        # (measured in production: 0 `snapshot-*` threads despite every config
+        # setting persistence.snapshot_interval).
 
         # Store task configs for stage checking (must be before _create_stages)
         self.task_configs = {task.name: task for task in config.tasks if task.enabled}
@@ -164,12 +161,20 @@ class Pipeline(IPipelineStats, StageRegistryMixin, LifecycleManager):
 
             try:
                 # Create stage instance with hybrid architecture
+                queue_size = max(queue_config.get(name, 1000), 1)
                 stage = definition.stage_class(
                     resources=resources,
                     handler=self._handle_stage_output,
                     thread_count=max(thread_config.get(name, 1), 1),
-                    queue_size=max(queue_config.get(name, 1000), 1),
+                    queue_size=queue_size,
                     max_retries=self.config.global_config.max_retries_requeued,
+                    # The dedup window must cover the queue it guards: with the
+                    # stage-base default (100k) and prod queue sizes (search
+                    # 100k / gather 200k / check 500k), ids were evicted while
+                    # still queued/in-flight and the same URL/key could be
+                    # re-gathered and re-validated, burning provider rate budget
+                    # and inflating duplicate verdict lines.
+                    dedup_max_size=max(2 * queue_size, 1000),
                 )
 
                 self.stages[name] = stage
@@ -178,8 +183,29 @@ class Pipeline(IPipelineStats, StageRegistryMixin, LifecycleManager):
                 logger.error(f"Failed to create stage {name}: {e}")
                 raise
 
+    def _start_periodic_snapshots(self) -> None:
+        """Create the per-provider result managers and start their snapshot threads.
+
+        Runs at start() time (not __init__) because MultiResultManager.managers
+        is populated lazily; eagerly creating the managers here is the same
+        construction backup_all_existing_files()/the first results would
+        trigger anyway, and it makes persistence.snapshot_interval effective.
+        """
+        if self.config.persistence.simple:
+            logger.debug("Skipping periodic snapshots in simple mode")
+            return
+
+        try:
+            for name in self.providers:
+                self.result_manager.get_manager(name)
+            self.result_manager.start_periodic_snapshots(self.config.persistence.snapshot_interval)
+        except Exception as e:
+            logger.error(f"Failed to start periodic snapshots: {e}")
+
     def _on_start(self) -> None:
         """Start all pipeline stages"""
+        self._start_periodic_snapshots()
+
         if not self.stages:
             logger.warning("No stages to start")
             return
@@ -197,6 +223,10 @@ class Pipeline(IPipelineStats, StageRegistryMixin, LifecycleManager):
     def _on_stop(self) -> None:
         """Stop all pipeline stages"""
         if not self.stages:
+            # _on_start eagerly created result managers even for a stage-less
+            # pipeline; stop them so their flush/snapshot threads cannot
+            # outlive the run.
+            self.result_manager.stop_all()
             return
 
         # Stop stages in reverse dependency order
