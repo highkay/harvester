@@ -532,6 +532,35 @@ update preserves intentional local changes (reverts, port/volume tweaks).
   `valid_keys_found`. Pool keys are re-verifiable at
   `GET {gpt_load}/api/keys?group_id=10` and by a chat probe that asserts
   `200 + "choices" + no "error"` in the body.
+- **Catalog ≠ entitlement (2026-09-23, cost an operator a debugging round)**: the
+  per-key model lists in `providers/ollama/summary.json` come from `GET /v1/models`,
+  which is PUBLIC — it advertises the whole ollama.com catalog, paid models included.
+  Free-tier harvested keys answer **402 `this model is not included in your free
+  usage`** for `glm-5.1` / `deepseek-v4.1-flash` / `kimi-k3` / `qwen3.5:397b`, while
+  `gpt-oss:20b`, `gpt-oss:120b` and `gemma4:31b` (plus the CLI alias `gpt-oss:20b-cloud`)
+  answer 200 in 0.7–4 s. Quote the free list, not the catalog.
+- **The gpt-load ollama group can wedge ("一直卡住")**: `/proxy/ollama/v1/...` hangs
+  with `429 timed out waiting for a concurrent request slot` (300–1800 s waits; 1 of 14
+  requests succeeded that day) although every upstream leg measures 1–2 s. Not egress:
+  while wedged the group's own `socks5://127.0.0.1:1081` answered 200 in 1.5 s from the
+  host, and switching the group to mihomo `7890` *or* to direct also hung — a
+  `docker restart gpt-load` cleared it, after which the group served `gpt-oss:20b` in
+  4.6 s and `gpt-oss:120b` in 1.0 s. Amplifiers in the fork's settings:
+  `failover_status_codes=400-403,405-999` (a plan-level **402** triggers a 6-key retry
+  spiral, so clients see a hang instead of a clean error) and `request_timeout=600 s`
+  (a wedged slot stays wedged for 10 min). Client-side advice: use the free models, or
+  add group `model_redirect_rules` mapping the paid ids onto `gpt-oss:20b`.
+- **"Disabled" inventory (audited 2026-09-23)**: the only real off-switch is
+  `schedule_config.enabled` — exactly one row, `cerebras` (parked behind the CF egress
+  block). Everything else is on: 16 `provider_group_mapping` rows, 7 GitHub tokens, both
+  `gpt_load_config` rows. On the gpt-load side there is no disabled state to find:
+  `api_keys.status` is only `active`/`invalid` (1177/2), groups have no enabled column,
+  `group_sub_groups` is empty, and `allowed_models='__disabled__'` (27 keys) means the
+  per-key model allowlist is OFF (a group-10 key carrying it served 200), not "key
+  disabled" — the two *restrictive* values in the DB are single-key allowlists
+  (`qwen-plus`, `glm-5.2`). Effectively-off groups are the empty ones: `kimi` (3),
+  `glm` (14), `zai` (15) = 0 keys. `examples/config-full.yaml` carries 10 task-level
+  `enabled: false` but is not used in production.
 - **Latent hole (FIXED 2026-09-23)**: `OpenAILikeProvider._judge`'s 200 branch
   used to treat a top-level `error` as a failure only when it was a **dict**; a
   200 body with a *string* `error` (native-Ollama shape) was accepted as
