@@ -550,17 +550,28 @@ update preserves intentional local changes (reverts, port/volume tweaks).
   spiral, so clients see a hang instead of a clean error) and `request_timeout=600 s`
   (a wedged slot stays wedged for 10 min). Client-side advice: use the free models, or
   add group `model_redirect_rules` mapping the paid ids onto `gpt-oss:20b`.
-- **"Disabled" inventory (audited 2026-09-23)**: the only real off-switch is
-  `schedule_config.enabled` — exactly one row, `cerebras` (parked behind the CF egress
-  block). Everything else is on: 16 `provider_group_mapping` rows, 7 GitHub tokens, both
-  `gpt_load_config` rows. On the gpt-load side there is no disabled state to find:
-  `api_keys.status` is only `active`/`invalid` (1177/2), groups have no enabled column,
-  `group_sub_groups` is empty, and `allowed_models='__disabled__'` (27 keys) means the
-  per-key model allowlist is OFF (a group-10 key carrying it served 200), not "key
-  disabled" — the two *restrictive* values in the DB are single-key allowlists
-  (`qwen-plus`, `glm-5.2`). Effectively-off groups are the empty ones: `kimi` (3),
-  `glm` (14), `zai` (15) = 0 keys. `examples/config-full.yaml` carries 10 task-level
-  `enabled: false` but is not used in production.
+- **"Disabled" inventory (audited 2026-09-23, BOTH gpt-load instances)**: the only real
+  off-switch is `schedule_config.enabled` — exactly one row, `cerebras` (parked behind the
+  CF egress block; the rn group 12 that receives its keys holds 28 "active" keys that the
+  cerebras provider itself can no longer validate). Everything else is on: 16
+  `provider_group_mapping` rows, 7 GitHub tokens, both `gpt_load_config` rows, and every
+  scheduled provider's config file exists in the running image (incl.
+  `examples/config-nvidia.yaml`, whose row was seeded 2026-09-22 20:23 and fires first at
+  11:50). **Disabled by absence: `grok`** — `provider/grok.py` + `examples/config-grok.yaml`
+  exist but there is no schedule row, no seed entry and no group mapping, so it never runs.
+  gpt-load has no disabled key status anywhere (fnos: 1177 active / 2 invalid, both in
+  `qwenchina`; rn: gemini2 306 keys = 263 invalid + 43 active, cerebras 28 active, groq 5,
+  mimosg 1 active + 1 invalid, agnes 40 — **266 invalid keys in total across both**), groups
+  have no enabled column, `group_sub_groups` is empty, and
+  `allowed_models='__disabled__'` (27 keys) means the per-key model allowlist is OFF (a
+  group-10 key carrying it served 200; the only *restrictive* values are single-key
+  allowlists `qwen-plus` / `glm-5.2`). Effectively-off pools are the EMPTY groups: `kimi`
+  on both instances (fnos id 3 = 0 keys, rn id 23 = 0), `glm` (14) and `zai` (15) — the
+  last two were cleared by the 2026-09-21 flash-only policy and refill only when a scan
+  finds glm-5.3-flash-capable keys. `examples/config-full.yaml` carries 10 task-level
+  `enabled: false` but is not used in production (all 20 rows point at per-provider files).
+  A repo↔prod cron mismatch is cosmetic: the seed says `ollama 20 3 * * *`, the prod row
+  (manual insert) says `0 3 * * *`.
 - **Latent hole (FIXED 2026-09-23)**: `OpenAILikeProvider._judge`'s 200 branch
   used to treat a top-level `error` as a failure only when it was a **dict**; a
   200 body with a *string* `error` (native-Ollama shape) was accepted as
