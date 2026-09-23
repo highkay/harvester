@@ -53,6 +53,40 @@ curl -s http://localhost:8002/health                       # expect {"status":"o
 Before pulling, review fnos-local commits (`git log origin/main..HEAD`) so the
 update preserves intentional local changes (reverts, port/volume tweaks).
 
+**Working recipe (2026-09-23 — `--build` is broken on fnos, see the ops section)**:
+the fnos repo dir is NOT a bind-mount for code (only `./data:/app/data` is), so a
+deployed container is `image + whatever was cp'd`. Align + publish with:
+
+```bash
+# on fnos, in /home/admin/harvester (repo must equal the SHA you validated)
+mkdir -p rollback-$(date +%Y%m%d-%H%M%S) && cp Dockerfile.web docker-compose.yml rollback-*/
+git fetch origin && git log --oneline origin/main..HEAD    # must be EMPTY
+git reset --hard origin/main
+cp rollback-*/Dockerfile.web Dockerfile.web
+cp docker-compose.hostnet.yml docker-compose.yml           # or prod reverts to bridge
+for d in config constant core manager provider search stage storage tools web examples; do
+  docker compose cp "$d" harvester-web:/app/; done
+for f in main.py web_main.py __init__.py requirements.txt; do
+  docker compose cp "$f" harvester-web:/app/$f; done
+docker compose restart && curl -s http://localhost:8002/health
+```
+
+- **Never cp `data/`** (it *is* the live bind mount — you would nest
+  `/app/data/data` under a running scan), nor `logs/`, `tests/`, `.git/`, `.omo/`,
+  the legacy in-tree `serpapi_proxy/`.
+- **Copy only a committed SHA**: the workstation tree routinely carries another
+  session's uncommitted WIP (e.g. 2026-09-23: `main.py`, `manager/pipeline.py`,
+  `stage/definition.py`, `storage/persistence.py`), so `cp` from that directory
+  would ship untested code. Validate in a clean worktree
+  (`git worktree add ../x origin/main`) and copy from fnos's reset tree.
+- A `restart` kills in-flight scans (reconciled as
+  `failed: interrupted by service restart`) and it also drops any watcher
+  processes other sessions started in the container; container env is frozen at
+  creation, so a stale `HARVESTER_PROXY_*` value survives until a recreate.
+- Verified state 2026-09-23: prod tree whole-cp'd at `0e3b8fc` (9/9 md5 markers,
+  `/health` ok, `github_blob_to_raw` smoke), rollback copies under
+  `rollback-20260923-122852/`.
+
 ### Env / keys on production
 
 - `.env` on fnos holds `WEB_AUTH_KEY`, `ENCRYPTION_KEY`, gpt-load/tavily keys.
@@ -1051,11 +1085,31 @@ in the proxy pool (only 222 were new).
 
 ## Tests & conventions
 
-- Run: `python -m unittest discover -s tests` (committed baseline 572 OK / 8
-  skipped as of 2026-09-22; the same-day hardening workstreams push it past
-  ~700 — `tests/test_web_scheduler.py` alone is 21. The old "490 tests" and
-  "35 failures in test_web_ui / test_web_push_logs" baselines are stale).
-- **One config file = one task.** Do NOT bundle regional tasks into one config
+- Run: `python -m unittest discover -s tests`. **Measured baseline 2026-09-23:
+  726 OK / 8 skipped in a clean checkout of `0e3b8fc`** (the "572 OK as of
+  2026-09-22" note below was written before the same-day hardening landed; the
+  old "490 tests" and "35 failures in test_web_ui / test_web_push_logs"
+  baselines are stale).
+- **Env-pollution trap (cost a false 35-red suite on 2026-09-23)**: the
+  workstation `.env` carries the *container* paths
+  (`HARVESTER_DB_PATH=/app/data/harvester.db`, `HARVESTER_WORKSPACE=/app/data`).
+  `web/config.py::WebSettings.db_path` reads only `HARVESTER_DB_PATH` (while
+  `web/db.py::resolve_db_path` also accepts the legacy `HARVESTER_DB` the
+  harnesses set), so a polluted machine makes the app under test open an empty
+  DB → `no such table: github_tokens` → every DB-reading page 500s in
+  `test_web_ui` + `test_web_push_logs` (35 failures that look like a web
+  regression but are not). Fix landed in `fe36dae`: both harnesses now set the
+  canonical `HARVESTER_DB_PATH` too, verified green **with** the polluted vars
+  set. Ad-hoc runs can also use
+  `env -u HARVESTER_DB_PATH -u HARVESTER_WORKSPACE python -m unittest …`.
+  (Two resolvers disagreeing is the underlying defect —
+  `resolve_db_path()` is the single source of truth to delegate to.)
+- **`examples/config-nvidia.yaml` is a collection-only profile**
+  (`check: false`, `inspect: false`, workspace `./data-nvidia-wide`): its
+  scheduled run harvests links/material on purpose and will never report
+  `valid_keys_found`. Don't read nvidia's 0-valid rows as a defect; enable
+  check/inspect there only if slow API validation is wanted.
+- One config file = one task. Do NOT bundle regional tasks into one config
   (2026-09-21: `glm`/`kimi`/`mimo`/`qwen` were split into per-task files). A
   bundled run aggregates 2-3 tasks into one `run_records.valid_keys_found` and
   mixes statistics; pushes are per task anyway. `web/scheduler.py` now seeds
