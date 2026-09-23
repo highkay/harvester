@@ -32,6 +32,14 @@ from .models import mask_token
 
 logger = get_logger("web.runner")
 
+# Zero-yield tripwire threshold (audit JOB 1c): a corpus larger than this
+# that produced ZERO candidate materials is the historical "healthy-looking
+# scan, zero yield" signature — four rounds of debugging (glm's wrong key
+# pattern, groq's decoy pool, ollama's no-op created: qualifier, modelscope's
+# naked pattern) all looked like completed runs with valid_keys_found=0 and
+# nothing in the row said the EXTRACTION stage was the silent failure point.
+_ZERO_YIELD_LINK_THRESHOLD = 1000
+
 # ---------------------------------------------------------------------------
 # Workspace helper
 # ---------------------------------------------------------------------------
@@ -348,6 +356,26 @@ class PipelineRunner:
             # 4. Collect stats
             duration = round(time.time() - start_time, 2)
             valid_keys = self._count_valid_keys(app, task_names)
+            links_total, materials_total = self._count_pipeline_totals(app)
+
+            # Zero-yield tripwire (observability guard): a large corpus with
+            # ZERO extracted candidates is the historical "healthy-looking
+            # scan, zero yield" failure class (glm's wrong key pattern,
+            # groq's decoy pool, ollama's no-op qualifier, modelscope's
+            # naked pattern — four debugging rounds before anything in the
+            # record said extraction was the silent failure point).
+            #
+            # WHY error_message and NOT a new status value: run_records.status
+            # is DB CHECK-constrained to ('running','completed','failed',
+            # 'cancelled'), and the scheduler, the runs UI filters and the
+            # startup reconciliation branch on exactly those four — a fifth
+            # terminal value ('degraded') would break all of them. The scan
+            # genuinely COMPLETED; degraded yield is a quality flag layered
+            # on top, and error_message is rendered by the run-detail UI and
+            # returned by the runs API for every row regardless of status.
+            degradation = self._zero_yield_degradation(
+                provider_name, run_id, links_total, materials_total, app
+            )
 
             # 5. Update DB — completed. Conditional on the row still being
             # 'running': a cancel_run that landed mid-scan has already
@@ -358,11 +386,16 @@ class PipelineRunner:
                 finished_at=True,
                 duration_seconds=duration,
                 valid_keys_found=valid_keys,
+                links_total=links_total,
+                materials_total=materials_total,
+                error_message=degradation,
                 only_if_running=True,
             )
             logger.info(
                 f"Scan completed: provider={provider_name} "
-                f"run_id={run_id} valid_keys={valid_keys} duration={duration}s"
+                f"run_id={run_id} valid_keys={valid_keys} "
+                f"links={links_total} materials={materials_total} "
+                f"duration={duration}s"
             )
 
             # 6. Record newly-added valid keys (delta since scan start) for
@@ -891,6 +924,89 @@ class PipelineRunner:
 
         return 0
 
+    def _count_pipeline_totals(self, app: Any) -> tuple[int | None, int | None]:
+        """Extract ``(links_total, materials_total)`` from a completed app.
+
+        Primary path mirrors :meth:`_count_valid_keys` — the aggregated
+        ``task_manager.stats().resource`` counters (LINKS/MATERIAL results
+        the pipeline persisted for this run's tasks).  Returns
+        ``(None, None)`` when stats are unavailable (mocked app, dead
+        task_manager, malformed counters); the DB write then skips the
+        columns entirely, so pre-migration databases and mocked-app tests
+        behave exactly as before this feature existed.
+        """
+        try:
+            if app.task_manager is None:
+                return (None, None)
+            resource = app.task_manager.stats().resource
+            return (int(resource.links), int(resource.material))
+        except Exception:
+            return (None, None)
+
+    def _gather_counter_snapshot(self, app: Any) -> dict[str, int]:
+        """Sum the per-provider gather-outcome counters of this run.
+
+        Reads the live ResultManagers through
+        ``app.task_manager.pipeline.result_manager.managers`` (see
+        storage.persistence: GATHER_OK / GATHER_EMPTY / GATHER_ERROR_*).
+        Returns ``{}`` on any failure — the counters only enrich the
+        zero-yield message and must never break the completion path.
+        """
+        try:
+            managers = app.task_manager.pipeline.result_manager.managers
+            totals: dict[str, int] = {}
+            for manager in managers.values():
+                for name, value in manager.gather_counters().items():
+                    totals[name] = totals.get(name, 0) + int(value)
+            return totals
+        except Exception:
+            return {}
+
+    def _zero_yield_degradation(
+        self,
+        provider_name: str,
+        run_id: str,
+        links_total: int | None,
+        materials_total: int | None,
+        app: Any,
+    ) -> str | None:
+        """Return the zero-yield degradation marker, or None when healthy.
+
+        Fires when ``links_total > _ZERO_YIELD_LINK_THRESHOLD`` and
+        ``materials_total == 0``: the corpus is large but extraction
+        produced no candidates at all.  Logs ONE error line and returns the
+        same message for persistence into ``run_records.error_message``
+        (status stays 'completed' — see the rationale at the call site).
+        The gather counters (when available) sharpen the suspicion: fetches
+        succeeded (gather_ok ≈ corpus) points at the key_pattern; fetches
+        failed en masse points at the gather transport.
+        """
+        if links_total is None or materials_total is None:
+            return None
+        if links_total <= _ZERO_YIELD_LINK_THRESHOLD or materials_total != 0:
+            return None
+
+        counters = self._gather_counter_snapshot(app)
+        if counters:
+            detail = (
+                f"gather_ok={counters.get('gather_ok', 0)} "
+                f"gather_empty={counters.get('gather_empty', 0)} "
+                f"gather_error_404={counters.get('gather_error_404', 0)} "
+                f"gather_error_other={counters.get('gather_error_other', 0)}"
+            )
+        else:
+            detail = "gather counters unavailable"
+        message = (
+            f"zero-yield degradation: provider={provider_name} "
+            f"run_id={run_id} links_total={links_total} "
+            f"materials_total=0 — extraction produced NO candidates from a "
+            f"large corpus; suspect key_pattern (wrong key format, decoy "
+            f"pool, dead search qualifier) or gather transport failure "
+            f"({detail})"
+        )
+        logger.error(message)
+        return message
+
     def _count_valid_keys_for_failed_run(
         self, provider_name: str, temp_yaml_path: Path | None
     ) -> int:
@@ -1008,6 +1124,8 @@ class PipelineRunner:
         error_message: str | None = None,
         duration_from_started_at: bool = False,
         only_if_running: bool = False,
+        links_total: int | None = None,
+        materials_total: int | None = None,
     ) -> None:
         """Update a run record from the scan thread (synchronous sqlite3).
 
@@ -1019,6 +1137,11 @@ class PipelineRunner:
         ``only_if_running`` restricts the UPDATE to rows still in 'running'
         state so a terminal write from the scan thread can never overwrite
         a 'cancelled' (or otherwise terminal) row.
+
+        ``links_total`` / ``materials_total`` persist the run's corpus and
+        candidate-extraction counters (zero-yield tripwire inputs). ``None``
+        skips the column entirely, keeping the UPDATE compatible with
+        pre-migration databases whose rows lack the columns.
         """
         conn = sqlite3.connect(self._db_path)
         try:
@@ -1038,6 +1161,12 @@ class PipelineRunner:
             if valid_keys_found is not None:
                 parts.append("valid_keys_found = ?")
                 params.append(valid_keys_found)
+            if links_total is not None:
+                parts.append("links_total = ?")
+                params.append(links_total)
+            if materials_total is not None:
+                parts.append("materials_total = ?")
+                params.append(materials_total)
             if error_message is not None:
                 parts.append("error_message = ?")
                 # Redact at the DB boundary too: error_message strings can

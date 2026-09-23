@@ -12,9 +12,11 @@ import shutil
 import tempfile
 import threading
 import time
+import weakref
 from collections import deque
 from collections.abc import Hashable
 from typing import Any, Dict, List, Optional, Union
+from weakref import WeakKeyDictionary
 
 from constant.runtime import RESULT_MAPPINGS
 from core.enums import ResultType
@@ -38,6 +40,34 @@ _REQUEUE_CAP_FLOOR = 1000
 # failure, so a broken disk cannot become a retry/error-log storm on the hot
 # add path. flush_all() forces its way past it.
 _FLUSH_RETRY_COOLDOWN_SEC = 30.0
+
+# ---------------------------------------------------------------------------
+# Gather-outcome counters (observability contract)
+# ---------------------------------------------------------------------------
+
+# Outcomes of one AcquisitionStage._acquisition_worker fetch+extract. The
+# string VALUES double as ResultManager counter attribute names; the
+# _GATHER_COUNTER_FIELDS set validates callers of record_gather_outcome().
+GATHER_OK = "gather_ok"  # fetch succeeded, candidates extracted
+GATHER_EMPTY = "gather_empty"  # fetch succeeded, extraction yielded nothing
+GATHER_ERROR_404 = "gather_error_404"  # resource gone (FileNotFoundError)
+# Any other exception. NOTE: counted per ATTEMPT — collect() re-raises
+# retryable transport errors (ConnectionError/TimeoutError) which the stage
+# requeues, so one URL can bump this once per retry. That is intentional:
+# the counter measures failed fetches (transport health), not lost URLs.
+GATHER_ERROR_OTHER = "gather_error_other"
+
+_GATHER_COUNTER_FIELDS = frozenset({GATHER_OK, GATHER_EMPTY, GATHER_ERROR_404, GATHER_ERROR_OTHER})
+
+# Live result managers keyed by PROVIDER INSTANCE — the one object both the
+# pipeline stages (StageResources.providers) and the persistence layer
+# (ResultManager.provider) hold. Weak on both sides (weak key + weak value):
+# a manager keeps a strong ref to its provider, so a strong value would make
+# the key immortal and leak one manager per run in the long-lived web
+# process. When the run's app is dropped the manager dies, the provider
+# dies, and the entry evaporates.
+_RESULT_MANAGERS: "WeakKeyDictionary[IProvider, weakref.ReferenceType[ResultManager]]" = WeakKeyDictionary()
+_RESULT_MANAGERS_LOCK = threading.Lock()
 
 
 class ResultBuffer:
@@ -217,6 +247,15 @@ class ResultManager:
         # Statistics
         self.stats = PersistenceMetrics()
 
+        # Gather-stage outcome counters, bumped from AcquisitionStage worker
+        # threads via record_gather_outcome(). Attribute names are the
+        # observability contract — web/runner.py reads them back through
+        # gather_counters() for the zero-yield tripwire.
+        self.gather_ok = 0
+        self.gather_empty = 0
+        self.gather_error_404 = 0
+        self.gather_error_other = 0
+
         # Durability accounting: how many flush attempts failed and how many
         # items were lost to a re-queue bound while a write stayed broken.
         self.failed_flushes = 0
@@ -225,6 +264,18 @@ class ResultManager:
 
         # Thread safety
         self.lock = threading.Lock()
+
+        # Publish in the live-manager registry so pipeline stages can reach
+        # the gather counters through the provider instance they already
+        # hold (StageResources.providers → same object as self.provider).
+        # TypeError: provider objects without weakref support simply stay
+        # unregistered — this observability path must never break
+        # persistence (counters remain reachable via the manager itself).
+        try:
+            with _RESULT_MANAGERS_LOCK:
+                _RESULT_MANAGERS[provider] = weakref.ref(self)
+        except TypeError:
+            pass
 
         # Start periodic flush thread
         self.running = True
@@ -318,6 +369,30 @@ class ResultManager:
         """Get current statistics"""
         with self.lock:
             return self.stats
+
+    def record_gather_outcome(self, outcome: str) -> None:
+        """Bump one gather-stage outcome counter (thread-safe).
+
+        Accepted values are the GATHER_* module constants; an unknown
+        outcome is logged and ignored so a caller typo can never kill a
+        worker thread or silently invent a new counter name.
+        """
+        if outcome not in _GATHER_COUNTER_FIELDS:
+            logger.error(f"[persist] unknown gather outcome: {outcome}")
+            return
+        with self.lock:
+            setattr(self, outcome, getattr(self, outcome) + 1)
+
+    def gather_counters(self) -> Dict[str, int]:
+        """Snapshot of gather outcomes, plus the derived ``gather_error``.
+
+        Returns keys: ``gather_ok``, ``gather_empty``, ``gather_error_404``,
+        ``gather_error_other`` and ``gather_error`` (= 404 + other).
+        """
+        with self.lock:
+            counters = {name: int(getattr(self, name)) for name in _GATHER_COUNTER_FIELDS}
+        counters["gather_error"] = counters[GATHER_ERROR_404] + counters[GATHER_ERROR_OTHER]
+        return counters
 
     def backup_existing_files(self) -> None:
         """Backup existing result files to timestamped folder"""
@@ -785,6 +860,40 @@ class ResultManager:
 
         except Exception as e:
             logger.error(f"[persist] failed to save models for {self.name}: {e}")
+
+
+def lookup_result_manager(provider: Optional[IProvider]) -> Optional[ResultManager]:
+    """Return the live ResultManager for *provider*, or None.
+
+    The registry is keyed by provider INSTANCE — the same IProvider object
+    both StageResources.providers and MultiResultManager hold. None is
+    returned (never raised) when no manager has materialized yet for that
+    provider (the manager is created lazily on the first routed output).
+    """
+    if provider is None:
+        return None
+    try:
+        with _RESULT_MANAGERS_LOCK:
+            ref = _RESULT_MANAGERS.get(provider)
+    except TypeError:
+        # Not weak-referenceable (test doubles like SimpleNamespace) — the
+        # lookup path is observability only and must never raise into a
+        # pipeline worker.
+        return None
+    return ref() if ref is not None else None
+
+
+def record_gather_outcome(provider: Optional[IProvider], outcome: str) -> None:
+    """Bump the gather-outcome counter on *provider*'s live ResultManager.
+
+    Module-level entry point for pipeline stage workers (see
+    AcquisitionStage._acquisition_worker). Deliberately no-op-safe: counter
+    bookkeeping is observability only and must never influence — or break —
+    the acquisition path.
+    """
+    manager = lookup_result_manager(provider)
+    if manager is not None:
+        manager.record_gather_outcome(outcome)
 
 
 class MultiResultManager:

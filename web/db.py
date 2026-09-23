@@ -68,6 +68,8 @@ CREATE TABLE IF NOT EXISTS run_records (
     duration_seconds REAL,
     valid_keys_found INTEGER DEFAULT 0,
     total_keys_checked INTEGER DEFAULT 0,
+    links_total INTEGER DEFAULT 0,
+    materials_total INTEGER DEFAULT 0,
     error_message TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -237,6 +239,16 @@ async def _run_migrations(db: aiosqlite.Connection) -> None:
             "max_size",
             "ALTER TABLE provider_group_mapping "
             "ADD COLUMN max_size INTEGER NOT NULL DEFAULT 10000",
+        ),
+        (
+            "run_records",
+            "links_total",
+            "ALTER TABLE run_records ADD COLUMN links_total INTEGER DEFAULT 0",
+        ),
+        (
+            "run_records",
+            "materials_total",
+            "ALTER TABLE run_records ADD COLUMN materials_total INTEGER DEFAULT 0",
         ),
     )
     for table, column, ddl in migrations:

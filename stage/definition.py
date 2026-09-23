@@ -31,6 +31,13 @@ from core.models import (
 from core.types import IProvider
 from search import client
 from search.github.refine.engine import RefineEngine
+from storage.persistence import (
+    GATHER_EMPTY,
+    GATHER_ERROR_404,
+    GATHER_ERROR_OTHER,
+    GATHER_OK,
+    record_gather_outcome,
+)
 from tools.coordinator import get_user_agent
 from tools.logger import get_logger
 from tools.patterns import extract_github_query_pattern
@@ -525,6 +532,15 @@ class AcquisitionStage(BasePipelineStage):
                 headers={**DEFAULT_HEADERS, "User-Agent": get_user_agent()},
             )
 
+            # Gather-outcome counters (zero-yield tripwire observability):
+            # bumped on the provider's live ResultManager, reached through
+            # the same IProvider instance the result layer holds. No-op-safe
+            # before the manager materializes; never raises.
+            record_gather_outcome(
+                self.resources.providers.get(task.provider),
+                GATHER_OK if services else GATHER_EMPTY,
+            )
+
             # Create output object
             output = StageOutput(task=task)
 
@@ -544,6 +560,15 @@ class AcquisitionStage(BasePipelineStage):
 
         except Exception as e:
             logger.error(f"[{self.name}] error, task: {self._safe_task_identity(task)}, message: {e}")
+            # Count the failed fetch attempt (per ATTEMPT: a retryable error
+            # requeued below bumps this again on each retry — the counter
+            # measures transport health, not lost URLs). 404-class failures
+            # are split out so the zero-yield tripwire can distinguish a
+            # dead corpus from a broken transport.
+            record_gather_outcome(
+                self.resources.providers.get(task.provider),
+                GATHER_ERROR_404 if isinstance(e, FileNotFoundError) else GATHER_ERROR_OTHER,
+            )
             # Retryable transport failures must escape to _worker_loop's requeue
             # path: search/client.py collect() propagates ConnectionError
             # (HTTP 429/5xx after its own retry budget, TLS errors) and
