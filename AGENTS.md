@@ -1114,7 +1114,28 @@ in the proxy pool (only 222 were new).
   Collateral, as predicted: nvidia / mimo-sg / qwen-intl were reconciled
   `failed: interrupted by service restart` at 10:10:26 UTC (= 18:10 CST); the
   in-container watcher died and was relaunched (new pid 106, banner 18:11:49);
-  the host-side eviction loop survived untouched.
+  the host-side eviction loop survived untouched (verified 21:37: pid 3309405
+  ppid=1, 21 cycles since 18:07, zero `container-unavailable` lines, host
+  fallback file empty).
+- **Post-restart salvage (executed 21:37 CST)**: pushes only fire on completion,
+  and each provider's next cron backs up + resets `valid-keys.txt`
+  (`auto_restore: false`), so the killed runs' validated keys would have been
+  stranded. Replayed the documented salvage —
+  `PushService.push_valid_keys(<provider>, <killed run id>)` with the 10:10:26-UTC
+  failed row ids (`0e76292f…` nvidia, `65b6387a…` mimo-sg, `6619a9b4…` qwen-intl):
+  **nvidia 401 keys → added 401 / ignored 0**, mimo-sg 2 → added 1, qwen-intl 1 →
+  added 0 (already pooled). run this for ANY restart casualty whose provider has
+  keys in its `valid-keys.txt`, before that provider's next cron fires.
+- **Sustained verification after the deploy (21:37 CST)**: every `/search`
+  through the proxy since the restart (08:10 UTC) is a 200 — hourly buckets
+  98 / 158 / 95 / 18 / 20 = **389 rows, zero 402, zero 503 over ~4 h**; pool
+  1276 total / 1230 active / 46 inactive.
+- **Next relaunch of the hygiene loop must use the hardened copy**: the running
+  instance keeps `/tmp/tavily_evict_loop.sh`; a hardened version (with
+  `timeout 60` on the log/flush `docker compose exec` calls, so a blocking daemon
+  call cannot wedge the loop before its cycle line is written) is staged at
+  **`/tmp/tavily_evict_loop_v2.sh`** and in `.omo/evidence/tavily_watch/`.
+  NEVER overwrite a script bash is currently executing — stage a new path.
 - **Restart vs recreate for the container's /tmp pieces**: a `restart` preserves
   `/tmp` (the sweeper `/tmp/tavily_pool_evict.py` and the watcher
   `/tmp/tavily_watch_v2.py` survive — only their PROCESSES die and need
