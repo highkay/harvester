@@ -532,12 +532,17 @@ update preserves intentional local changes (reverts, port/volume tweaks).
   `valid_keys_found`. Pool keys are re-verifiable at
   `GET {gpt_load}/api/keys?group_id=10` and by a chat probe that asserts
   `200 + "choices" + no "error"` in the body.
-- **Latent hole (not fixed, documented)**: `OpenAILikeProvider._judge`'s 200 branch
-  only treats a top-level `error` as a failure when it is a **dict**; a 200 body with a
-  *string* `error` (native-Ollama shape) would be accepted as success. Every pooled
-  key re-probed 2026-09-22 returned real completions (`choices`, no `error`), so it is
-  not firing — but re-check the body shape whenever a provider starts returning soft
-  errors with HTTP 200.
+- **Latent hole (FIXED 2026-09-23)**: `OpenAILikeProvider._judge`'s 200 branch
+  used to treat a top-level `error` as a failure only when it was a **dict**; a
+  200 body with a *string* `error` (native-Ollama shape) was accepted as
+  success. A non-empty string `error` is now classified by the SAME markers
+  (auth → INVALID_KEY, quota/billing → NO_QUOTA, else → BAD_REQUEST →
+  wait-check), pinned by `tests/test_provider_status_maps.py` (string
+  auth/quota/generic cases + empty-string-error stays success). No-`error` →
+  success, non-JSON → UNKNOWN, and the deliberately loose success shape are
+  unchanged. Every pooled key re-probed 2026-09-22 returned real completions,
+  so the hole had not fired — still re-check the body shape whenever a
+  provider starts returning soft errors with HTTP 200.
 - **Bounded-run gotcha (cost an hour, 2026-09-22)**: `main.py` installs graceful
   SIGTERM handlers, so `subprocess.terminate()` does NOT stop a CLI scan — one ran
   67 min against the shared 10 req/min GitHub budget. Bound the wall clock
@@ -679,12 +684,11 @@ update preserves intentional local changes (reverts, port/volume tweaks).
   **azure / doubao / qianfan** 404 → NO_MODEL (wrong model/deployment
   routing, not a dead key); **stabilityai / anthropic** transport failures
   (TLS EOF, timeout) → retryable → wait, never INVALID_KEY; **openrouter**
-  403 → NO_ACCESS; **openai_like** 200-with-error-body guard — the
-  dict-shaped case is now closed (HTTP 200 + a dict `error` body fails as
-  INVALID_KEY instead of passing as success), but the guard is still
-  dict-gated (`isinstance(error, dict)`), so a 200 whose `error` is a plain
-  STRING still falls through to success — i.e. the latent hole documented in
-  the ollama section remains open, not fixed;
+  403 → NO_ACCESS; **openai_like** 200-with-error-body guard — both shapes
+  closed: a dict `error` AND a plain-STRING `error` body (native-Ollama
+  shape; string arm fixed 2026-09-23) are classified by the same auth/quota/
+  generic markers, so the latent hole documented in the ollama section is
+  fixed and test-pinned;
   **BAD_REQUEST** moved from invalid-discard into the wait bucket (trade-off
   below).
 - **BAD_REQUEST→wait tripwire**: the reroute keeps recoverable 400s out of
@@ -695,6 +699,21 @@ update preserves intentional local changes (reverts, port/volume tweaks).
   entries every pass without ever clearing them. Watch wait-pool growth per
   provider; if it balloons with pure BAD_REQUEST entries, revisit the
   routing (or map those providers' 400s to INVALID_KEY).
+- **Task ids EMBED RAW KEYS — never log them verbatim (fixed 2026-09-23)**:
+  `stage/definition.py` builds the CHECK/INSPECT dedup ids as
+  `check:<provider>:<key>:<address>:<endpoint>` and task dataclass reprs
+  embed `Service(key='<raw>')`, while the global RedactionFilter deliberately
+  misses prefix-less formats (SerpApi 64-hex has no patterns.py entry, bare
+  `ms-` neither) — so every stage log site that interpolated a task repr or
+  raw id (the four worker `logger.error` lines in `stage/definition.py`; the
+  not-accepting / queue-full / max-retries discard lines and the requeue
+  warning in `stage/base.py`) now prints a digest identity
+  `provider:TaskClass:sha256(dedup-id)[:12]` via
+  `BasePipelineStage._safe_task_identity` (pinned by
+  `tests/test_queue_persistence.py`). The id format itself is deliberately
+  UNCHANGED; a future change should hash the key INTO the id (a
+  deterministic digest preserves dedup semantics) so no id ever carries key
+  material.
 
 ## Ops: container egress, host networking & deploys (2026-09-21)
 
