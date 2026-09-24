@@ -1403,10 +1403,88 @@ An Oracle audit of the end-to-end scanning path found the following, all fixed t
   text. Pinned by `tests/test_gather_raw_url.py` (15 tests: helper semantics,
   the wiring, and two extraction regressions on quoted assignments).
 
+## Feature: egress routing — raw direct, sized pool, exit failover (2026-09-24)
+
+**Incident**: 15 rows sat in `running` for 7-20 h with near-zero yield. Measured
+on production that evening: `main.log` carried **340,504 `SOCKSHTTPSConnectionPool`
+errors in 28 h** (325,044 of them to `raw.githubusercontent.com`, ~1.2k/h to
+`api.github.com`); `retry.log` failure mix = Read timed out 19,864 /
+ConnectTimeout 6,210 / Connection refused 3,138 / SSL EOF 828 / Host unreachable
+284; search logged ~2-20 completions per HOUR across all runs. Per-node traffic
+census: `warpgo-wg08` (port 1090) took **269 SOCKS CONNECTs/60 s while the other
+13 warp-go nodes took 0-6** — i.e. 100% of the harvester's GitHub traffic was
+funnelled through ONE WARP exit. Probes from inside the container: raw fetched
+**direct 8/8 @0.6 s** (16/16 and 32/32 at higher concurrency, p50 0.4 s) but
+**0-1/8 through the socks exits** (12-20 s or timeout); `api.github.com` direct =
+TLS reset, 1091 = 2/2 @1.8-2.8 s, 1090 = 0/2. Runs never drained because every
+link cost 3 × 10 s connect timeouts + backoff + a stage requeue (~2 min worst
+case) against 1.3k-4.8k-deep gather queues, while each hourly chain tick added a
+new run; the stranded rows also hold the scheduler guard
+(`already running — skipping`, measured for github at 18:50).
+
+**Mechanism** (all three parts had to line up):
+1. `manager/pipeline.py` constructs a Pipeline per scan and calls
+   `client.set_proxy(config.global_config.proxy)` — a **process-wide** session.
+   Every new scan overwrote the exit for ALL in-flight scans, so
+   `web/runner.py`'s "one proxy per scan so concurrent scans spread across
+   proxies" comment was false for overlapping runs (candidates were spread in
+   the per-run runtime YAMLs, effective traffic was one node).
+2. `use_proxy` is a **provider-validation-only** knob (`provider/base.py:220`,
+   wired in `manager/task.py:140`): search/gather never received it, and
+   `_collect` → `http_get` → `request` defaulted to the proxied session. Before
+   2026-09-23 that was correct (gather fetched `github.com/.../blob/...`, which
+   needs the proxy); the raw-bytes fix moved the target to
+   `raw.githubusercontent.com`, which does not — but the call path kept the
+   proxy hop, so gather inherited the exit's failure mode.
+3. There was no exit failover and the exit is fixed for the run's lifetime.
+
+**Fix (this commit, `search/client.py` + `tests/test_client_egress_routing.py`)**:
+- `_DIRECT_HOSTS = {"raw.githubusercontent.com"}` with `effective_use_proxy()`:
+  every call path (gather, cache revalidation, future callers) bypasses the
+  proxy for those hosts; `effective_timeout()` applies a **20 s floor**
+  (`_DIRECT_TIMEOUT_FLOOR`) because the measured 32-way tail (~16 s) exceeded
+  the 10 s default.
+- `_new_session()` mounts `HTTPAdapter(pool_connections=32, pool_maxsize=64,
+  pool_block=True)`: requests' default 10-connection pool with `block=False`
+  churns a throwaway connection per overflow request, which is the signature
+  behind mass `ConnectTimeoutError` / "Host unreachable" while a single request
+  succeeds (15 runs × 4 gather workers ≈ 60 concurrent).
+- `_note_proxy_transport()` + `proxy_rotation()`: the proxied session rotates to
+  the next `HARVESTER_PROXY` candidate after **3 consecutive transport
+  failures** (any HTTP answer resets the streak, so a busy-but-alive exit is
+  never abandoned; logs are masked — pool proxies carry userinfo tokens).
+- `GitHubClient._http_get()` now goes through `request()` instead of
+  `_HTTP_SESSION.request()` directly, so the search leg inherits routing,
+  timeout floor and failover (`raise_for_status` only fires for 4xx/5xx, not
+  304). Probe helpers: `client.get_egress_state()`, `effective_use_proxy(url)`.
+
+**Tripwires / follow-ups**:
+- `use_proxy: false` in a provider config still only affects validation — if a
+  gather host must bypass the proxy, add it to `_DIRECT_HOSTS` (and re-measure
+  first, per the serpapi/glm lesson).
+- The failover is process-wide and re-pinned by each new scan's `set_proxy`; the
+  per-run session isolation is still the open workstream (see the
+  "deliberately left open" note in the 2026-09-23 hardening section).
+- `HARVESTER_PROXY` widening is pointless until per-run sessions exist — one
+  exit is live at a time, which is exactly what the census showed.
+- Fleet side (not harvester code): warp-go runs `-ip 6`, wg08's log shows tunnels
+  to Fastly IPv6 (`2606:50c0:800x::154`) timing out while `api.tavily.com` and
+  `integrate.api.nvidia.com` succeed through the SAME node — the WARP→Fastly
+  IPv6 leg is the degraded piece, and `check_warpgo_fleet.sh` probes only
+  `www.cloudflare.com`, so its 3-strike restarts (wg-port-1090.last-restart =
+  22:45) cannot see it. Don't reconfigure the fleet as part of a harvester
+  change (googleaisearch2api shares those ports).
+- The edge IP pool (`github_transport.edge_pool`, `hosts.ohmygh.com` + SNI) stays
+  disabled whenever a proxy is set unless `prefer_over_proxy: true`
+  (`search/github/transport.py`); it is the only built-in proxy-free path for
+  `api.github.com` and is still UNPROBED — measure before recommending it.
+
 ## Tests & conventions
 
-- Run: `python -m unittest discover -s tests`. **Measured baseline 2026-09-23:
-  726 OK / 8 skipped in a clean checkout of `0e3b8fc`** (the "572 OK as of
+- Run: `python -m unittest discover -s tests`. **Measured baseline 2026-09-24
+  (workstation, dirty worktree on `main`): 846 OK / 8 skipped** — includes the
+  20 egress-routing tests added by the fix below. The 2026-09-23 baseline was
+  726 OK / 8 skipped in a clean checkout of `0e3b8fc` (the "572 OK as of
   2026-09-22" note below was written before the same-day hardening landed; the
   old "490 tests" and "35 failures in test_web_ui / test_web_push_logs"
   baselines are stale).

@@ -10,6 +10,7 @@ import json
 import os
 import random
 import re
+import threading
 import time
 import traceback
 import urllib.parse
@@ -17,6 +18,7 @@ from email.utils import parsedate_to_datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import requests
+from requests.adapters import HTTPAdapter
 
 from core.models import Service
 from tools.logger import get_logger
@@ -25,8 +27,9 @@ from tools.utils import encoding_url, isblank, trim
 
 logger = get_logger("search")
 
-_HTTP_SESSION = requests.Session()
-_HTTP_SESSION.trust_env = False
+# Both sessions are built by _new_session() below (after the egress-routing
+# constants that size them); nothing may touch them before that assignment.
+_HTTP_SESSION: requests.Session
 _HTTP_PROXY = ""
 _RESPONSE_CACHE = None  # Optional[ResponseCache]
 _QUOTA_TRACKER = None  # Optional[QuotaTracker]
@@ -46,17 +49,185 @@ MAX_SERVICES_PER_PAGE = 512
 _GITHUB_SEARCH_ACCEPT = "application/vnd.github.text-match+json"
 
 
+# ---------------------------------------------------------------------------
+# Egress routing, pool sizing and proxy failover (2026-09-24 incident)
+# ---------------------------------------------------------------------------
+# Measured on production (fnos container, 2026-09-24): a raw file fetch DIRECT
+# answers 8/8 @0.6 s (16/16 and 32/32 at 16- and 32-way concurrency, p50
+# 0.4 s), while the same URL through the WARP socks rotation answers 0-1/8
+# with 12-20 s latencies. Since the 2026-09-23 raw-bytes fix every gather
+# fetch targets raw.githubusercontent.com — the github.com blob page, which
+# DOES need the proxy (direct github.com times out), is no longer fetched — so
+# the proxy hop bought nothing and cost everything: the exit is chosen
+# process-wide by the newest scan (manager/pipeline.py -> set_proxy), one
+# degraded exit produced ~340k SOCKS failures in 28 h, and 15 concurrent runs
+# stayed 'running' for 7-20 h because their gather queues could never drain.
+# Raw fetches therefore bypass the proxy by host.
+_DIRECT_HOSTS = frozenset({"raw.githubusercontent.com"})
+
+# Requests to a direct host get at least this budget. The 10 s default shed
+# the measured 32-way tail (~16 s), and every shed request costs 3 network
+# retries plus a stage requeue, so the tail is worth waiting for.
+_DIRECT_TIMEOUT_FLOOR = 20.0
+
+# Connection-pool sizing. requests' default adapter keeps 10 connections per
+# host and opens a throwaway connection for every overflow request
+# (block=False) — under 15 concurrent scans (~60 gather workers) that churn
+# showed up as mass ConnectTimeoutError / "Host unreachable" while a single
+# request succeeded. Size for the aggregate worker count and make overflow
+# requests WAIT for a free slot instead of churning handshakes.
+_POOL_CONNECTIONS = 32
+_POOL_MAXSIZE = 64
+
+# The per-scan exit (set_proxy) is process-wide, so ONE dead exit would
+# otherwise poison every concurrent scan (measured: the pinned node answered
+# 0/2 api.github.com requests while its sibling answered 2/2). After this many
+# consecutive transport failures the proxied session rotates to the next
+# candidate from the same rotation the runner picks from (HARVESTER_PROXY).
+_PROXY_FAILOVER_THRESHOLD = 3
+
+
 def _new_session(proxy: str = "") -> requests.Session:
     session = requests.Session()
     session.trust_env = False
+    adapter = HTTPAdapter(
+        pool_connections=_POOL_CONNECTIONS,
+        pool_maxsize=_POOL_MAXSIZE,
+        pool_block=True,
+    )
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
     if proxy:
         session.proxies.update({"http": proxy, "https": proxy})
     return session
 
 
-# Direct (never proxied) session for provider API validation.
-# Never mutated by set_proxy(); the proxy is for GitHub fetches only.
+def _mask_proxy(proxy: str) -> str:
+    """``scheme://host:port`` for logs — userinfo (e.g. pool tokens) dropped."""
+    try:
+        parsed = urllib.parse.urlparse(proxy)
+    except ValueError:
+        return "<unparseable proxy>"
+    if not parsed.hostname:
+        return "<invalid proxy>"
+    return f"{parsed.scheme.lower()}://{parsed.hostname}:{parsed.port or ''}"
+
+
+def proxy_rotation() -> List[str]:
+    """Proxy candidates from ``HARVESTER_PROXY`` (comma-separated), in order.
+
+    Single source of truth for the rotation list: ``web.runner`` picks one exit
+    per scan from it, and :func:`_note_proxy_transport` rotates to the next
+    candidate when the picked exit stops passing traffic.
+    """
+    raw = os.environ.get("HARVESTER_PROXY", "").strip()
+    return [p.strip() for p in raw.split(",") if p.strip()]
+
+
+def _url_host(url: str) -> str:
+    try:
+        return (urllib.parse.urlsplit(url).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+def effective_use_proxy(url: str, use_proxy: bool = True) -> bool:
+    """Whether *url* goes through the shared proxied session.
+
+    ``use_proxy=False`` (provider validation against domestic endpoints) is
+    honoured as-is; otherwise requests to a ``_DIRECT_HOSTS`` host bypass the
+    proxy regardless of the caller, so every call path — gather, cache
+    revalidations, future callers — inherits the routing.
+    """
+    if not use_proxy:
+        return False
+    return _url_host(url) not in _DIRECT_HOSTS
+
+
+def effective_timeout(url: str, timeout: float) -> float:
+    """Apply the direct-host timeout floor (see ``_DIRECT_TIMEOUT_FLOOR``)."""
+    if _url_host(url) in _DIRECT_HOSTS:
+        return max(float(timeout), _DIRECT_TIMEOUT_FLOOR)
+    return float(timeout)
+
+
+# Direct (never proxied) session for provider API validation and for the
+# direct-routed hosts above. Never mutated by set_proxy().
 _DIRECT_SESSION = _new_session()
+_HTTP_SESSION = _new_session()
+
+_proxy_lock = threading.Lock()
+_proxy_candidates: List[str] = []
+_proxy_failures = 0
+_proxy_rotations = 0
+
+
+def _apply_proxy(proxy: str) -> None:
+    """(Re)build the shared proxied session for *proxy* ("" disables it)."""
+    global _HTTP_SESSION, _HTTP_PROXY
+
+    if not proxy:
+        _HTTP_SESSION = _new_session()
+        _HTTP_PROXY = ""
+        _remount_edge_adapter()
+        return
+
+    _HTTP_SESSION = _new_session(proxy)
+    _HTTP_PROXY = proxy
+    _remount_edge_adapter()
+
+
+def _note_proxy_transport(success: bool) -> Optional[str]:
+    """Record a proxied-request transport outcome; rotate after N failures.
+
+    Returns the proxy that was rotated TO, else None. Only *consecutive*
+    transport failures count (any 2xx/4xx/5xx response — i.e. any answer from
+    the exit — resets the streak), so a single dead exit is abandoned within
+    three requests while a merely busy one is never abandoned.
+    """
+    global _proxy_failures, _proxy_rotations
+
+    with _proxy_lock:
+        if success:
+            _proxy_failures = 0
+            return None
+
+        _proxy_failures += 1
+        if _proxy_failures < _PROXY_FAILOVER_THRESHOLD:
+            return None
+        _proxy_failures = 0  # re-arm: never rotate more than once per streak
+
+        if len(_proxy_candidates) < 2:
+            return None  # nothing to fail over to
+
+        current = _HTTP_PROXY
+        try:
+            index = _proxy_candidates.index(current)
+        except ValueError:
+            index = -1
+        new_proxy = _proxy_candidates[(index + 1) % len(_proxy_candidates)]
+        _apply_proxy(new_proxy)
+        _proxy_rotations += 1
+
+    logger.warning(
+        f"Proxy failover after {_PROXY_FAILOVER_THRESHOLD} consecutive transport "
+        f"failures: {_mask_proxy(current)} -> {_mask_proxy(new_proxy)} "
+        f"({len(_proxy_candidates)} candidates)"
+    )
+    return new_proxy
+
+
+def get_egress_state() -> Dict[str, Any]:
+    """Egress-routing snapshot for diagnostics (probes/tests, never mutates)."""
+    with _proxy_lock:
+        return {
+            "proxy": _HTTP_PROXY,
+            "candidates": list(_proxy_candidates),
+            "consecutive_failures": _proxy_failures,
+            "rotations": _proxy_rotations,
+            "direct_hosts": sorted(_DIRECT_HOSTS),
+            "pool_maxsize": _POOL_MAXSIZE,
+        }
 
 
 def _remount_edge_adapter() -> None:
@@ -93,34 +264,45 @@ def http_error_message(error: requests.exceptions.HTTPError) -> str:
 
 
 def set_proxy(proxy: Optional[str]) -> None:
-    """Configure the process-wide requests session used by search HTTP requests."""
-    global _HTTP_SESSION, _HTTP_PROXY
+    """Configure the process-wide requests session used by search HTTP requests.
 
-    proxy = trim(proxy)
+    Also (re)arms the transport-failure failover: the candidates are this
+    scan's exit followed by every other member of ``HARVESTER_PROXY``, so a
+    dead exit is rotated away from within ``_PROXY_FAILOVER_THRESHOLD``
+    requests instead of poisoning every concurrent scan until the next scan
+    starts (the pre-2026-09-24 behaviour).
+    """
+    global _proxy_candidates, _proxy_failures
+
+    proxy = trim(proxy or "")
+
+    if proxy:
+        parsed = urllib.parse.urlparse(proxy)
+        scheme = parsed.scheme.lower()
+        if scheme not in {"http", "https", "socks5", "socks5h"}:
+            raise ValueError("proxy scheme must be one of: http, https, socks5, socks5h")
+        if not parsed.hostname:
+            raise ValueError("proxy must include a host")
+
+        try:
+            parsed.port
+        except ValueError as e:
+            raise ValueError(f"invalid proxy port: {e}") from e
+
+    with _proxy_lock:
+        _apply_proxy(proxy)
+        candidates: List[str] = []
+        for candidate in [proxy, *proxy_rotation()]:
+            if candidate and candidate not in candidates:
+                candidates.append(candidate)
+        _proxy_candidates = candidates
+        _proxy_failures = 0
 
     if not proxy:
-        _HTTP_PROXY = ""
-        _HTTP_SESSION = _new_session()
-        _remount_edge_adapter()
         logger.info("HTTP proxy disabled")
         return
 
-    parsed = urllib.parse.urlparse(proxy)
-    scheme = parsed.scheme.lower()
-    if scheme not in {"http", "https", "socks5", "socks5h"}:
-        raise ValueError("proxy scheme must be one of: http, https, socks5, socks5h")
-    if not parsed.hostname:
-        raise ValueError("proxy must include a host")
-
-    try:
-        parsed.port
-    except ValueError as e:
-        raise ValueError(f"invalid proxy port: {e}") from e
-
-    _HTTP_SESSION = _new_session(proxy)
-    _HTTP_PROXY = proxy
-    _remount_edge_adapter()
-    logger.info(f"HTTP proxy enabled: {scheme}://{parsed.hostname}:{parsed.port or ''}")
+    logger.info(f"HTTP proxy enabled: {_mask_proxy(proxy)}")
 
 
 def configure_github_transport(
@@ -243,9 +425,29 @@ def should_skip_known_links() -> bool:
 
 
 def request(method: str, url: str, timeout: float = 10, use_proxy: bool = True, **kwargs: Any) -> requests.Response:
-    """Send a request through the configured global session."""
-    session = _HTTP_SESSION if use_proxy else _DIRECT_SESSION
-    response = session.request(method=method, url=url, timeout=max(1, timeout), **kwargs)
+    """Send a request through the session that fits *url*'s egress route.
+
+    ``_DIRECT_HOSTS`` (raw.githubusercontent.com) always use the never-proxied
+    session and get ``_DIRECT_TIMEOUT_FLOOR``; everything else uses the shared
+    proxied session. Transport outcomes on the proxied session feed the
+    consecutive-failure failover in :func:`_note_proxy_transport` — an HTTP
+    response of any status counts as "the exit works".
+    """
+    proxied = effective_use_proxy(url, use_proxy)
+    session = _HTTP_SESSION if proxied else _DIRECT_SESSION
+    effective = max(1.0, effective_timeout(url, timeout))
+
+    try:
+        response = session.request(
+            method=method, url=url, timeout=effective, **kwargs
+        )
+    except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
+        if proxied:
+            _note_proxy_transport(False)
+        raise
+
+    if proxied:
+        _note_proxy_transport(True)
     response.raise_for_status()
     return response
 
@@ -582,10 +784,15 @@ class GitHubClient:
 
         for attempt in range(retries):
             try:
-                # Use session directly so 304 is not raised as HTTPError
-                response = _HTTP_SESSION.request(
-                    method="GET",
-                    url=encoded_url,
+                # Route through the module request() instead of the session
+                # directly: it owns host-based egress routing, the direct-host
+                # timeout floor and the proxy transport-failure failover.
+                # raise_for_status() only fires for 4xx/5xx (not for 304), and
+                # the HTTPError branch below classifies it exactly like the
+                # hand-built one it replaces.
+                response = request(
+                    "GET",
+                    encoded_url,
                     headers=headers,
                     timeout=timeout,
                 )
