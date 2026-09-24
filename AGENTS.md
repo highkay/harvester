@@ -1479,6 +1479,40 @@ new run; the stranded rows also hold the scheduler guard
   (`search/github/transport.py`); it is the only built-in proxy-free path for
   `api.github.com` and is still UNPROBED — measure before recommending it.
 
+**Deployed 2026-09-24 23:41 CST (`4f6a66e`)**: fnos aligned (rollback
+`rollback-20260924-233832`, 0 local-only commits, `Dockerfile.web` restored +
+`docker-compose.hostnet.yml` re-applied), whole tree `docker compose cp`-ed,
+`docker compose restart` (no recreate → env and `/tmp` kept), `/health` ok,
+`search/client.py` md5 host↔container MATCH.
+
+**Salvage before the restart** (pushes only fire on completion, and each
+provider's next cron resets `valid-keys.txt` with `auto_restore: false`): the
+15 stuck runs held **1,193 validated keys**, all pushed through the official
+services — nvidia 102→+16, tavily 398→+48, serpapi 462→+19, openrouter
+81→+7 (agnes-ai 30 / modelscope 17 / qwen-cn 3 were already pooled) = **90
+net-new keys**; command shape is in the egress skill. Startup reconciliation
+then flipped the 15 rows to `failed: interrupted by service restart` (0 rows
+left `running`, guards cleared for the 01:00-17:00 chain).
+
+**Functional proof on production** (deployed module, single live run
+`kimi-coding`): `effective_use_proxy(raw)=False`, `effective_timeout(raw,10)=20.0`,
+`http_get(raw_url, timeout=10)` → 29,583 B in 0.98 s; a scratch failover demo
+rotated `1080 → 1090` after 3 consecutive transport failures with the masked
+WARNING line. Rate comparison over one 40-min stdout window split at the
+restart (pre = 15 stalled runs, post = 1 fixed run): `SOCKSHTTPSConnectionPool`
+14,147 → **0**; `[gather] error` 4,498 → 2; `[search] error` 466 → 0;
+`search completed` 16 → 84; log lines 38,149 → 1,002. The post-window raw
+fetches show up as `HTTPSConnectionPool … read timeout=20.0` (direct + floored),
+and kimi-coding's `links.txt` went 465 → 3,500+ in ~12 min.
+
+**Log-probe trap (cost the first metric read)**: any in-container `python`
+invocation re-initialises the logger — it **archives/deletes the module logs**
+(`logs/<module>.log`) and rotates `main.log` out from under the running app,
+so post-probe `grep /app/logs` can report an empty window. Read verification
+metrics from `docker compose logs --since …` on the HOST (stdout carries every
+record, timestamps and all) and filter by timestamp; the module log files are
+for tail-time forensics only.
+
 ## Tests & conventions
 
 - Run: `python -m unittest discover -s tests`. **Measured baseline 2026-09-24
