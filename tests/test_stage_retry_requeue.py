@@ -297,5 +297,94 @@ class TestCheckInspectStayConservative(unittest.TestCase):
         self.assertEqual(1, provider.inspect_calls)
 
 
+# ---------------------------------------------------------------------------
+# The retry budget's TERMINAL drop must be visible (2026-09-26 incident)
+# ---------------------------------------------------------------------------
+
+
+class TestTerminalDropIsLogged(unittest.TestCase):
+    """A budget-exhausted task is dropped silently unless we say so.
+
+    Measured 2026-09-26 08:00: the openrouter run had ONE condition; its single
+    search task was denied by the process-wide github_api limiter on all three
+    attempts, the retry policy refused the fourth, and *nothing* logged the
+    drop — the pipeline finished in 54 s with links=0 and ``error_message``
+    NULL. ``put_task``'s discard warning only covers the dedup path, never this
+    one.
+    """
+
+    def _stage(self, handler) -> SearchStage:
+        return SearchStage(
+            _resources(),
+            handler=handler,
+            max_retries=1,
+            thread_count=1,
+            retry_policy=FixedRetry(max_retries=1, delay=0.0),
+        )
+
+    def test_drop_after_budget_logs_warning(self):
+        stage = self._stage(lambda _o: None)
+        task = _search_task()
+        search_mock = mock.MagicMock(
+            side_effect=ConnectionError("rate limiter denied for github_api")
+        )
+
+        with mock.patch.object(client, "search_with_count", search_mock), mock.patch.object(
+            client, "get_link_index", return_value=None
+        ):
+            with self.assertLogs("stage", level="WARNING") as logs:
+                stage.queue.put_nowait(task)
+                stage.running = True
+                worker = threading.Thread(
+                    target=stage._worker_loop, name="terminal-drop", daemon=True
+                )
+                worker.start()
+                settled = _wait_until(
+                    lambda: task.attempts >= stage.max_retries and stage.queue.empty()
+                )
+                stage.running = False
+                worker.join(timeout=5)
+
+        self.assertTrue(settled, "worker never settled the task")
+        self.assertEqual(stage.max_retries, task.attempts)
+        self.assertEqual(search_mock.call_count, stage.max_retries + 1)
+        self.assertTrue(
+            any(
+                "task dropped after" in r.getMessage()
+                and "retry budget exhausted" in r.getMessage()
+                for r in logs.records
+            ),
+            [r.getMessage() for r in logs.records],
+        )
+
+    def test_limiter_denial_logs_at_warning_not_error(self):
+        stage = SearchStage(_resources(), handler=lambda _o: None)
+        with mock.patch.object(
+            client,
+            "search_with_count",
+            side_effect=ConnectionError("rate limiter denied for github_api"),
+        ):
+            with self.assertLogs("stage", level="WARNING") as logs:
+                with self.assertRaises(ConnectionError):
+                    stage.process_task(_search_task())
+
+        levels = {r.levelname for r in logs.records}
+        self.assertIn("WARNING", levels)
+        self.assertNotIn("ERROR", levels)
+
+    def test_transport_failure_still_logs_at_error(self):
+        stage = SearchStage(_resources(), handler=lambda _o: None)
+        with mock.patch.object(
+            client,
+            "search_with_count",
+            side_effect=ConnectionError("HTTP 503 error: gateway"),
+        ):
+            with self.assertLogs("stage", level="ERROR") as logs:
+                with self.assertRaises(ConnectionError):
+                    stage.process_task(_search_task())
+
+        self.assertTrue(any("HTTP 503" in r.getMessage() for r in logs.records))
+
+
 if __name__ == "__main__":
     unittest.main()

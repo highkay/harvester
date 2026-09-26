@@ -86,6 +86,19 @@ _POOL_MAXSIZE = 64
 # candidate from the same rotation the runner picks from (HARVESTER_PROXY).
 _PROXY_FAILOVER_THRESHOLD = 3
 
+# Bounded wait before a rate-limiter denial (see GitHubClient._limit): the
+# github_api bucket is process-wide and the daily chain overlaps 7 scans, so a
+# single re-acquire can lose the refilled token to a sibling thread.
+_LIMIT_MAX_WAIT_ROUNDS = 6
+_LIMIT_MAX_WAIT_SECONDS = 120.0
+
+# 403/429 answers keep the transport streak "healthy" by design (the exit
+# answered), so an exit that blocks everything can never be rotated away — the
+# measured Cloudflare-edge / per-IP "blocked due to excessive requests"
+# flavours. Count the streak and warn once per streak instead.
+_PROXY_DEGRADED_STATUSES = frozenset({403, 429})
+_PROXY_DEGRADED_WARN_THRESHOLD = 25
+
 
 def _new_session(proxy: str = "") -> requests.Session:
     session = requests.Session()
@@ -160,6 +173,8 @@ _proxy_lock = threading.Lock()
 _proxy_candidates: List[str] = []
 _proxy_failures = 0
 _proxy_rotations = 0
+_proxy_degraded_streak = 0
+_proxy_degraded_warned = False
 
 
 def _apply_proxy(proxy: str) -> None:
@@ -225,9 +240,46 @@ def get_egress_state() -> Dict[str, Any]:
             "candidates": list(_proxy_candidates),
             "consecutive_failures": _proxy_failures,
             "rotations": _proxy_rotations,
+            "degraded_streak": _proxy_degraded_streak,
             "direct_hosts": sorted(_DIRECT_HOSTS),
             "pool_maxsize": _POOL_MAXSIZE,
         }
+
+
+def _note_proxy_status(status: int) -> None:
+    """Count consecutive 403/429 answers on the proxied session; warn once.
+
+    Such an exit is "alive" as far as the transport failover is concerned (any
+    HTTP answer resets that streak, by design — a busy exit must not be
+    abandoned), so it can never be rotated away. Measured flavours of this
+    state: Cloudflare-edge blocks and per-IP ``blocked due to excessive
+    requests`` 429s, which answer identically for good and dead keys. The
+    streak makes a search-side collapse explainable instead of mysterious;
+    ``get_egress_state()['degraded_streak']`` exposes it to probes.
+    """
+    global _proxy_degraded_streak, _proxy_degraded_warned
+
+    fire = False
+    streak = 0
+    with _proxy_lock:
+        if status in _PROXY_DEGRADED_STATUSES:
+            _proxy_degraded_streak += 1
+            streak = _proxy_degraded_streak
+            if streak >= _PROXY_DEGRADED_WARN_THRESHOLD and not _proxy_degraded_warned:
+                _proxy_degraded_warned = True
+                fire = True
+        else:
+            _proxy_degraded_streak = 0
+            _proxy_degraded_warned = False
+            return
+
+    if fire:
+        logger.warning(
+            f"Exit answering {sorted(_PROXY_DEGRADED_STATUSES)} to everything: "
+            f"{streak} consecutive degraded responses — the transport failover "
+            f"cannot rotate this away (any answer resets its streak); diagnose "
+            f"with a per-node 'SOCKS5 CONNECT' census before blaming keys or quota"
+        )
 
 
 def _remount_edge_adapter() -> None:
@@ -272,7 +324,7 @@ def set_proxy(proxy: Optional[str]) -> None:
     requests instead of poisoning every concurrent scan until the next scan
     starts (the pre-2026-09-24 behaviour).
     """
-    global _proxy_candidates, _proxy_failures
+    global _proxy_candidates, _proxy_failures, _proxy_degraded_streak, _proxy_degraded_warned
 
     proxy = trim(proxy or "")
 
@@ -297,6 +349,8 @@ def set_proxy(proxy: Optional[str]) -> None:
                 candidates.append(candidate)
         _proxy_candidates = candidates
         _proxy_failures = 0
+        _proxy_degraded_streak = 0
+        _proxy_degraded_warned = False
 
     if not proxy:
         logger.info("HTTP proxy disabled")
@@ -448,6 +502,7 @@ def request(method: str, url: str, timeout: float = 10, use_proxy: bool = True, 
 
     if proxied:
         _note_proxy_transport(True)
+        _note_proxy_status(response.status_code)
     response.raise_for_status()
     return response
 
@@ -546,7 +601,18 @@ class GitHubClient:
         return bucket_name
 
     def _limit(self, service: str, credential: Optional[str] = None) -> bool:
-        """Apply rate limiting, return True if request can proceed"""
+        """Apply rate limiting; return True if the request may proceed.
+
+        The bucket is PROCESS-WIDE (one ``github_api`` template, buckets keyed
+        by credential), and the daily chain overlaps up to 7 scans on it — so a
+        single re-acquire can lose the refilled token to a sibling thread and
+        deny the request instantly. Measured 2026-09-26 08:00: the openrouter
+        run (ONE condition) lost its only search task to three consecutive
+        denials, its retry budget dropped the task silently, and the run
+        "completed" in 54 s with links=0 / error_message NULL. Wait in bounded
+        rounds instead, and log the denial at WARNING — it is our own
+        starvation, not an upstream fault.
+        """
         if not self.limiter or not service:
             return True
 
@@ -556,16 +622,32 @@ class GitHubClient:
         if self.limiter.acquire(bucket_name):
             return True
 
-        # Wait for tokens
-        wait = self.limiter.wait_time(bucket_name)
-        if wait > 0:
-            bucket = self.limiter._get_bucket(bucket_name)
-            max_value = bucket.burst if bucket else "unknown"
-            label = f"{service}/{mask_credential(credential)}" if credential else service
-            logger.info(f"Rate limit hit for {label}, waiting {wait:.2f}s, max: {max_value}")
+        label = f"{service}/{mask_credential(credential)}" if credential else service
+        bucket = self.limiter._get_bucket(bucket_name)
+        max_value = bucket.burst if bucket else "unknown"
+        waited = 0.0
+        for _ in range(_LIMIT_MAX_WAIT_ROUNDS):
+            wait = self.limiter.wait_time(bucket_name)
+            if wait <= 0:
+                wait = 0.1
+            if waited == 0.0:
+                logger.info(
+                    f"Rate limit hit for {label}, waiting {wait:.2f}s, max: {max_value}"
+                )
             time.sleep(wait)
-            return self.limiter.acquire(bucket_name)
+            waited += wait
+            if self.limiter.acquire(bucket_name):
+                return True
+            if waited >= _LIMIT_MAX_WAIT_SECONDS:
+                break
 
+        # INFO, not WARNING: the single warning for a denial is emitted by the
+        # caller (get_with_headers), so a denied fetch produces exactly one
+        # WARNING carrying the request context.
+        logger.info(
+            f"Rate limiter wait exhausted for {service} after {waited:.1f}s of "
+            f"waiting (no token)"
+        )
         return False
 
     def _report(self, service: str, success: bool, credential: Optional[str] = None) -> None:

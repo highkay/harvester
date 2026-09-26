@@ -376,6 +376,10 @@ class PipelineRunner:
             degradation = self._zero_yield_degradation(
                 provider_name, run_id, links_total, materials_total, app
             )
+            if degradation is None:
+                degradation = self._no_work_degradation(
+                    provider_name, run_id, links_total, materials_total, valid_keys
+                )
 
             # 5. Update DB — completed. Conditional on the row still being
             # 'running': a cancel_run that landed mid-scan has already
@@ -1003,6 +1007,38 @@ class PipelineRunner:
             f"large corpus; suspect key_pattern (wrong key format, decoy "
             f"pool, dead search qualifier) or gather transport failure "
             f"({detail})"
+        )
+        logger.error(message)
+        return message
+
+    def _no_work_degradation(
+        self,
+        provider_name: str,
+        run_id: str,
+        links_total: int | None,
+        materials_total: int | None,
+        valid_keys: int,
+    ) -> str | None:
+        """Marker for a 'completed' run that did NO work at all, or None.
+
+        Measured 2026-09-26 08:00 (openrouter): the run had ONE condition, its
+        single search task was denied by the process-wide ``github_api`` rate
+        limiter on all three attempts, the retry budget dropped it silently and
+        the pipeline finished in 54 s with links=0 / materials=0 / valid=0 —
+        status 'completed' and ``error_message`` NULL. The zero-yield tripwire
+        requires > ``_ZERO_YIELD_LINK_THRESHOLD`` links, so this class was
+        invisible in run_records. Status stays 'completed' (the same four-value
+        CHECK-constraint rationale as the zero-yield marker); the reason is
+        recorded for the UI/API.
+        """
+        if links_total != 0 or materials_total != 0 or valid_keys:
+            return None
+        message = (
+            f"no-work run: provider={provider_name} run_id={run_id} "
+            f"links_total=0 materials_total=0 valid_keys=0 — the search stage "
+            f"produced nothing (credential cooldown, rate-limiter denial, or "
+            f"genuinely empty dorks); look for 'task dropped' lines in the "
+            f"stage log"
         )
         logger.error(message)
         return message

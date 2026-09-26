@@ -254,7 +254,11 @@ class SearchStage(BasePipelineStage):
             # the raw dedup id: CHECK/INSPECT ids embed the raw candidate key
             # and the global RedactionFilter misses prefix-less formats
             # (SerpApi 64-hex). See BasePipelineStage._safe_task_identity.
-            logger.error(f"[{self.name}] error, task: {self._safe_task_identity(task)}, message: {e}")
+            logger.log(
+                self._error_log_level(e),
+                f"[{self.name}] error, task: {self._safe_task_identity(task)}, "
+                f"message: {e}",
+            )
             # Retryable transport failures (ConnectionError — which now also
             # carries the rate-limiter denial and unparseable-body cases —
             # TimeoutError, "rate limit" markers) must escape to

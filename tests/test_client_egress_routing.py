@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 import unittest
+from typing import Any, cast
 from unittest import mock
 
 import requests
@@ -205,6 +206,98 @@ class TestProxyFailover(unittest.TestCase):
         self.assertEqual(state["consecutive_failures"], 0)
         self.assertEqual(state["candidates"][0], self.PROXIES[2])
         self.assertEqual(sorted(state["candidates"]), sorted(self.PROXIES))
+
+
+class _FakeLimiter:
+    """Minimal RateLimiter stand-in for GitHubClient._limit."""
+
+    def __init__(self, grants_on_call: int | None):
+        self.calls = 0
+        self.grants_on_call = grants_on_call
+        self.waits: list[float] = []
+
+    def acquire(self, service: str, tokens: int = 1) -> bool:
+        self.calls += 1
+        return self.grants_on_call is not None and self.calls >= self.grants_on_call
+
+    def wait_time(self, service: str, tokens: int = 1) -> float:
+        self.waits.append(0.01)
+        return 0.01
+
+    def _get_bucket(self, service: str):
+        return None
+
+
+class TestLimiterDenialBudget(unittest.TestCase):
+    """The process-wide github_api bucket must be waited on, not one-shot denied.
+
+    Measured 2026-09-26 08:00: the openrouter run (ONE condition) lost its only
+    search task to three consecutive one-shot denials and "completed" with
+    0 links; a denial must now follow bounded waiting.
+    """
+
+    def test_immediate_grant_does_not_wait(self) -> None:
+        limiter = _FakeLimiter(grants_on_call=1)
+        gh = client.GitHubClient(limiter=cast(Any, limiter))
+
+        self.assertTrue(gh._limit("github_api"))
+        self.assertEqual([], limiter.waits)
+
+    def test_grant_after_a_wait_succeeds(self) -> None:
+        limiter = _FakeLimiter(grants_on_call=3)
+        gh = client.GitHubClient(limiter=cast(Any, limiter))
+
+        with mock.patch.object(client.time, "sleep"):
+            self.assertTrue(gh._limit("github_api"))
+
+        self.assertLessEqual(len(limiter.waits), client._LIMIT_MAX_WAIT_ROUNDS)
+
+    def test_exhausted_wait_denies_after_bounded_rounds(self) -> None:
+        limiter = _FakeLimiter(grants_on_call=None)
+        gh = client.GitHubClient(limiter=cast(Any, limiter))
+
+        with mock.patch.object(client.time, "sleep"), self.assertLogs("search", level="INFO") as logs:
+            self.assertFalse(gh._limit("github_api"))
+
+        self.assertEqual(client._LIMIT_MAX_WAIT_ROUNDS, len(limiter.waits))
+        self.assertTrue(
+            any("wait exhausted" in r.getMessage() for r in logs.records)
+        )
+        # The denial WARNING itself is emitted once, by get_with_headers.
+        self.assertFalse(any(r.levelname == "WARNING" for r in logs.records))
+
+    def test_no_limiter_configured_allows_everything(self) -> None:
+        self.assertTrue(client.GitHubClient(limiter=None)._limit("github_api"))
+
+
+class TestDegradedExitVisibility(unittest.TestCase):
+    """403/429 answers reset the transport streak, so surface them separately."""
+
+    def tearDown(self) -> None:
+        client.set_proxy("")
+
+    def test_repeated_degraded_answers_warn_once_and_reset_on_health(self) -> None:
+        client.set_proxy("socks5://10.0.0.1:1080")
+
+        with self.assertLogs("search", level="WARNING") as logs:
+            for _ in range(client._PROXY_DEGRADED_WARN_THRESHOLD):
+                client._note_proxy_status(429)
+
+        state = client.get_egress_state()
+        self.assertEqual(state["degraded_streak"], client._PROXY_DEGRADED_WARN_THRESHOLD)
+        self.assertEqual(state["rotations"], 0, "a degraded exit must not rotate")
+        self.assertEqual(
+            1, sum(1 for r in logs.records if "degraded responses" in r.getMessage())
+        )
+
+        client._note_proxy_status(200)
+        self.assertEqual(0, client.get_egress_state()["degraded_streak"])
+
+    def test_direct_session_status_never_counted(self) -> None:
+        # only proxied answers are tallied; a direct raw 4xx must not move it
+        client.set_proxy("socks5://10.0.0.1:1080")
+        client._note_proxy_status(403)
+        self.assertEqual(1, client.get_egress_state()["degraded_streak"])
 
 
 if __name__ == "__main__":

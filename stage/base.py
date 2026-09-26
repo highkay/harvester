@@ -6,6 +6,7 @@ Hybrid architecture with dependency injection and pure functional processing.
 """
 
 import hashlib
+import logging
 import queue
 import threading
 import time
@@ -386,7 +387,10 @@ class BasePipelineStage(ABC, WorkerManageable):
             return result
 
         except Exception as e:
-            logger.error(f"[{self.name}] task processing failed: {e}")
+            logger.log(
+                self._error_log_level(e),
+                f"[{self.name}] task processing failed: {e}",
+            )
             return self._handle_processing_error(task, e)
 
     @abstractmethod
@@ -460,7 +464,10 @@ class BasePipelineStage(ABC, WorkerManageable):
                         self.total_processed += 1
 
                 except Exception as e:
-                    logger.error(f"[{self.name}] error processing task: {e}")
+                    logger.log(
+                        self._error_log_level(e),
+                        f"[{self.name}] error processing task: {e}",
+                    )
 
                     # Check if task should be retried using policy
                     if self.retry_policy.should_retry(task.attempts, e):
@@ -475,6 +482,21 @@ class BasePipelineStage(ABC, WorkerManageable):
                         logger.warning(
                             f"[{self.name}] requeued {status} after {delay:.1f}s delay, "
                             f"task: {self._safe_task_identity(task)}"
+                        )
+                    else:
+                        # TERMINAL drop: the retry budget is exhausted, the task
+                        # leaves the pipeline here and nothing else records it.
+                        # Measured 2026-09-26 08:00: the openrouter run had ONE
+                        # condition, its single search task was denied by the
+                        # process-wide github_api limiter on all three attempts,
+                        # and the run "completed" in 54 s with links=0 and
+                        # error_message NULL — the zero-yield tripwire needs
+                        # >1000 links and cannot see this class at all.
+                        logger.warning(
+                            f"[{self.name}] task dropped after {task.attempts} "
+                            f"attempt(s), retry budget exhausted: "
+                            f"{type(e).__name__}: {str(e)[:200]} — task: "
+                            f"{self._safe_task_identity(task)}"
                         )
 
                     # Update error statistics
@@ -495,6 +517,20 @@ class BasePipelineStage(ABC, WorkerManageable):
                 continue
             except Exception as e:
                 logger.error(f"[{self.name}] worker error: {e}")
+
+    @staticmethod
+    def _error_log_level(error: Exception) -> int:
+        """Log level for a task error: expected/self-inflicted → WARNING.
+
+        ``rate limiter denied`` is raised by search/client.py when the
+        process-wide ``github_api`` bucket starves a request — 7 overlapping
+        scans share it and each denial already costs a bounded wait — so it is
+        our own concurrency, not an upstream fault, and at ERROR level it was a
+        large share of the 50 MB/6 h log volume.
+        """
+        if "rate limiter denied" in str(error):
+            return logging.WARNING
+        return logging.ERROR
 
     def _has_active_workers(self) -> bool:
         """Check if any workers are currently active"""
