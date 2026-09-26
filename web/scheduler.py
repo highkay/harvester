@@ -378,7 +378,15 @@ class SchedulerService:
         """
         prefix = f"defer-{provider_name}-"
         try:
-            return any(j.id.startswith(prefix) for j in self._scheduler.get_jobs())
+            for job in self._scheduler.get_jobs():
+                job_id = str(getattr(job, "id", ""))
+                # Exact provider segment: job ids are defer-<provider>-<ms>, and
+                # a bare startswith made `defer-kimi-ai-…` count as a pending
+                # ladder for `kimi` (same for glm/glm-ai), which would fold a
+                # colliding firing into a ladder that does not exist for it.
+                if job_id.startswith(prefix) and job_id[len(prefix):].isdigit():
+                    return True
+            return False
         except Exception:
             return False
 

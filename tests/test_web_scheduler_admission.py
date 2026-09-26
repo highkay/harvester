@@ -138,6 +138,18 @@ class TestDeferral(unittest.TestCase):
         self.assertTrue(svc.has_pending_deferral("p"))
         self.assertFalse(svc.has_pending_deferral("other"))
 
+    def test_sibling_provider_ladder_does_not_count_as_pending(self) -> None:
+        # defer-kimi-ai-* must NOT look like a pending ladder for kimi (same
+        # glm/glm-ai): a false positive here silently loses the colliding
+        # firing via the "folded" branch.
+        svc = self._service()
+        cast(Any, svc._scheduler).get_jobs.return_value = [
+            MagicMock(id="defer-kimi-ai-1699999999999")
+        ]
+
+        self.assertFalse(svc.has_pending_deferral("kimi"))
+        self.assertTrue(svc.has_pending_deferral("kimi-ai"))
+
     def test_ladder_check_reads_scheduler_state_not_a_flag(self) -> None:
         svc = self._service()
 
