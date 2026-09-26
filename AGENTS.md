@@ -1556,7 +1556,10 @@ since 09-25 (tavily +30, serpapi +25, openrouter +8 …).
    warns once at `>= _PROXY_DEGRADED_WARN_THRESHOLD` (25) and exposes
    `get_egress_state()['degraded_streak']`; rotation is deliberately unchanged
    (a 403/429 from `api.github.com` is usually token/quota state, not exit
-   state).
+   state), and the streak only counts answers WITHOUT rate-limit headers
+   (`_has_rate_limit_headers`: api.github.com advertises `x-ratelimit-*` even
+   on 403, tavily sends `retry-after`) — quota-level answers reset it, so the
+   warning does not cry wolf during routine secondary-rate-limit storms.
 2. **Silent no-op runs — root-caused and guarded 2026-09-26 (`18b1d84`)**.
    Mechanism VERIFIED from logs+code (the earlier "credential cooldown" reading
    was wrong — `tools/credential.py::_get_available` *waits*, it cannot hand the
@@ -1564,22 +1567,35 @@ since 09-25 (tavily +30, serpapi +25, openrouter +8 …).
    SearchTask was the whole run; the task was denied by the **process-wide
    `github_api` limiter** (`client.py` "Rate limiter denied request for
    github_api (no token after wait)"; 7 overlapping scans share that bucket) on
-   all three attempts, `retry_policy.should_retry(3, e)` returned False, and the
-   task was dropped with **no log line at all** — `put_task`'s
-   "discarded, max retries" warning covers only the dedup path
-   (`grep -c` = 0 in the run's window, and `stage/base.py:247` was never
-   reached). The run then "completed" 54.5 s after start with links=0 /
-   materials=0 / `error_message` NULL. Three guards:
+   the task's attempts, with the REAL budget: denials at 08:00:32 → requeue
+   (1 s), 08:00:43 → requeue (4 s), 08:00:50 → `should_retry(attempt=2, e)`
+   reached `max_retries=2` and returned False, i.e. **3 attempts / 2 requeues**
+   — and the terminal drop produced **no log line at all** (`put_task`'s
+   "discarded, max retries" warning covers only the dedup path; `grep -c` = 0
+   in the run's window and `stage/base.py:247` was never reached). The run then
+   "completed" 54.5 s after start with links=0 / materials=0 / `error_message`
+   NULL. Three guards:
    * `stage/base.py::_worker_loop` logs the terminal drop at WARNING
      (`task dropped after N attempt(s), retry budget exhausted: …`);
-   * `GitHubClient._limit` waits in bounded rounds (≤ `_LIMIT_MAX_WAIT_ROUNDS`
-     = 6, ≤ `_LIMIT_MAX_WAIT_SECONDS` = 120 s) before denying, and the
-     stage-side logs for that marker drop to WARNING (they were a large share of
-     the 50 MB/6 h volume);
+   * `GitHubClient._limit` waits until a **total deadline**
+     (`_LIMIT_WAIT_DEADLINE_SECONDS` = 15 s, per-round floor 0.5 s, 64-round
+     runaway guard) before denying — the earlier round-capped sketch was a
+     no-op in the very token-steal race it targeted (`wait_time()` reads ~0
+     while a sibling thread holds the refilled token, so 6 rounds burned in
+     0.6 s). The 15 s cap keeps a stop request from being held hostage much
+     beyond `BasePipelineStage.stop`'s per-worker join budget (30 s split
+     across workers); three attempts still give ~45 s of patience per task.
+     The denial is `core.exceptions.RateLimiterDeniedError` (subclasses
+     ConnectionError so every retry predicate keeps working) and the three
+     stage-log sites (`definition.py:257`, `base.py:389/463`) drop to WARNING
+     by TYPE, not by message match (they were a large share of the 50 MB/6 h
+     volume);
    * `web/runner.py::_no_work_degradation` records a
      `no-work run: …` marker in `run_records.error_message` for completed runs
-     with links=0 / materials=0 / valid_keys=0 (the zero-yield tripwire needs
-     >1000 links and cannot see this class).
+     with links=0 / materials=0 / valid_keys=0, quoting the run's own stage
+     counters (`_stage_error_snapshot` → e.g. `search_completed=0
+     search_failed=3`); the zero-yield tripwire needs >1000 links and cannot
+     see this class.
 3. Search now works, so per-run corpora ballooned to 80k-146k links
    (deepseek 336k) and heavy runs take 14-28 h; they then collide with the next
    day's chain — `already running — skipping` measured for github (09-25 12:50,
@@ -1608,6 +1624,16 @@ narrowing). The GitHub code-search budget (7 tokens × 10 req/min + secondary
 rate-limit cooldowns; 16,919 all-tokens-cooling pauses in ≈18 h) is the
 search-leg ceiling and cannot grow while the `github` self-bootstrap run
 produces no new tokens.
+
+**Deployed again 2026-09-26 10:47 CST (`691268f`)** — review fixes on top of
+`18b1d84`: deadline-driven `_limit` wait (the round cap was a no-op in the
+token-steal race), typed `RateLimiterDeniedError` for the stage-level WARNING
+downgrade (no message matching), rate-limit-header gating on the degraded
+streak, and stage counters in the no-work marker. Salvage first (openrouter 46
+keys → already pooled), fnos aligned (rollback `rollback-20260926-1047xx`),
+md5 MATCH for `core/exceptions.py` / `search/client.py` / `stage/base.py` /
+`web/runner.py`, markers present, `/health` ok, 0 rows left `running`. Clean
+worktree at `691268f`: **820 tests OK / 8 skipped**.
 
 **Deployed 2026-09-26 10:23 CST (`18b1d84`)**: salvage first (the 7 live runs'
 files: nvidia 1,057 keys → already pooled, agnes-ai 54 → +30, tavily 285 → +3;
