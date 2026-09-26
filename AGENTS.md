@@ -1832,6 +1832,35 @@ scheduler guard. The cron-side deferral path (`_run_provider_job` → one-shot
 DateTrigger) has its own observation point at the next firings (00:00-00:50 CST
 while these six are still live), plus its unit tests.
 
+**Deployed again 2026-09-26 23:0x CST (`455ceb5`)** — the round-2 review fixes
+(escalating 30×n ladder / `_MAX_DEFERRALS` 8, APScheduler-queried single ladder
+with EXACT provider-id matching, `job_defaults` incl. `misfire_grace_time=None`,
+tz-aware deferral dates, gather-based cap accounting + mid-task short-circuit,
+compose env plumbing). Salvage first (serpapi 107 keys → 0 new; deepseek / kimi
+/ mimo-cn / github / qwen-cn had none), fnos aligned (rollback
+`rollback-20260926-23xxxx`), whole-tree cp + restart, md5 MATCH for
+`web/scheduler.py` / `stage/definition.py`, markers present, `/health` ok, 0
+rows left `running`. Clean-worktree gate at the deployed SHA: **843 OK / 8
+skipped** (886 OK / 8 skipped in the dirty tree).
+
+**LIVE proof of the deferral path (deployed build, 21:00-21:30 CST)**: while six
+scans were live, `qwen-intl`'s 21:00 cron firing hit the cap and was **deferred
+three times, then dropped** —
+`Provider qwen-intl deferred (attempt 1/3, retry in 900s): concurrency cap
+reached (6/6 runs live)` at 21:00, the same at 21:15 (attempt 2/3) and 21:30
+(attempt 3/3) — i.e. the APScheduler 429→cap→DateTrigger chain works in
+production, and the SAME run also showed why the ladder had to grow: a 3×15 min
+budget expires inside the collision (the round-2 build now covers ≈18 h).
+
+**Still to be proven by real runs (do not read as done)**: (a) the round-2
+ladder (8 attempts) and its `folded into its pending deferral ladder` WARNING —
+next natural collision; (b) the 120k cap firing in a production run (`per-run
+link cap reached` was 0 as of 23:05 — the six 20:49 runs had not crossed it);
+(c) the duration effect of the cap (proved only by the bounded CLI run so far);
+(d) the `no-work run → failed` status on a real starving run (no occurrence
+since the deploy). The comparison baseline for (c)/(d) is the table above plus
+`push_logs.added_count` per provider.
+
 ## Tests & conventions
 
 - Run: `python -m unittest discover -s tests`. **Measured baseline 2026-09-24
