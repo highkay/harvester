@@ -54,7 +54,7 @@ class TestCronValidation(unittest.TestCase):
 class TestSeedData(unittest.TestCase):
     """Given an empty schedule_config table,
     When init_scheduler is called,
-    Then 19 default provider schedules are inserted.
+    Then 18 default provider schedules are inserted.
     """
 
     _EXPECTED_PROVIDERS = frozenset(
@@ -77,7 +77,9 @@ class TestSeedData(unittest.TestCase):
             # 2026-09-22: seeded providers that prod only had via manual/UI
             # inserts (the seed list ran against an EMPTY table on prod long
             # before these existed, so fresh installs never scheduled them).
-            "groq",
+            # 2026-09-24: groq removed — GitHub secret-scanning partner +
+            # push protection auto-revokes leaked gsk_ keys within minutes,
+            # so 22 completed prod runs yielded 0 valid keys (structural).
             "ollama",
             "openrouter",
             "nvidia",
@@ -95,11 +97,15 @@ class TestSeedData(unittest.TestCase):
         "serpapi": "10 */6 * * *",
         "agnes-ai": "35 */6 * * *",
         "glm-ai": "0 13 * * *",
-        "kimi-ai": "0 14 * * *",
-        "kimi-coding": "0 15 * * *",
-        "mimo-sg": "0 16 * * *",
-        "qwen-intl": "0 17 * * *",
-        "groq": "0 1 * * *",
+        # 2026-09-24: moved off the 14:00-17:00 Beijing window — measured prod
+        # token-cooldown storm concentrated at 10:00-16:00 Beijing (4529
+        # warnings on 2026-09-24), which starved these four providers' search
+        # stages (qwen-intl completed with 0 links). Evening starts land after
+        # the morning chain's search phases have drained the pool.
+        "kimi-ai": "0 18 * * *",
+        "kimi-coding": "0 19 * * *",
+        "mimo-sg": "0 20 * * *",
+        "qwen-intl": "0 21 * * *",
         "ollama": "20 3 * * *",
         "openrouter": "40 8 * * *",
         "nvidia": "50 11 * * *",
@@ -120,7 +126,6 @@ class TestSeedData(unittest.TestCase):
         "kimi-coding": "examples/config-kimi-coding.yaml",
         "mimo-sg": "examples/config-mimo-sg.yaml",
         "qwen-intl": "examples/config-qwen-intl.yaml",
-        "groq": "examples/config-groq.yaml",
         "ollama": "examples/config-ollama.yaml",
         "openrouter": "examples/config-openrouter.yaml",
         "nvidia": "examples/config-nvidia.yaml",
@@ -207,12 +212,22 @@ class TestSeedListShape(unittest.TestCase):
     # github self-bootstrap entry whose cron AGENTS.md documents (already
     # seeded before the change; pinned so it cannot drift silently).
     _PINNED_ENTRIES = {
-        "groq": ("0 1 * * *", "examples/config-groq.yaml"),
         "ollama": ("20 3 * * *", "examples/config-ollama.yaml"),
         "openrouter": ("40 8 * * *", "examples/config-openrouter.yaml"),
         "nvidia": ("50 11 * * *", "examples/config-nvidia.yaml"),
         "github": ("50 */6 * * *", "examples/config-github.yaml"),
     }
+
+    def test_groq_is_not_seeded(self) -> None:
+        from web.scheduler import _DEFAULT_SCHEDULES
+
+        providers = {entry[0] for entry in _DEFAULT_SCHEDULES}
+        self.assertNotIn(
+            "groq",
+            providers,
+            "groq must not be seeded — GitHub partner auto-revocation makes "
+            "its scans structurally zero-yield (see AGENTS.md groq section)",
+        )
 
     def test_no_duplicate_provider_names(self) -> None:
         from web.scheduler import _DEFAULT_SCHEDULES

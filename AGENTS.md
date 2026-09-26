@@ -421,15 +421,19 @@ docker compose restart && curl -s http://localhost:8002/health
 - **Endpoints**: `glm` -> `https://open.bigmodel.cn/api/paas/v4` (direct);
   `glm-ai` -> `https://api.z.ai/api/paas/v4` (see the egress section). Both
   expose an auth-gated `GET /models` (the old "no /models endpoint" comment was
-  wrong) but validation uses the chat-completions probe with `glm-5.3-flash`.
-  **Policy 2026-09-21: the gpt-load `glm`/`zai` groups only accept
-  glm-5.3-flash-capable keys** — free-tier flash-only keys answer 429/1113
-  ("余额不足或无可用资源包") for every non-flash model and are classified
-  no-quota (never valid, never pushed). Measurement that led here:
-  `glm-4.5-flash` answered 200 on 10/10 CN probes (least congested),
-  `glm-4.7-flash` was mostly 429 code 1305, and all non-flash ids returned
-  1113; the operator decided the pool must serve `glm-5.3-flash` only, and the
-  previously pushed 362 free-tier keys were cleared from both groups.
+  wrong) but validation uses the chat-completions probe with `glm-4.5-flash`.
+  **Policy 2026-09-24 (REVERSES 2026-09-21): the probe model is
+  `glm-4.5-flash`** — the 5.3-flash-only policy classified every free-tier key
+  as no-quota (429/1113) and produced 0 valid forever; measured on prod
+  2026-09-24 the no-quota bucket keys answered 200 for glm-4.5-flash (3/3
+  bigmodel.cn + 2/2 z.ai), and Zhipu's pricing page confirms glm-5.3-flash is
+  a PAID model while glm-4.5-flash is in the free tier. The gpt-load `glm`
+  (group 14) and `zai` (group 15) `test_model`s were moved to glm-4.5-flash
+  the same day via `PUT /api/groups/{id}`, and the no-quota backlog was
+  salvaged + re-pushed (`.omo/evidence/ulw-20260924-zero-yield.md`). History:
+  the 2026-09-21 policy chose 5.3-flash because `glm-4.5-flash` answered 200 on
+  10/10 CN probes but `glm-4.7-flash` was mostly 429 code 1305 and non-flash
+  ids returned 1113; 362 free-tier keys were cleared from both groups then.
 - **Status map**: 401 / body code 1000·1001·1003 -> invalid; 400 code 1211 ->
   NO_MODEL; 402 / code 1113 -> no-quota; **429 code 1305 (model overload) ->
   RATE_LIMITED -> `wait-check-keys.txt`** (62 occurrences in one 45-min window
@@ -469,6 +473,29 @@ docker compose restart && curl -s http://localhost:8002/health
   72 chars, so only the prefixed form is extracted now. Tripwire: if a future
   run shows near-zero candidates at the check stage, widen back to `sk-` and
   re-measure before trusting the narrowing.
+
+## Ops: zero-yield root-cause audit + schedule overhaul (2026-09-24)
+
+Audited why kimi/glm/groq etc. produced 0 valid keys (evidence +
+probe scripts + librarian sources: `.omo/evidence/ulw-20260924-zero-yield.md`).
+Verdict: the scanning/judgement logic is NOT broken (12/12 re-probed bucket
+keys were classified correctly); zero yield decomposes into four causes —
+(A) pool policy (glm/glm-ai: 5.3-flash-only, fixed — see the glm section),
+(B) quota-dead supply (kimi ¥15-voucher keys suspended, deepseek 402, mimo-cn
+401; these providers are NOT in GitHub secret scanning at all, so death =
+balance exhaustion by competition, not revocation), (C) GitHub partner
+auto-revocation (groq: partner + push protection + validity check → leaked
+`gsk_` keys die within minutes; **groq was REMOVED from the seed list and
+disabled on prod 2026-09-24**), (D) search starvation (the shared 7-token
+GitHub code-search pool is drained by the morning chain — 4529 cooldown
+warnings on 2026-09-24 concentrated 10:00-16:00 Beijing; kimi-ai/kimi-coding/
+mimo-sg/qwen-intl starved, qwen-intl completed with 0 links).
+**Stagger applied 2026-09-24: kimi-ai 18:00 / kimi-coding 19:00 / mimo-sg 20:00
+/ qwen-intl 21:00 Beijing** (was 14/15/16/17) via `PUT /api/schedule/{p}`
+(hot reload, no restart), seed list in `web/scheduler.py` updated to match.
+Open follow-ups: the github self-bootstrap loop yields ~1 valid per 9705
+materials (GitHub auto-revokes its own PATs) yet eats the most search quota —
+consider cutting it to daily; add more GitHub tokens manually (user deferred).
 
 ## Feature: kimi + kimi-ai extraction anchored (2026-09-22)
 

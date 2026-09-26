@@ -80,11 +80,12 @@ tasks:
       base_url: https://open.bigmodel.cn/api/paas/v4
       completion_path: /chat/completions
       model_path: ""
-      # POLICY 2026-09-21: validation must match what the pooled keys must serve.
-      # The gpt-load groups only accept glm-5.3-flash-capable keys — free-tier
-      # flash-only keys answer 429/1113 ("no resource pack") and are rejected as
-      # no-quota, never pushed.
-      default_model: glm-5.3-flash
+      # POLICY 2026-09-24 (reverses 2026-09-21): probe glm-4.5-flash, the FREE
+      # flash model the harvested keys can actually serve. Probing the paid
+      # glm-5.3-flash classified every free-tier key as no-quota (429/1113)
+      # and yielded 0 valid forever; the gpt-load group's test_model was moved
+      # to glm-4.5-flash to match.
+      default_model: glm-4.5-flash
       auth_key: Authorization
       extra_headers: {}
       api_version: ""

@@ -63,22 +63,29 @@ _DEFAULT_SCHEDULES: tuple[tuple[str, str, str], ...] = (
     # push statistics and schedules together). Daily at staggered hours —
     # region-specific keys are low churn, so once a day is sufficient.
     ("glm-ai", "0 13 * * *", "examples/config-glm-ai.yaml"),
-    ("kimi-ai", "0 14 * * *", "examples/config-kimi-ai.yaml"),
-    ("kimi-coding", "0 15 * * *", "examples/config-kimi-coding.yaml"),
-    ("mimo-sg", "0 16 * * *", "examples/config-mimo-sg.yaml"),
-    ("qwen-intl", "0 17 * * *", "examples/config-qwen-intl.yaml"),
+    # 2026-09-24: the four below moved out of the 14:00-17:00 Beijing window.
+    # Measured on prod: the GitHub token-cooldown storm concentrates at
+    # 10:00-16:00 Beijing (4529 warnings on 2026-09-24) while the morning
+    # chain's long runs (github/groq/deepseek, 200k+ links each) still hold
+    # the shared code-search quota — kimi-ai gathered 828 links in 8.6h and
+    # qwen-intl completed with 0 links in that window. Evening starts search
+    # against a recovered token pool.
+    ("kimi-ai", "0 18 * * *", "examples/config-kimi-ai.yaml"),
+    ("kimi-coding", "0 19 * * *", "examples/config-kimi-coding.yaml"),
+    ("mimo-sg", "0 20 * * *", "examples/config-mimo-sg.yaml"),
+    ("qwen-intl", "0 21 * * *", "examples/config-qwen-intl.yaml"),
     # 2026-09-22: providers with configs + prod history that were missing
     # from the seed list (prod rows came from manual/UI inserts, and the
     # seed only runs against an EMPTY schedule_config table — so fresh
     # installs grew up without these scans). Each cron mirrors prod's hour
-    # chain (groq 01, ollama 03, openrouter 08, nvidia beside modelscope's
-    # 11) and picks a minute that collides with nothing else in this list:
-    # hour 01 is otherwise empty, hour 03 is never hit by the */4 cluster,
-    # the */4 cluster's 08 fires at :00/:15/:45, and modelscope's 11 fires
-    # at :00. groq mirrors the prod row inserted manually on 2026-09-03;
-    # a groq scan can never produce a valid key from a Cloudflare-blocked
-    # egress (AGENTS.md groq section), but the schedule itself is sound.
-    ("groq", "0 1 * * *", "examples/config-groq.yaml"),
+    # chain (ollama 03, openrouter 08, nvidia beside modelscope's 11) and
+    # picks a minute that collides with nothing else in this list: hour 03
+    # is never hit by the */4 cluster, the */4 cluster's 08 fires at
+    # :00/:15/:45, and modelscope's 11 fires at :00.
+    # 2026-09-24: groq REMOVED from the seed list — Groq is a GitHub
+    # secret-scanning partner with push protection, so leaked gsk_ keys are
+    # auto-revoked within minutes of a public push (22 completed prod runs,
+    # 0 valid keys; structural, not fixable from the scanning side).
     ("ollama", "20 3 * * *", "examples/config-ollama.yaml"),
     ("openrouter", "40 8 * * *", "examples/config-openrouter.yaml"),
     ("nvidia", "50 11 * * *", "examples/config-nvidia.yaml"),

@@ -24,11 +24,13 @@ class GLMProvider(OpenAILikeProvider):
 
     Zhipu's API (open.bigmodel.cn/api/paas/v4) exposes NO ``GET /models``
     endpoint, so ``check`` uses the inherited OpenAI-compatible chat-completions
-    probe against ``glm-5.3-flash`` (the model the pooled keys must serve — policy
-    2026-09-21: free-tier flash-only keys answer 1113 "no resource pack" and are
-    classified no-quota, never valid) and auth is classified from Zhipu's
-    string error codes. ``inspect`` returns an empty list because there is no
-    model-list API for this provider.
+    probe against ``glm-4.5-flash``. Policy history: until 2026-09-21 the probe
+    model was the PAID ``glm-5.3-flash``, which classified every free-tier key
+    as no-quota (429/1113) and yielded 0 valid forever; measured 2026-09-24 the
+    same keys answer 200 for glm-4.5-flash (free flash tier), so the probe
+    follows the model the pooled keys can actually serve. Auth is classified
+    from Zhipu's string error codes. ``inspect`` returns an empty list because
+    there is no model-list API for this provider.
     """
 
     def __init__(self, conditions: List[Condition], **kwargs):
@@ -39,7 +41,7 @@ class GLMProvider(OpenAILikeProvider):
                 "base_url": "https://open.bigmodel.cn/api/paas/v4",
                 "completion_path": "/chat/completions",
                 "model_path": "",
-                "default_model": "glm-5.3-flash",
+                "default_model": "glm-4.5-flash",
             },
         )
 
