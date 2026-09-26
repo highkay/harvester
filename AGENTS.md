@@ -472,7 +472,7 @@ docker compose restart && curl -s http://localhost:8002/health
   stage every run for 0 valid keys; 16/16 real coding keys are `sk-kimi-` +
   72 chars, so only the prefixed form is extracted now. Tripwire: if a future
   run shows near-zero candidates at the check stage, widen back to `sk-` and
-  re-measure before trusting the narrowing.
+  re-measure before trusting the narrowing. **2026-09-26 CORRECTION — re-measured and REFUTED for kimi-coding: do NOT widen; the starvation is corpus composition, not the pattern (see the kimi-coding tripwire section).** 
 
 ## Ops: zero-yield root-cause audit + schedule overhaul (2026-09-24)
 
@@ -523,7 +523,9 @@ consider cutting it to daily; add more GitHub tokens manually (user deferred).
   ant/proj/svcacct lookahead, override-only-on-domain-dorks, no-upper-bound,
   and kimi↔kimi-ai lockstep. Both configs validate; suite 572 OK / 8 skipped.
 - Tripwire: if a future run shows near-zero candidates reaching the check
-  stage, widen back (drop the anchor) and re-measure before trusting it.
+  stage, widen back (drop the anchor) and re-measure before trusting it
+  (2026-09-26: for kimi-coding the widening was measured and refuted — see that
+  section; the anchor stays).
 
 ## Feature: ollama cloud provider — why it produced 0 NEW keys (fixed 2026-09-22)
 
@@ -702,7 +704,9 @@ consider cutting it to daily; add more GitHub tokens manually (user deferred).
   **mimo coverage gap**: the re-flood guard captures `tp-` ONLY; mimo
   **`sk-` pay-as-you-go** keys (api.xiaomimimo.com) are NOT scanned — a
   different, unmeasured vendor surface. **Tripwire**: if one of these
-  providers shows near-zero candidates reaching the check stage, widen back
+  providers shows near-zero candidates reaching the check stage, widen back — but re-measure the corpus first: on kimi-coding the
+  2026-09-26 sample found 0 wide-only candidates that were anything but
+  placeholders (see that section), so "widen" is a hypothesis, not a reflex.
   (drop the anchor) and re-measure before trusting the narrowing. Pinned by
   `tests/test_deepseek_pattern.py` / `test_qwen_pattern.py` /
   `test_mimo_pattern.py` (defaults↔examples lockstep included).
@@ -1646,8 +1650,10 @@ next chain tick (`already running — skipping`: github 09-25 12:50, 09-26 00:50
 (`max_pages` / per-run link caps) rather than more egress work. Watch the
 documented pattern tripwires too: kimi-coding spent 16.6 h for 73 materials /
 1 valid from 84,635 links — that is the "near-zero candidates at the check
-stage" signal (widen back off `sk-kimi-` and re-measure before trusting the
-narrowing). The GitHub code-search budget (7 tokens × 10 req/min + secondary
+stage" signal — 2026-09-26: this was re-measured and REFUTED for kimi-coding
+(0 old-pattern hits, 4 wide-only hits that were all placeholders; the run's own
+check outputs were entirely `sk-kimi-`-shaped), so the pattern stays narrowed
+and the real lever is dork/class diversity. The GitHub code-search budget (7 tokens × 10 req/min + secondary
 rate-limit cooldowns; 16,919 all-tokens-cooling pauses in ≈18 h) is the
 search-leg ceiling and cannot grow while the `github` self-bootstrap run
 produces no new tokens.
@@ -1689,9 +1695,53 @@ authentic keys `sk-kimi-`-shaped. Verdict: starvation is CORPUS COMPOSITION
 if a future run again shows near-zero candidates, widen the measurement once,
 but then chase dork/class diversity, not the pattern.
 
-**Edge-pool idea REJECTED (measured 2026-09-26)**: don't enable
-`github_transport.edge_pool.prefer_over_proxy` as a proxy-free path for
-`api.github.com`. Two independent reasons: (1) the feed it depends on,
+**Admission knobs are wired into both compose files (2026-09-26)**:
+`HARVESTER_MAX_CONCURRENT_SCANS` / `HARVESTER_DEFER_DELAY_SECONDS` /
+`HARVESTER_MAX_DEFERRALS` are now passed through in `docker-compose.yml` and
+`docker-compose.hostnet.yml` (defaults match the code: 6 / 1800 / 8) — before
+this, "env-overridable" was fiction on prod because both files use an explicit
+`environment:` list with no `env_file`. They take effect on a **recreate**, not
+a `restart` (container env is frozen at creation).
+
+**Functional proof of the cap (bounded CLI run, 2026-09-26 22:2x CST)**: a
+scratch config in the container's `/tmp/cap-probe` (one dork, gather/check/
+inspect off, `max_links_per_run: 3`, workspace + cwd isolated there so the
+logger's CWD-relative `logs/` and the shared `data/queue_state` were untouched;
+token passed via `GITHUB_TOKENS` env, never written to a file; hard-bounded with
+`timeout -s KILL 300` because main.py swallows SIGTERM). Evidence:
+`[search] per-run link cap reached (3 links queued for gather) for openrouter —
+dropping further search tasks` (once), `links.txt` = 100 (exactly one page),
+`[search] search completed … 100 links, 19 keys, total: 73728` — i.e. the
+73,728-result tail was never walked, run finished in 80 s. Note the probe ran
+the build deployed at 20:44, which still generated the page/refine tail for the
+crossing task (27 refined + 9 page tasks, all dropped at entry); the mid-task
+short-circuit added in the next commit removes that churn.
+
+**Evaluation baseline (the "before" set for the 2026-09-26 20:44 deploy)** —
+`run_records` since 09-25 12:00 UTC + `push_logs.added_count` per provider:
+
+| provider | duration | links | valid | push added |
+|---|---|---|---|---|
+| serpapi | 269 min | 33,265 | 240 | 25 |
+| ollama | 180 min | 15,217 | 40 | 1 |
+| modelscope | 61 min | 35,687 | 59 | 0 |
+| tavily | 1,402 min | 146,704 | 505 | 33 |
+| glm | 1,181 min | 119,040 | 0 | 483 |
+| glm-ai | 974 min | 86,863 | 0 | 63 |
+| nvidia | — (killed live, 8.9 h) | — | 965 in file | 657 |
+
+Compare after the cap lands with **`push_logs.added_count` + `links_total` +
+`duration_seconds`**, never `valid_keys_found` alone (a capped corpus shrinks
+NEW discovery while re-found duplicates keep re-validating — the ollama lesson).
+
+**Edge-pool idea REJECTED for the web path; UNPROBED for a proxy-free run
+(measured 2026-09-26)**: do not enable
+`github_transport.edge_pool.prefer_over_proxy` in web mode — the runner always
+injects `HARVESTER_PROXY` into the runtime YAML, and with a socks5 proxy set the
+adapter's IP rewrite is never consulted (it monkeypatches
+`urllib3.util.connection.create_connection`, while PySocks dials through
+`SOCKSConnection`), so the flag would only log "[edge] using N … IPs" while
+every request still traverses SOCKS. Two separate facts behind that: Two independent reasons: (1) the feed it depends on,
 `https://hosts.ohmygh.com/v1/hosts`, is dead — `curl: (6) Could not resolve
 host` from the fnos host, and Cloudflare 530/502 from other vantages (the same
 530 is already in the 2026-09-22 local run log); (2) structural: the edge
@@ -1700,25 +1750,57 @@ adapter rewrites the dial target by monkeypatching
 (`search/github/adapter.py`), which PySocks bypasses whenever a socks5 proxy is
 configured — so with a proxy the edge IP is never used, and without one the pool
 falls back to UNVERIFIED cached IPs and never rotates back to the proxy
-(`transport.py` cooldown/next_ip). The prod cache holds 8 verified IPs from
-2026-08-12, i.e. it worked once in a proxy-free run — do not resurrect it
-without re-measuring both halves. Also: the container image is python:3.12-slim
+(`transport.py` cooldown/next_ip). Note what is NOT disproven: the feed being
+dead only blocks pool *refresh* — `init_edge_pool(background=True)` uses the
+cache immediately — and the prod cache still holds 8 verified IPs from
+2026-08-12, so a CLI run with the proxy env unset could still exercise a
+direct+seeded edge path. Nobody has probed those cached IPs against
+`api.github.com` yet; it stays a candidate for a proxy-free CLI experiment, not
+a settled question either way. Also: the container image is python:3.12-slim
 — there is NO `curl` inside it; in-container probes must be python.
 
 **Admission control + corpus bounding (deployed 2026-09-26 20:44 CST, `22561f4`)**: three
 guards against the pile-up class, all configurable:
 * `global.max_links_per_run` (`config/schemas.py`, default **120000**, 0 =
-  unlimited): `SearchStage` stops emitting links past the cap (the stage
-  instance is per-run) and logs once — bounds a run's corpus, hence its
-  duration, at ~3-4 h for the measured drain rate; the tail of a GitHub
-  best-match ranking is the lowest-signal part of a corpus anyway.
+  unlimited): `SearchStage` tracks links **queued for gather** (post
+  link-index filtering, i.e. the fetches that drive runtime — not raw
+  discoveries, and not `run_records.links_total`, which counts persisted
+  links) and, once the cap is reached, (a) drops further search tasks at worker
+  entry with one WARNING and (b) skips pagination/refinement generation for the
+  task that crossed it. The bound is therefore on the *tail*: a single page can
+  overshoot by ≤100 links. Duration effect is PROVIDER-DEPENDENT — measured
+  drain rates spread ~7x (modelscope 582 links/min → 120k ≈ 3.4 h; serpapi 124
+  → ≈16 h; tavily 105 → ≈19 h; ollama 84 → ≈24 h), and the slow ones are
+  check-bound rather than gather-bound, so links are not their real knob. Treat
+  120k as a runaway-corpus guard, not a duration SLA; a per-provider override
+  is a follow-up. The biggest corpora still collide with the next cron tick for
+  those providers — stated as a known limit, not fixed by the deferral ladder.
 * `web/scheduler.py`: `_MAX_CONCURRENT_SCANS` (env
   `HARVESTER_MAX_CONCURRENT_SCANS`, default 6, 0 = unlimited) counted from
   `run_records` (`_active_run_count`, which FAILS OPEN when the count cannot be
   read); a firing that hits 409 (provider live) or 429 (cap) is now **deferred**
-  as a one-shot `DateTrigger` job (`_DEFER_DELAY_SECONDS` 900,
-  `_MAX_DEFERRALS` 3) instead of being dropped — github's 6-hourly cron used to
-  vanish silently whenever its daily run was still live.
+  instead of being dropped — github's 6-hourly cron used to vanish silently
+  whenever its daily run was still live. Details that matter:
+  * the ladder **escalates**: `_DEFER_DELAY_SECONDS * (attempt + 1)`
+    (env `HARVESTER_DEFER_DELAY_SECONDS`, default 1800 → 30, 60, 90 … min),
+    `_MAX_DEFERRALS` 8 (env `HARVESTER_MAX_DEFERRALS`) ≈ 18 h of coverage;
+  * **one ladder per provider**: `has_pending_deferral()` is queried from
+    APScheduler (`defer-<provider>-` job ids), not from a parallel flag — a
+    one-shot job disappears by itself, so the check cannot desync into refusing
+    every future deferral;
+  * the deferral's `run_date` is built in the **scheduler's** timezone
+    (`datetime.now(scheduler.timezone)`): a naive date is interpreted in that
+    zone by APScheduler, and the dev box's C-library local zone differs from
+    Asia/Shanghai by 7 h (prod: container UTC vs fnos-host CST);
+  * a firing folded into an existing ladder logs WARNING ("folded into its
+    pending deferral ladder"); only a budget-exhausted drop logs ERROR ("firing
+    DROPPED") — the line a log-based accounting should count;
+  * `init_scheduler` sets `job_defaults={coalesce: True, max_instances: 1,
+    misfire_grace_time: None}`. APScheduler's default grace is ONE SECOND, so a
+    firing landing >1 s late (load ~8 box) was silently skipped; any FINITE
+    grace just moves that cliff, hence None = never expire — a late firing runs
+    and then lands in the cap/guard→defer path, which is what makes a busy box
+    safe. Deferral jobs inherit the same `misfire_grace_time=None`.
 * `web/runner.py::_no_work_degradation` now returns `(message, failed)`: a run
   that searched and produced nothing (links=0/materials=0/valid=0 AND ≥1 search
   attempt) is recorded **failed** (visible + re-triggerable) instead of

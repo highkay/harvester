@@ -132,7 +132,7 @@ class SearchStage(BasePipelineStage):
         # The stage instance is per-Pipeline, i.e. per run, so this counter is
         # exactly "links this run discovered" — the same number that lands in
         # run_records.links_total.
-        self._links_emitted = 0
+        self._gather_links_queued = 0
         self._link_cap_logged = False
 
     def _link_cap(self) -> int:
@@ -154,11 +154,12 @@ class SearchStage(BasePipelineStage):
     def _link_cap_reached(self, provider: str) -> bool:
         """True once this run has emitted its cap of links (logs once)."""
         cap = self._link_cap()
-        if not cap or self._links_emitted < cap:
+        if not cap or self._gather_links_queued < cap:
             return False
         if not self._link_cap_logged:
             logger.warning(
-                f"[{self.name}] per-run link cap reached ({cap}) for {provider} — "
+                f"[{self.name}] per-run link cap reached ({cap} links queued for "
+                f"gather) for {provider} — "
                 f"dropping further search tasks (pagination/refinement); the "
                 f"remaining dorks are left for the next run. Set "
                 f"global.max_links_per_run=0 to disable."
@@ -267,7 +268,14 @@ class SearchStage(BasePipelineStage):
 
                 # Persist all discovered links (including ones skipped for gather)
                 output.add_links(task.provider, results)
-                self._links_emitted += len(results)
+                # Count what actually drives runtime: the URLs queued for
+                # FETCH, after the link index filtered already-known links
+                # (`skip_known_links`). Counting raw discoveries would let a
+                # mature provider burn the budget on URLs it will never fetch
+                # again, and would disagree with run_records.links_total
+                # (persisted links, which include the index-skipped ones) — so
+                # the WARNING names the bounded quantity explicitly.
+                self._gather_links_queued += len(gather_links)
 
             # Handle first page results for pagination/refinement.
             # Reaching this gate with total == 0 now means the fetch SUCCEEDED
@@ -278,7 +286,12 @@ class SearchStage(BasePipelineStage):
             # and transport errors (429/5xx/timeout) already did; they are
             # re-raised by the handler below so _worker_loop requeues the dork
             # instead of silently dropping its page tail + refinement branch.
-            if task.page == 1 and total > 0:
+            # Also check the cap HERE, not only at worker entry: a first-page
+            # task that itself pushed the run over the cap would otherwise
+            # queue its pages 2..N + ~27 refinement tasks, all of which are
+            # then dropped at entry — thousands of doomed tasks churning the
+            # queue before the bound takes effect.
+            if task.page == 1 and total > 0 and not self._link_cap_reached(task.provider):
                 self._handle_first_page_results(task, total, output)
 
             total_note = f", total: {total}" if task.page == 1 else ""

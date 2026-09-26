@@ -27,6 +27,13 @@ services:
       # --- SerpApi push service ---
       - SERPAPI_PROXY_BASE_URL=${SERPAPI_PROXY_BASE_URL:-}
       - SERPAPI_PROXY_AUTH_KEY=${SERPAPI_PROXY_AUTH_KEY:-}
+      # --- Admission control (web/scheduler.py; take effect on RECREATE, not
+      # restart — container env is frozen at creation). Defaults match the code:
+      # 6 concurrent runs, 30 min deferral ladder, 6 retries (3 h). 0 disables
+      # the cap / the retries. ---
+      - HARVESTER_MAX_CONCURRENT_SCANS=${HARVESTER_MAX_CONCURRENT_SCANS:-6}
+      - HARVESTER_DEFER_DELAY_SECONDS=${HARVESTER_DEFER_DELAY_SECONDS:-1800}
+      - HARVESTER_MAX_DEFERRALS=${HARVESTER_MAX_DEFERRALS:-6}
       # --- Agnes AI push service (to gpt-load add-multiple, group 19) ---
       - AGNES_LOAD_BASE_URL=${AGNES_LOAD_BASE_URL:-http://107.172.141.203:43001}
       - AGNES_LOAD_GROUP_ID=${AGNES_LOAD_GROUP_ID:-19}

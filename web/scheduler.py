@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, tzinfo
 from typing import Any
 
 from apscheduler.jobstores.memory import MemoryJobStore  # type: ignore[import-untyped]
@@ -45,10 +45,20 @@ logger = get_logger("web.scheduler")
 _MAX_CONCURRENT_SCANS = max(
     0, int(os.environ.get("HARVESTER_MAX_CONCURRENT_SCANS", "6") or 0)
 )
+# The blocking condition is another run holding the provider, and a bounded run
+# is now hours, not minutes (the 120k link cap targets ~3-4 h) — so a 3 x 15 min
+# ladder would just drop the firing 45 min later. 6 x 30 min covers a full run
+# envelope; a longer collision still falls back to the old skip-and-log, and the
+# provider's own next cron firing follows anyway.
 _DEFER_DELAY_SECONDS = max(
-    60, int(os.environ.get("HARVESTER_DEFER_DELAY_SECONDS", "900") or 900)
+    60, int(os.environ.get("HARVESTER_DEFER_DELAY_SECONDS", "1800") or 1800)
 )
-_MAX_DEFERRALS = max(0, int(os.environ.get("HARVESTER_MAX_DEFERRALS", "3") or 3))
+_MAX_DEFERRALS = max(0, int(os.environ.get("HARVESTER_MAX_DEFERRALS", "8") or 8))
+# The ladder ESCALATES (delay x attempt: 30, 60, 90 ... 240 min ≈ 18 h total),
+# which covers a full run envelope even with colliding firings, while
+# `SchedulerService.has_pending_deferral()` admits ONE pending ladder per
+# provider (queried from APScheduler, which self-heals when the job runs) so a
+# provider's own cron cannot multiply retry chains.
 
 
 async def _active_run_count(db_path: str) -> int:
@@ -203,17 +213,34 @@ async def _run_provider_job(
         # provider lock) or 429 from the global concurrency cap: the firing is
         # DEFERRED (bounded) instead of dropped — a 6-hourly cron colliding
         # with a live daily run used to lose that firing entirely.
-        if exc.status_code in (409, 429) and deferred_attempts < _MAX_DEFERRALS:
-            if svc.schedule_deferred(provider_name, config_file, deferred_attempts):
+        if exc.status_code in (409, 429):
+            if deferred_attempts < _MAX_DEFERRALS and svc.schedule_deferred(
+                provider_name, config_file, deferred_attempts
+            ):
+                delay = _DEFER_DELAY_SECONDS * (deferred_attempts + 1)
                 logger.warning(
                     f"Provider {provider_name} deferred "
                     f"(attempt {deferred_attempts + 1}/{_MAX_DEFERRALS}, "
-                    f"retry in {_DEFER_DELAY_SECONDS}s): {exc.detail}"
+                    f"retry in {delay}s): {exc.detail}"
                 )
                 return
-        logger.warning(
-            f"Provider {provider_name} is already running — skipping "
-            f"({exc.detail})"
+            if deferred_attempts < _MAX_DEFERRALS and svc.has_pending_deferral(
+                provider_name
+            ):
+                # NOT a lost firing: an earlier firing's ladder is still queued
+                # and will try again. WARNING, because a log-based accounting
+                # that counted this as a dropped slot would cry wolf on a busy
+                # box.
+                logger.warning(
+                    f"Provider {provider_name} folded into its pending deferral "
+                    f"ladder ({exc.detail})"
+                )
+                return
+        # Terminal: this firing is lost. ERROR — the line a log-based
+        # accounting counts as a dropped schedule slot.
+        logger.error(
+            f"Provider {provider_name} firing DROPPED — deferral budget "
+            f"exhausted ({exc.detail})"
         )
     except ImportError:
         logger.error(
@@ -311,21 +338,48 @@ class SchedulerService:
         Returns False when the job could not be scheduled (the caller then
         falls back to the old skip-and-log behaviour).
         """
+        if self.has_pending_deferral(provider_name):
+            return False
         try:
+            # Build the date in the SCHEDULER's timezone: a naive datetime is
+            # interpreted in that zone by APScheduler, so on a host whose
+            # C-library local zone differs from it (measured on the dev box:
+            # +1 h local vs Asia/Shanghai; prod container UTC vs the fnos host
+            # CST) a naive date fires hours off. Inside the try so a future
+            # mistake degrades to "no deferral + ERROR" instead of exploding
+            # the job callback.
+            tz = getattr(self._scheduler, "timezone", None)
+            if not isinstance(tz, tzinfo):
+                tz = None
             self._scheduler.add_job(
                 _run_provider_job,
                 trigger=DateTrigger(
-                    run_date=datetime.now() + timedelta(seconds=_DEFER_DELAY_SECONDS)
+                    run_date=datetime.now(tz)
+                    + timedelta(seconds=_DEFER_DELAY_SECONDS * (deferred_attempts + 1))
                 ),
                 args=[provider_name, config_file, deferred_attempts + 1],
                 id=f"defer-{provider_name}-{int(time.time() * 1000)}",
                 max_instances=1,
                 replace_existing=False,
-                misfire_grace_time=_DEFER_DELAY_SECONDS,
+                misfire_grace_time=None,
             )
             return True
         except Exception as exc:  # pragma: no cover - scheduler-level failure
             logger.error(f"Could not defer {provider_name}: {exc}")
+            return False
+
+    def has_pending_deferral(self, provider_name: str) -> bool:
+        """Whether a deferral job for *provider_name* is still queued.
+
+        Queried from APScheduler rather than a parallel in-memory set: a
+        one-shot job disappears by itself when it runs, so this cannot desync —
+        a leaked flag would otherwise refuse every future deferral for that
+        provider.
+        """
+        prefix = f"defer-{provider_name}-"
+        try:
+            return any(j.id.startswith(prefix) for j in self._scheduler.get_jobs())
+        except Exception:
             return False
 
     async def _watch_run(self, provider_name: str, run_id: str) -> None:
@@ -656,6 +710,20 @@ async def init_scheduler(settings: object) -> SchedulerService:
         # the asyncio executor, NOT the default ThreadPoolExecutor, or it is
         # never awaited and scheduled scans silently do nothing.
         executors={"default": AsyncIOExecutor()},
+        # APScheduler's default misfire_grace_time is ONE SECOND: on a box at
+        # load ~8 with 6 live scans, a firing that lands >1 s late is silently
+        # skipped ("Run time of job … was missed"), i.e. whole cron slots can
+        # vanish exactly when the box is busiest. Any FINITE grace just moves
+        # that cliff (5 min of stall still drops the firing), so use None =
+        # never expire: a late firing runs and then hits the provider guard or
+        # the concurrency cap, which DEFER it into the retry ladder — exactly
+        # the path that makes a busy box safe. coalesce collapses a backlog into
+        # one run; max_instances=1 keeps a provider job from overlapping itself.
+        job_defaults={
+            "coalesce": True,
+            "max_instances": 1,
+            "misfire_grace_time": None,
+        },
     )
     svc = SchedulerService(scheduler=scheduler, db_path=db_path)
     _scheduler_service = svc

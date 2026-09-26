@@ -17,6 +17,7 @@ import sqlite3
 import tempfile
 import unittest
 from typing import Any, cast
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi import HTTPException
@@ -97,6 +98,7 @@ class TestDeferral(unittest.TestCase):
     def _service(self) -> SchedulerService:
         svc = SchedulerService.__new__(SchedulerService)
         svc._scheduler = MagicMock()
+        svc._scheduler.get_jobs.return_value = []
         return svc
 
     def test_schedule_deferred_adds_one_shot_job(self) -> None:
@@ -125,21 +127,110 @@ class TestDeferral(unittest.TestCase):
         self.assertTrue(any("deferred" in m for m in messages), messages)
         self.assertFalse(any("skipping" in m for m in messages), messages)
 
-    def test_deferral_is_bounded_then_skips(self) -> None:
+    def test_second_ladder_for_the_same_provider_is_refused(self) -> None:
+        svc = self._service()
+        cast(Any, svc._scheduler).get_jobs.return_value = [
+            MagicMock(id="defer-p-1699999999999")
+        ]
+
+        self.assertFalse(svc.schedule_deferred("p", "cfg.yaml", 1))
+        cast(Any, svc._scheduler).add_job.assert_not_called()
+        self.assertTrue(svc.has_pending_deferral("p"))
+        self.assertFalse(svc.has_pending_deferral("other"))
+
+    def test_ladder_check_reads_scheduler_state_not_a_flag(self) -> None:
+        svc = self._service()
+
+        # No jobs queued -> no pending ladder -> scheduling succeeds.
+        self.assertTrue(svc.schedule_deferred("p", "cfg.yaml", 0))
+        # Once APScheduler reports the job, the check flips with no bookkeeping
+        # of ours (a leaked flag used to refuse every future deferral).
+        cast(Any, svc._scheduler).get_jobs.return_value = [MagicMock(id="defer-p-1")]
+        self.assertTrue(svc.has_pending_deferral("p"))
+
+    def test_delay_escalates_and_the_date_is_timezone_aware(self) -> None:
+        svc = self._service()
+        # A REAL fixed-offset zone: the production branch (`datetime.now(tz)`)
+        # then runs, so a regression back to a naive date is caught here
+        # instead of only on a host whose local zone differs from the
+        # scheduler's.
+        cast(Any, svc._scheduler).timezone = timezone(timedelta(hours=5))
+        add_job = cast(Any, svc._scheduler).add_job
+
+        svc.schedule_deferred("p", "cfg.yaml", 2)
+        run_date = add_job.call_args.kwargs["trigger"].run_date
+
+        self.assertIsNotNone(run_date.tzinfo, "the deferral date must be aware")
+        expected = datetime.now(run_date.tzinfo) + timedelta(
+            seconds=scheduler_mod._DEFER_DELAY_SECONDS * 3
+        )
+        self.assertLess(abs((run_date - expected).total_seconds()), 5)
+
+    def test_terminal_drop_is_logged_as_error(self) -> None:
         svc = MagicMock()
         svc.start_scan = AsyncMock(
-            side_effect=HTTPException(status_code=429, detail="concurrency cap reached")
+            side_effect=HTTPException(status_code=409, detail="provider live")
         )
-        svc.schedule_deferred = MagicMock(return_value=True)
+        svc.schedule_deferred = MagicMock(return_value=False)
 
         with patch.object(scheduler_mod, "get_scheduler_service", return_value=svc), patch.object(
             scheduler_mod, "_MAX_DEFERRALS", 3
         ):
-            with self.assertLogs("web.scheduler", level="WARNING") as logs:
+            with self.assertLogs("web.scheduler", level="ERROR") as logs:
                 _run_async(_run_provider_job("p", "cfg.yaml", deferred_attempts=3))
 
-        svc.schedule_deferred.assert_not_called()
-        self.assertTrue(any("skipping" in r.getMessage() for r in logs.records))
+        self.assertTrue(any("firing DROPPED" in r.getMessage() for r in logs.records))
+
+class TestSchedulerJobDefaults(unittest.TestCase):
+    """APScheduler defaults to a ONE-SECOND misfire grace.
+
+    On a loaded box a cron firing landing >1 s late is silently skipped
+    ("Run time of job ... was missed"), so whole slots can vanish exactly when
+    the box is busiest. `init_scheduler` must set a real grace window, coalesce
+    and single-instance defaults for every job.
+    """
+
+    def test_cron_jobs_built_with_grace_and_coalesce(self) -> None:
+        import types
+
+        from web.db import init_db
+        from web.scheduler import init_scheduler
+
+        with tempfile.TemporaryDirectory() as td:
+            db_path = os.path.join(td, "sched.db")
+            _run_async(init_db(db_path))
+            # Pre-seed ONE far-future row so _seed_default_schedules is skipped
+            # (it only fills an EMPTY table) and no real cron can fire here.
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.execute(
+                    "INSERT INTO schedule_config (provider_name, cron_expression, "
+                    "enabled, config_file) VALUES ('probe', '0 0 1 1 *', 1, "
+                    "'examples/config-deepseek.yaml')"
+                )
+                conn.commit()
+            finally:
+                conn.close()
+            settings = types.SimpleNamespace(db_path=db_path)
+
+            async def scenario():
+                svc = await init_scheduler(settings)
+                try:
+                    jobs = [j for j in svc._scheduler.get_jobs() if j.id == "scan-probe"]
+                    self.assertEqual(1, len(jobs), "expected only the pre-seeded probe job")
+                    return jobs[0]
+                finally:
+                    await svc.shutdown()
+
+            job = _run_async(scenario())
+
+        self.assertIsNone(
+            job.misfire_grace_time,
+            "a finite grace would still drop a firing after a long stall — "
+            "the cap/guard deferral ladder is what must see it",
+        )
+        self.assertTrue(job.coalesce)
+        self.assertEqual(1, job.max_instances)
 
 
 if __name__ == "__main__":
