@@ -1705,7 +1705,7 @@ falls back to UNVERIFIED cached IPs and never rotates back to the proxy
 without re-measuring both halves. Also: the container image is python:3.12-slim
 — there is NO `curl` inside it; in-container probes must be python.
 
-**Admission control + corpus bounding (deployed 2026-09-26, `<sha>`)**: three
+**Admission control + corpus bounding (deployed 2026-09-26 20:44 CST, `22561f4`)**: three
 guards against the pile-up class, all configurable:
 * `global.max_links_per_run` (`config/schemas.py`, default **120000**, 0 =
   unlimited): `SearchStage` stops emitting links past the cap (the stage
@@ -1731,6 +1731,24 @@ reach the container stdout sink (4 h window: 7 `Scan started`, 2
 throughput/error-rate metrics AND for lifecycle, but `run_records` is the
 authoritative lifecycle source (it also covers restarts that kill a run before
 its terminal write).
+
+**Deployed 2026-09-26 20:44 CST (`22561f4`)** — the three guards above.
+Salvage first (7 live runs: nvidia 965 keys → +12 new, glm 375 → +12, glm-ai 46
+→ +15; github/kimi-ai/kimi-coding/mimo-sg had none), fnos aligned (rollback
+`rollback-20260926-2044xx`), whole-tree cp + restart, md5 MATCH for
+`config/schemas.py` / `config/loader.py` / `stage/definition.py` /
+`web/scheduler.py` / `web/runner.py`, markers present, `/health` ok, 0 rows left
+`running`. Clean-worktree suite at the deployed SHA: **837 OK / 8 skipped**.
+
+**Live proof of the admission cap (measured, 20:46 CST)**: six runs were
+triggered manually (deepseek, kimi, mimo-cn, github, qwen-cn, serpapi → 202
+each), `run_records` showed exactly 6 `running`, and the seventh trigger
+(kimi-ai) returned **HTTP 429 `concurrency cap reached (6/6 runs live) —
+deferring instead of stacking another scan`** — i.e. the DB-counted check works
+against the real schema (no fail-open) and a refused start does not leak the
+scheduler guard. The cron-side deferral path (`_run_provider_job` → one-shot
+DateTrigger) has its own observation point at the next firings (00:00-00:50 CST
+while these six are still live), plus its unit tests.
 
 ## Tests & conventions
 
