@@ -270,10 +270,17 @@ class TestLimiterDenialBudget(unittest.TestCase):
             denied = not gh._limit("github_api")
 
         self.assertTrue(denied)
-        # 3 rounds x 6.7 s crosses the 15 s deadline; never more than the cap.
+        # 3 rounds x 6.7 s crosses the 15 s deadline; never more than the cap,
+        # and the worst case must stay inside BasePipelineStage.stop's 30 s
+        # budget (split across workers) or a stop would log zombie threads.
         self.assertEqual(3, len(limiter.waits))
         self.assertLessEqual(len(limiter.waits), client._LIMIT_WAIT_MAX_ROUNDS)
         self.assertEqual(3, sleep.call_count)
+        self.assertLess(sum(limiter.waits), 30.0)
+        self.assertLess(
+            sum(limiter.waits),
+            client._LIMIT_WAIT_DEADLINE_SECONDS + limiter.wait_time_value,
+        )
 
     def test_zero_wait_window_still_waits_through_the_floor(self) -> None:
         # The token-steal race: wait_time() reads 0 while acquire() fails. The
