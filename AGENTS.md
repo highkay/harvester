@@ -1505,13 +1505,57 @@ restart (pre = 15 stalled runs, post = 1 fixed run): `SOCKSHTTPSConnectionPool`
 fetches show up as `HTTPSConnectionPool … read timeout=20.0` (direct + floored),
 and kimi-coding's `links.txt` went 465 → 3,500+ in ~12 min.
 
-**Log-probe trap (cost the first metric read)**: any in-container `python`
-invocation re-initialises the logger — it **archives/deletes the module logs**
-(`logs/<module>.log`) and rotates `main.log` out from under the running app,
-so post-probe `grep /app/logs` can report an empty window. Read verification
-metrics from `docker compose logs --since …` on the HOST (stdout carries every
-record, timestamps and all) and filter by timestamp; the module log files are
-for tail-time forensics only.
+**Log-probe trap (cost the first metric read, verified at fd level)**: any
+in-container `python` invocation re-initialises the logger, and
+`constant/system.py:23 DEFAULT_LOG_CLEANUP_DELETE = True` (a compile-time
+constant, not env-toggleable) makes that initialisation **DELETE** every
+`logs/<module>.log` it has not seen yet AND `_delete_existing_logs()` wipes
+`main.log`. The previously-running app keeps writing to the now **unlinked
+inodes** (`ls -l /proc/1/fd | grep -i log` → `… log (deleted)`), so:
+
+- an empty or stale `/app/logs` after an in-container python probe means the
+  sink was destroyed — **NEVER** "no activity"; every recipe below that greps
+  `/app/logs` (manager.log `Recovered N unique links`, the zero-yield ERROR
+  line, retry.log failure mix) reads empty until the next process start;
+- the correct probe shape is `docker compose exec -T harvester-web sh -c 'grep …'`
+  or host-side python; `docker compose logs --since … | grep` on the HOST is the
+  only sink that survives a probe (stdout carries every record);
+- dead inodes keep consuming disk invisibly to `ls`, so a probe-heavy day is
+  also a disk-leak day.
+
+**Verification after the 2026-09-25→26 chain (log rotation chain 09-25 15:39 → 09-26 09:35, ≈18 h)**:
+`raw.githubusercontent.com` SOCKS failures **0** (was 325k/28 h); the only
+residual SOCKS failures are on proxied legs — `api.github.com` 1,092 (~84/h,
+was ~1,200-1,400/h), `integrate.api.nvidia.com` 355, `api.tavily.com` 1;
+`Proxy failover` fired 508 times (152/152/149 in each direction — all three
+exits have bad patches, the rotation keeps traffic moving); direct raw fetches
+log 21,068 `read timeout=20.0` retries (~2.7 % of ~770k link fetches, retried);
+`[gather] error` fell ~27x; `search completed` 13,328 in ≈18 h (~740/h, was 2-20/h cluster-wide);
+zero-yield tripwire lines 0. Runs now complete end-to-end with real corpora
+(openrouter 76 min / 18.8k links / 59 valid, agnes 71 min, modelscope 306 min,
+ollama 180 min, serpapi 269 min / 240 valid, tavily 23.4 h / 146.7k links / 505
+valid, deepseek 28.3 h / 336k links), and `push_logs` added **+70 net-new keys**
+since 09-25 (tavily +30, serpapi +25, openrouter +8 …).
+
+**Residuals this verification exposed (recorded, not fixed)**:
+1. `request()` counts ANY HTTP status as "the exit works" before
+   `raise_for_status`, so an exit that answers 403/429-to-everything resets the
+   failover streak and can never be rotated away — diagnosing that flavour
+   again needs the per-node `SOCKS5 CONNECT` census, because the streak counter
+   will read zero.
+2. **Silent no-op runs**: when every GitHub token is cooling (or the
+   `github_api` bucket is exhausted) search tasks are requeued 3× and then
+   dropped, so a run can "complete" with 0 links and no `error_message` —
+   measured on the 2026-09-26 08:00 openrouter run (54.5 s, 0 links) while
+   `credential.py:150` was logging "all token credentials are cooling down,
+   pause search for 16-39 s" (16,919 cooling/cooldown lines in ≈18 h). The
+   zero-yield tripwire cannot see it (it requires >1000 links).
+3. Search now works, so per-run corpora ballooned to 80k-146k links
+   (deepseek 336k) and heavy runs take 14-28 h; they then collide with the next
+   day's chain — `already running — skipping` measured for github (09-25 12:50,
+   09-26 00:50, 06:50) and deepseek (09-26 02:00). The GitHub code-search quota
+   (10 req/min per token × 7 tokens, secondary-limit cooldowns on top) is the
+   new cluster-wide ceiling.
 
 ## Tests & conventions
 
