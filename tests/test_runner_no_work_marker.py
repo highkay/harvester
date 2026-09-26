@@ -13,6 +13,7 @@ nothing at all. This marker records the reason (status stays 'completed').
 
 from __future__ import annotations
 
+import types
 import unittest
 
 from web.runner import PipelineRunner
@@ -49,6 +50,38 @@ class TestNoWorkMarker(unittest.TestCase):
                         "p", "r", links, materials, valid
                     )
                 )
+
+    def test_stage_counters_are_quoted_when_available(self) -> None:
+        app = types.SimpleNamespace(
+            task_manager=types.SimpleNamespace(
+                pipeline=types.SimpleNamespace(
+                    stages={
+                        "search": types.SimpleNamespace(
+                            get_stats=lambda: types.SimpleNamespace(
+                                tasks=types.SimpleNamespace(completed=0, failed=3)
+                            )
+                        )
+                    }
+                )
+            )
+        )
+
+        with self.assertLogs("web.runner", level="ERROR"):
+            message = self.runner._no_work_degradation(
+                "openrouter", "run-1", 0, 0, 0, app
+            )
+
+        self.assertIsNotNone(message)
+        assert message is not None
+        self.assertIn("search_failed=3", message)
+
+    def test_faulty_app_degrades_to_unavailable_counters(self) -> None:
+        with self.assertLogs("web.runner", level="ERROR"):
+            message = self.runner._no_work_degradation(
+                "p", "r", 0, 0, 0, object()
+            )
+        assert message is not None
+        self.assertIn("stage counters unavailable", message)
 
     def test_unavailable_stats_are_not_flagged(self) -> None:
         # links/materials are None when the pipeline stats could not be read —

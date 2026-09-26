@@ -15,11 +15,12 @@ import time
 import traceback
 import urllib.parse
 from email.utils import parsedate_to_datetime
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 import requests
 from requests.adapters import HTTPAdapter
 
+from core.exceptions import RateLimiterDeniedError
 from core.models import Service
 from tools.logger import get_logger
 from tools.patterns import redact_api_keys_in_text
@@ -87,17 +88,28 @@ _POOL_MAXSIZE = 64
 _PROXY_FAILOVER_THRESHOLD = 3
 
 # Bounded wait before a rate-limiter denial (see GitHubClient._limit): the
-# github_api bucket is process-wide and the daily chain overlaps 7 scans, so a
-# single re-acquire can lose the refilled token to a sibling thread.
-_LIMIT_MAX_WAIT_ROUNDS = 6
-_LIMIT_MAX_WAIT_SECONDS = 120.0
+# github_api bucket is process-wide (the daily chain overlaps up to 7 scans on
+# it) and the token-steal race makes a single re-acquire useless — the bucket
+# refills, a sibling thread takes the token, wait_time() then reads ~0 while
+# acquire() fails. Wait until a total DEADLINE, with a per-round floor, and
+# keep a round cap only as a runaway guard. The deadline is capped at 15 s so a
+# stop request (BasePipelineStage.stop splits its 30 s budget across workers)
+# cannot be held hostage by a sleeping worker for much longer than that; three
+# attempts still give ~45 s of patience per task.
+_LIMIT_WAIT_DEADLINE_SECONDS = 15.0
+_LIMIT_WAIT_ROUND_FLOOR = 0.5
+_LIMIT_WAIT_MAX_ROUNDS = 64
 
 # 403/429 answers keep the transport streak "healthy" by design (the exit
 # answered), so an exit that blocks everything can never be rotated away — the
 # measured Cloudflare-edge / per-IP "blocked due to excessive requests"
-# flavours. Count the streak and warn once per streak instead.
+# flavours. Count the streak and warn once per streak instead — but only when
+# the answer carries NO upstream rate-limit headers, because api.github.com
+# advertises `x-ratelimit-*` even on 403 (see search/github/transport.py) and
+# that flavour is routine token/quota state, not exit health.
 _PROXY_DEGRADED_STATUSES = frozenset({403, 429})
 _PROXY_DEGRADED_WARN_THRESHOLD = 25
+_RATE_LIMIT_HEADER_PREFIXES = ("x-ratelimit", "retry-after")
 
 
 def _new_session(proxy: str = "") -> requests.Session:
@@ -246,8 +258,25 @@ def get_egress_state() -> Dict[str, Any]:
         }
 
 
-def _note_proxy_status(status: int) -> None:
-    """Count consecutive 403/429 answers on the proxied session; warn once.
+def _has_rate_limit_headers(headers: Optional[Mapping[str, str]]) -> bool:
+    """True when a 403/429 carries upstream rate-limit headers.
+
+    Quota/token state must not feed the degraded streak: api.github.com
+    advertises ``x-ratelimit-*`` even on a 403 (unlike a Cloudflare-style edge
+    block), and tavily answers 429 with ``retry-after``. Counting those would
+    warn during every routine secondary-rate-limit storm — and then be ignored
+    when an exit really is blocking everything.
+    """
+    if not headers:
+        return False
+    for name in headers:
+        if str(name).lower().startswith(_RATE_LIMIT_HEADER_PREFIXES):
+            return True
+    return False
+
+
+def _note_proxy_status(status: int, headers: Optional[Mapping[str, str]] = None) -> None:
+    """Count consecutive UNEXPLAINED 403/429 answers on the proxied session.
 
     Such an exit is "alive" as far as the transport failover is concerned (any
     HTTP answer resets that streak, by design — a busy exit must not be
@@ -255,14 +284,15 @@ def _note_proxy_status(status: int) -> None:
     state: Cloudflare-edge blocks and per-IP ``blocked due to excessive
     requests`` 429s, which answer identically for good and dead keys. The
     streak makes a search-side collapse explainable instead of mysterious;
-    ``get_egress_state()['degraded_streak']`` exposes it to probes.
+    ``get_egress_state()['degraded_streak']`` exposes it to probes. A 403/429
+    WITH rate-limit headers resets the streak (quota state, not exit state).
     """
     global _proxy_degraded_streak, _proxy_degraded_warned
 
     fire = False
     streak = 0
     with _proxy_lock:
-        if status in _PROXY_DEGRADED_STATUSES:
+        if status in _PROXY_DEGRADED_STATUSES and not _has_rate_limit_headers(headers):
             _proxy_degraded_streak += 1
             streak = _proxy_degraded_streak
             if streak >= _PROXY_DEGRADED_WARN_THRESHOLD and not _proxy_degraded_warned:
@@ -502,7 +532,7 @@ def request(method: str, url: str, timeout: float = 10, use_proxy: bool = True, 
 
     if proxied:
         _note_proxy_transport(True)
-        _note_proxy_status(response.status_code)
+        _note_proxy_status(response.status_code, response.headers)
     response.raise_for_status()
     return response
 
@@ -626,19 +656,21 @@ class GitHubClient:
         bucket = self.limiter._get_bucket(bucket_name)
         max_value = bucket.burst if bucket else "unknown"
         waited = 0.0
-        for _ in range(_LIMIT_MAX_WAIT_ROUNDS):
+        rounds = 0
+        while rounds < _LIMIT_WAIT_MAX_ROUNDS:
             wait = self.limiter.wait_time(bucket_name)
-            if wait <= 0:
-                wait = 0.1
+            if wait < _LIMIT_WAIT_ROUND_FLOOR:
+                wait = _LIMIT_WAIT_ROUND_FLOOR
             if waited == 0.0:
                 logger.info(
                     f"Rate limit hit for {label}, waiting {wait:.2f}s, max: {max_value}"
                 )
             time.sleep(wait)
             waited += wait
+            rounds += 1
             if self.limiter.acquire(bucket_name):
                 return True
-            if waited >= _LIMIT_MAX_WAIT_SECONDS:
+            if waited >= _LIMIT_WAIT_DEADLINE_SECONDS:
                 break
 
         # INFO, not WARNING: the single warning for a denial is emitted by the
@@ -737,7 +769,7 @@ class GitHubClient:
             # treats ConnectionError — and the "rate limit" marker in the
             # message — as retryable) so the stage requeues the fetch.
             logger.warning(f"Rate limiter denied request for {service} (no token after wait)")
-            raise ConnectionError(f"rate limiter denied for {service}")
+            raise RateLimiterDeniedError(f"rate limiter denied for {service}")
 
         content, response_headers, status = self._http_get(
             url, headers, params, retries, interval, timeout, return_status=True

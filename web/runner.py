@@ -378,7 +378,7 @@ class PipelineRunner:
             )
             if degradation is None:
                 degradation = self._no_work_degradation(
-                    provider_name, run_id, links_total, materials_total, valid_keys
+                    provider_name, run_id, links_total, materials_total, valid_keys, app
                 )
 
             # 5. Update DB — completed. Conditional on the row still being
@@ -1011,6 +1011,25 @@ class PipelineRunner:
         logger.error(message)
         return message
 
+    def _stage_error_snapshot(self, app: Any) -> dict[str, int]:
+        """Per-stage task counters of THIS run (enrichment only, {} on failure).
+
+        Each Pipeline is per-run, so ``pipeline.stages['search']`` describes
+        this scan's search leg: ``completed`` counts attempts that returned,
+        ``failed`` every attempt that died — including the limiter denials that
+        produced the historical silent no-op run.
+        """
+        try:
+            stages = app.task_manager.pipeline.stages
+            snapshot: dict[str, int] = {}
+            for name, stage in (stages or {}).items():
+                metrics = stage.get_stats()
+                snapshot[f"{name}_completed"] = int(metrics.tasks.completed)
+                snapshot[f"{name}_failed"] = int(metrics.tasks.failed)
+            return snapshot
+        except Exception:
+            return {}
+
     def _no_work_degradation(
         self,
         provider_name: str,
@@ -1018,6 +1037,7 @@ class PipelineRunner:
         links_total: int | None,
         materials_total: int | None,
         valid_keys: int,
+        app: Any = None,
     ) -> str | None:
         """Marker for a 'completed' run that did NO work at all, or None.
 
@@ -1033,11 +1053,15 @@ class PipelineRunner:
         """
         if links_total != 0 or materials_total != 0 or valid_keys:
             return None
+        counters = self._stage_error_snapshot(app) if app is not None else {}
+        if counters:
+            detail = " ".join(f"{k}={v}" for k, v in sorted(counters.items()))
+        else:
+            detail = "stage counters unavailable"
         message = (
             f"no-work run: provider={provider_name} run_id={run_id} "
             f"links_total=0 materials_total=0 valid_keys=0 — the search stage "
-            f"produced nothing (credential cooldown, rate-limiter denial, or "
-            f"genuinely empty dorks); look for 'task dropped' lines in the "
+            f"produced nothing ({detail}); look for 'task dropped' lines in the "
             f"stage log"
         )
         logger.error(message)

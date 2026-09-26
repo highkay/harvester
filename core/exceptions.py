@@ -37,6 +37,22 @@ class NetworkError(BaseError):
         super().__init__(message=message, reason=reason, **kwargs)
 
 
+class RateLimiterDeniedError(ConnectionError):
+    """A request was dropped by OUR OWN process-wide rate limiter.
+
+    Raised by ``search/client.py::GitHubClient.get_with_headers`` when the
+    shared ``github_api`` bucket starves a request past its bounded wait. The
+    bucket is one process-wide template (per-credential keys) that the daily
+    chain's overlapping scans all draw from, so a denial is self-inflicted
+    concurrency, not an upstream fault — the distinct TYPE lets the stage layer
+    log it at WARNING without string-matching the message.
+
+    Subclasses ``ConnectionError`` deliberately: every existing retry predicate
+    (``RetryCore.should_retry_error``) treats ConnectionError as retryable, and
+    the stage retry machinery must keep requeueing these.
+    """
+
+
 class ValidationError(BaseError):
     """Input validation errors"""
 

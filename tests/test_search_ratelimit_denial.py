@@ -7,9 +7,12 @@ with ``("", {})`` at DEBUG level, so a denied first search page was
 indistinguishable from a genuinely empty dork: ``SearchStage`` gated its
 pagination/refinement on ``total > 0`` and silently dropped the whole dork
 (its 10-page tail + its refinement branch) with an INFO line identical to a
-real empty result. ``_limit`` really can deny — it sleeps, re-acquires, and a
-competing search thread can take the refilled token (prod: github_api
-base_rate 0.15 / burst 3 per credential, 6-8 concurrent search threads).
+real empty result. ``_limit`` really can deny — it now waits in bounded rounds
+until a total deadline (`_LIMIT_WAIT_DEADLINE_SECONDS`), because a single
+re-acquire can lose the refilled token to a competing search thread (prod:
+github_api base_rate 0.15 / burst 3 per credential, 6-8 concurrent search
+threads), and the token-steal race makes ``wait_time()`` read ~0 while
+``acquire()`` still fails.
 
 Now the denial raises retryable ``ConnectionError`` at WARNING, an unparseable
 (non-JSON) search body raises too, and only a well-formed ``total_count == 0``
@@ -34,10 +37,16 @@ _API_URL = "https://api.github.com/search/code?q=test&per_page=100&page=1"
 
 
 def _denying_limiter() -> mock.MagicMock:
-    """Limiter whose immediate acquire fails and offers no wait window -> _limit denies."""
+    """Limiter whose acquire always fails; wait window is a realistic 6.7 s.
+
+    Prod github_api base_rate is 0.15/s per credential bucket, so one token is
+    ~6.7 s away — the fixture must model that, not a 0.0 window (with the
+    per-round floor a 0.0 window would just spin the floor down to the
+    deadline). Tests must patch ``time.sleep``: the bounded wait is real time.
+    """
     limiter = mock.MagicMock()
     limiter.acquire.return_value = False
-    limiter.wait_time.return_value = 0.0
+    limiter.wait_time.return_value = 6.7
     return limiter
 
 
@@ -56,7 +65,9 @@ class TestRateLimiterDenialRaises(unittest.TestCase):
         # Given a client whose rate limiter denies the token
         gh = GitHubClient(limiter=_denying_limiter())
         quota, cache = _no_transport_globals()
-        with quota, cache, mock.patch.object(gh, "_http_get") as http_get:
+        with quota, cache, mock.patch.object(client.time, "sleep"), mock.patch.object(
+            gh, "_http_get"
+        ) as http_get:
             # When a rate-limited request is attempted
             with self.assertRaises(ConnectionError) as ctx:
                 gh.get_with_headers(url=_API_URL, credential="tok")
@@ -69,9 +80,9 @@ class TestRateLimiterDenialRaises(unittest.TestCase):
     def test_denial_logs_warning_not_debug(self):
         gh = GitHubClient(limiter=_denying_limiter())
         quota, cache = _no_transport_globals()
-        with quota, cache, mock.patch.object(client.logger, "warning") as warn, mock.patch.object(
-            client.logger, "debug"
-        ) as debug:
+        with quota, cache, mock.patch.object(client.time, "sleep"), mock.patch.object(
+            client.logger, "warning"
+        ) as warn, mock.patch.object(client.logger, "debug") as debug:
             with self.assertRaises(ConnectionError):
                 gh.get_with_headers(url=_API_URL, credential="tok")
 
@@ -86,7 +97,9 @@ class TestSearchApiFailureModes(unittest.TestCase):
     def test_denial_propagates_through_search_api(self):
         gh = GitHubClient(limiter=_denying_limiter())
         quota, cache = _no_transport_globals()
-        with quota, cache, mock.patch.object(client, "get_github_client", return_value=gh):
+        with quota, cache, mock.patch.object(client.time, "sleep"), mock.patch.object(
+            client, "get_github_client", return_value=gh
+        ):
             with self.assertRaises(ConnectionError):
                 client.search_api_with_count(query="q", token="tok", page=1)
 

@@ -28,6 +28,7 @@ from typing import (
 from config.schemas import Config, StageConfig, TaskConfig
 from constant.system import DEFAULT_SHUTDOWN_TIMEOUT
 from core.enums import PipelineStage
+from core.exceptions import RateLimiterDeniedError
 from core.metrics import StageMetrics
 from core.models import ProviderTask
 from core.types import IAuthProvider, IProvider
@@ -522,13 +523,14 @@ class BasePipelineStage(ABC, WorkerManageable):
     def _error_log_level(error: Exception) -> int:
         """Log level for a task error: expected/self-inflicted → WARNING.
 
-        ``rate limiter denied`` is raised by search/client.py when the
+        ``RateLimiterDeniedError`` is raised by search/client.py when the
         process-wide ``github_api`` bucket starves a request — 7 overlapping
         scans share it and each denial already costs a bounded wait — so it is
         our own concurrency, not an upstream fault, and at ERROR level it was a
-        large share of the 50 MB/6 h log volume.
+        large share of the 50 MB/6 h log volume. Typed (not string-matched) so
+        the HTTP-429/5xx/transport ConnectionErrors keep their ERROR level.
         """
-        if "rate limiter denied" in str(error):
+        if isinstance(error, RateLimiterDeniedError):
             return logging.WARNING
         return logging.ERROR
 

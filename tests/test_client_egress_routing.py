@@ -209,11 +209,16 @@ class TestProxyFailover(unittest.TestCase):
 
 
 class _FakeLimiter:
-    """Minimal RateLimiter stand-in for GitHubClient._limit."""
+    """Minimal RateLimiter stand-in for GitHubClient._limit.
 
-    def __init__(self, grants_on_call: int | None):
+    Default wait window 6.7 s models prod (github_api base_rate 0.15/s per
+    credential bucket — one token is ~6.7 s away).
+    """
+
+    def __init__(self, grants_on_call: int | None, wait_time: float = 6.7):
         self.calls = 0
         self.grants_on_call = grants_on_call
+        self.wait_time_value = wait_time
         self.waits: list[float] = []
 
     def acquire(self, service: str, tokens: int = 1) -> bool:
@@ -221,19 +226,21 @@ class _FakeLimiter:
         return self.grants_on_call is not None and self.calls >= self.grants_on_call
 
     def wait_time(self, service: str, tokens: int = 1) -> float:
-        self.waits.append(0.01)
-        return 0.01
+        self.waits.append(self.wait_time_value)
+        return self.wait_time_value
 
     def _get_bucket(self, service: str):
         return None
 
 
 class TestLimiterDenialBudget(unittest.TestCase):
-    """The process-wide github_api bucket must be waited on, not one-shot denied.
+    """The process-wide github_api bucket must be waited on until a DEADLINE.
 
     Measured 2026-09-26 08:00: the openrouter run (ONE condition) lost its only
-    search task to three consecutive one-shot denials and "completed" with
-    0 links; a denial must now follow bounded waiting.
+    search task to limiter denials and "completed" with 0 links. A single
+    re-acquire was useless — the token-steal race makes ``wait_time()`` read ~0
+    while ``acquire()`` still fails — so the loop waits until a total deadline
+    with a per-round floor, and a round cap as a runaway guard only.
     """
 
     def test_immediate_grant_does_not_wait(self) -> None:
@@ -243,45 +250,81 @@ class TestLimiterDenialBudget(unittest.TestCase):
         self.assertTrue(gh._limit("github_api"))
         self.assertEqual([], limiter.waits)
 
-    def test_grant_after_a_wait_succeeds(self) -> None:
+    def test_grant_during_the_wait_succeeds(self) -> None:
         limiter = _FakeLimiter(grants_on_call=3)
         gh = client.GitHubClient(limiter=cast(Any, limiter))
 
         with mock.patch.object(client.time, "sleep"):
             self.assertTrue(gh._limit("github_api"))
 
-        self.assertLessEqual(len(limiter.waits), client._LIMIT_MAX_WAIT_ROUNDS)
+        self.assertEqual(2, len(limiter.waits))
+        self.assertLessEqual(
+            sum(limiter.waits), client._LIMIT_WAIT_DEADLINE_SECONDS + limiter.wait_time_value
+        )
 
-    def test_exhausted_wait_denies_after_bounded_rounds(self) -> None:
+    def test_exhausted_wait_denies_after_the_deadline(self) -> None:
         limiter = _FakeLimiter(grants_on_call=None)
         gh = client.GitHubClient(limiter=cast(Any, limiter))
 
-        with mock.patch.object(client.time, "sleep"), self.assertLogs("search", level="INFO") as logs:
+        with mock.patch.object(client.time, "sleep") as sleep:
+            denied = not gh._limit("github_api")
+
+        self.assertTrue(denied)
+        # 3 rounds x 6.7 s crosses the 15 s deadline; never more than the cap.
+        self.assertEqual(3, len(limiter.waits))
+        self.assertLessEqual(len(limiter.waits), client._LIMIT_WAIT_MAX_ROUNDS)
+        self.assertEqual(3, sleep.call_count)
+
+    def test_zero_wait_window_still_waits_through_the_floor(self) -> None:
+        # The token-steal race: wait_time() reads 0 while acquire() fails. The
+        # per-round floor must keep the loop waiting instead of denying after a
+        # few 0.1 s rounds — the defect that made a round-counted loop a no-op.
+        limiter = _FakeLimiter(grants_on_call=None, wait_time=0.0)
+        gh = client.GitHubClient(limiter=cast(Any, limiter))
+
+        with mock.patch.object(client.time, "sleep") as sleep:
             self.assertFalse(gh._limit("github_api"))
 
-        self.assertEqual(client._LIMIT_MAX_WAIT_ROUNDS, len(limiter.waits))
-        self.assertTrue(
-            any("wait exhausted" in r.getMessage() for r in logs.records)
+        self.assertGreaterEqual(
+            sleep.call_count,
+            int(client._LIMIT_WAIT_DEADLINE_SECONDS / client._LIMIT_WAIT_ROUND_FLOOR) - 1,
         )
-        # The denial WARNING itself is emitted once, by get_with_headers.
-        self.assertFalse(any(r.levelname == "WARNING" for r in logs.records))
+        self.assertTrue(
+            all(call.args[0] >= client._LIMIT_WAIT_ROUND_FLOOR for call in sleep.call_args_list)
+        )
 
     def test_no_limiter_configured_allows_everything(self) -> None:
         self.assertTrue(client.GitHubClient(limiter=None)._limit("github_api"))
 
 
 class TestDegradedExitVisibility(unittest.TestCase):
-    """403/429 answers reset the transport streak, so surface them separately."""
+    """403/429 answers reset the transport streak, so surface them separately.
+
+    Driven through ``request()`` — the gating lives in its ``proxied`` branch,
+    so calling the recorder directly would not catch a regression that moved
+    the call out of that branch.
+    """
 
     def tearDown(self) -> None:
         client.set_proxy("")
 
-    def test_repeated_degraded_answers_warn_once_and_reset_on_health(self) -> None:
+    def _drive(self, url: str, response) -> None:
+        session = mock.MagicMock()
+        session.request.return_value = response
+        with mock.patch.object(client, "_HTTP_SESSION", session), mock.patch.object(
+            client, "_DIRECT_SESSION", mock.MagicMock()
+        ):
+            try:
+                client.request("GET", url)
+            except requests.exceptions.HTTPError:
+                pass  # raise_for_status fires after the status was recorded
+
+    def test_unexplained_degraded_answers_warn_once_and_reset_on_health(self) -> None:
         client.set_proxy("socks5://10.0.0.1:1080")
 
         with self.assertLogs("search", level="WARNING") as logs:
             for _ in range(client._PROXY_DEGRADED_WARN_THRESHOLD):
-                client._note_proxy_status(429)
+                self._drive(API_URL, _FakeResponse(status_code=429))
 
         state = client.get_egress_state()
         self.assertEqual(state["degraded_streak"], client._PROXY_DEGRADED_WARN_THRESHOLD)
@@ -290,14 +333,28 @@ class TestDegradedExitVisibility(unittest.TestCase):
             1, sum(1 for r in logs.records if "degraded responses" in r.getMessage())
         )
 
-        client._note_proxy_status(200)
+        self._drive(API_URL, _FakeResponse(status_code=200))
         self.assertEqual(0, client.get_egress_state()["degraded_streak"])
 
-    def test_direct_session_status_never_counted(self) -> None:
-        # only proxied answers are tallied; a direct raw 4xx must not move it
+    def test_rate_limit_headers_do_not_count_as_degraded(self) -> None:
+        # api.github.com advertises x-ratelimit-* even on 403 — that is quota
+        # state, not exit health, and must not cry wolf.
         client.set_proxy("socks5://10.0.0.1:1080")
-        client._note_proxy_status(403)
-        self.assertEqual(1, client.get_egress_state()["degraded_streak"])
+        response = _FakeResponse(status_code=403)
+        response.headers = {"x-ratelimit-remaining": "0", "retry-after": "60"}
+
+        self._drive(API_URL, response)
+
+        self.assertEqual(0, client.get_egress_state()["degraded_streak"])
+
+    def test_direct_host_status_is_not_counted(self) -> None:
+        # raw.githubusercontent.com is never proxied; its 403s are routine and
+        # must not feed the exit-health signal.
+        client.set_proxy("socks5://10.0.0.1:1080")
+
+        self._drive(RAW_URL, _FakeResponse(status_code=403))
+
+        self.assertEqual(0, client.get_egress_state()["degraded_streak"])
 
 
 if __name__ == "__main__":

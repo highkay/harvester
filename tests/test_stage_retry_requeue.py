@@ -28,7 +28,7 @@ from unittest import mock
 
 from config.schemas import StageConfig, TaskConfig
 from core.enums import PipelineStage
-from core.exceptions import NetworkError
+from core.exceptions import NetworkError, RateLimiterDeniedError
 from core.models import (
     AcquisitionTask,
     CheckResult,
@@ -362,7 +362,7 @@ class TestTerminalDropIsLogged(unittest.TestCase):
         with mock.patch.object(
             client,
             "search_with_count",
-            side_effect=ConnectionError("rate limiter denied for github_api"),
+            side_effect=RateLimiterDeniedError("rate limiter denied for github_api"),
         ):
             with self.assertLogs("stage", level="WARNING") as logs:
                 with self.assertRaises(ConnectionError):
@@ -371,6 +371,22 @@ class TestTerminalDropIsLogged(unittest.TestCase):
         levels = {r.levelname for r in logs.records}
         self.assertIn("WARNING", levels)
         self.assertNotIn("ERROR", levels)
+
+    def test_same_message_without_the_type_still_logs_at_error(self):
+        # The level must key off the TYPE, not the message text: an identical
+        # string from any other ConnectionError (HTTP 429/5xx/transport) is an
+        # upstream fault and keeps ERROR.
+        stage = SearchStage(_resources(), handler=lambda _o: None)
+        with mock.patch.object(
+            client,
+            "search_with_count",
+            side_effect=ConnectionError("rate limiter denied for github_api"),
+        ):
+            with self.assertLogs("stage", level="ERROR") as logs:
+                with self.assertRaises(ConnectionError):
+                    stage.process_task(_search_task())
+
+        self.assertTrue(any(r.levelname == "ERROR" for r in logs.records))
 
     def test_transport_failure_still_logs_at_error(self):
         stage = SearchStage(_resources(), handler=lambda _o: None)
