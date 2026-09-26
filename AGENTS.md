@@ -1523,6 +1523,15 @@ inodes** (`ls -l /proc/1/fd | grep -i log` → `… log (deleted)`), so:
 - dead inodes keep consuming disk invisibly to `ls`, so a probe-heavy day is
   also a disk-leak day.
 
+**The sink partially self-heals — do NOT restart just for it**:
+`SafeRotatingFileHandler` reopens the path on the next rollover and
+high-volume handlers reopen on emit, so `main.log` / `stage.log` / `state.log` /
+`web.push.log` come back on their own within one rotation (verified 09-26:
+`main.log` rolled at 09:14 and keeps carrying every record; only low-volume
+modules — storage/tools/web.app/web.runner/web.scheduler — keep deleted fds
+until the next process start). A restart to "restore file logging" kills every
+live scan and forces another salvage round, for a cosmetic gain.
+
 **Verification after the 2026-09-25→26 chain (log rotation chain 09-25 15:39 → 09-26 09:35, ≈18 h)**:
 `raw.githubusercontent.com` SOCKS failures **0** (was 325k/28 h); the only
 residual SOCKS failures are on proxied legs — `api.github.com` 1,092 (~84/h,
@@ -1541,21 +1550,74 @@ since 09-25 (tavily +30, serpapi +25, openrouter +8 …).
 1. `request()` counts ANY HTTP status as "the exit works" before
    `raise_for_status`, so an exit that answers 403/429-to-everything resets the
    failover streak and can never be rotated away — diagnosing that flavour
-   again needs the per-node `SOCKS5 CONNECT` census, because the streak counter
-   will read zero.
-2. **Silent no-op runs**: when every GitHub token is cooling (or the
-   `github_api` bucket is exhausted) search tasks are requeued 3× and then
-   dropped, so a run can "complete" with 0 links and no `error_message` —
-   measured on the 2026-09-26 08:00 openrouter run (54.5 s, 0 links) while
-   `credential.py:150` was logging "all token credentials are cooling down,
-   pause search for 16-39 s" (16,919 cooling/cooldown lines in ≈18 h). The
-   zero-yield tripwire cannot see it (it requires >1000 links).
+   again needs the per-node `SOCKS5 CONNECT` census, because the transport
+   streak counter will read zero. **Guard added 2026-09-26 (`18b1d84`)**:
+   `_note_proxy_status()` counts the consecutive *degraded* (403/429) streak,
+   warns once at `>= _PROXY_DEGRADED_WARN_THRESHOLD` (25) and exposes
+   `get_egress_state()['degraded_streak']`; rotation is deliberately unchanged
+   (a 403/429 from `api.github.com` is usually token/quota state, not exit
+   state).
+2. **Silent no-op runs — root-caused and guarded 2026-09-26 (`18b1d84`)**.
+   Mechanism VERIFIED from logs+code (the earlier "credential cooldown" reading
+   was wrong — `tools/credential.py::_get_available` *waits*, it cannot hand the
+   stage a None token): the 08:00 openrouter run had **ONE condition**, so one
+   SearchTask was the whole run; the task was denied by the **process-wide
+   `github_api` limiter** (`client.py` "Rate limiter denied request for
+   github_api (no token after wait)"; 7 overlapping scans share that bucket) on
+   all three attempts, `retry_policy.should_retry(3, e)` returned False, and the
+   task was dropped with **no log line at all** — `put_task`'s
+   "discarded, max retries" warning covers only the dedup path
+   (`grep -c` = 0 in the run's window, and `stage/base.py:247` was never
+   reached). The run then "completed" 54.5 s after start with links=0 /
+   materials=0 / `error_message` NULL. Three guards:
+   * `stage/base.py::_worker_loop` logs the terminal drop at WARNING
+     (`task dropped after N attempt(s), retry budget exhausted: …`);
+   * `GitHubClient._limit` waits in bounded rounds (≤ `_LIMIT_MAX_WAIT_ROUNDS`
+     = 6, ≤ `_LIMIT_MAX_WAIT_SECONDS` = 120 s) before denying, and the
+     stage-side logs for that marker drop to WARNING (they were a large share of
+     the 50 MB/6 h volume);
+   * `web/runner.py::_no_work_degradation` records a
+     `no-work run: …` marker in `run_records.error_message` for completed runs
+     with links=0 / materials=0 / valid_keys=0 (the zero-yield tripwire needs
+     >1000 links and cannot see this class).
 3. Search now works, so per-run corpora ballooned to 80k-146k links
    (deepseek 336k) and heavy runs take 14-28 h; they then collide with the next
    day's chain — `already running — skipping` measured for github (09-25 12:50,
    09-26 00:50, 06:50) and deepseek (09-26 02:00). The GitHub code-search quota
    (10 req/min per token × 7 tokens, secondary-limit cooldowns on top) is the
    new cluster-wide ceiling.
+
+**Framing after the fix (2026-09-26)**: with search working, per-run corpora
+ballooned (openrouter 18.8k, modelscope 35.4k, glm 119k, tavily 146.7k,
+deepseek 336k links) and 14-28 h runtimes are *legitimate work*, not stalls —
+22 runs completed 09-25→26 with real yields (tavily 505, serpapi 240,
+openrouter 59, modelscope 59, ollama 40, agnes-ai 38 valid keys; glm / glm-ai /
+kimi-ai 0 valid is EXPECTED under the flash-only policy, not a regression).
+`run_records.started_at` is UTC while cron/logs are CST (+8): the 09-26 morning
+"7 running rows" were nvidia 11:50 (09-25, ~22 h), github 18:50 (~15 h),
+groq 09-26 01:00, kimi 04:00, mimo-cn 06:00, qwen-cn 07:00, tavily 09:00 —
+all progressing (links/material deltas measured), none stalled. The binding
+constraint is corpus volume × concurrency: overlapping runs collide with the
+next chain tick (`already running — skipping`: github 09-25 12:50, 09-26 00:50,
+06:50; deepseek 09-26 02:00), so the durable lever is bounding work per run
+(`max_pages` / per-run link caps) rather than more egress work. Watch the
+documented pattern tripwires too: kimi-coding spent 16.6 h for 73 materials /
+1 valid from 84,635 links — that is the "near-zero candidates at the check
+stage" signal (widen back off `sk-kimi-` and re-measure before trusting the
+narrowing). The GitHub code-search budget (7 tokens × 10 req/min + secondary
+rate-limit cooldowns; 16,919 all-tokens-cooling pauses in ≈18 h) is the
+search-leg ceiling and cannot grow while the `github` self-bootstrap run
+produces no new tokens.
+
+**Deployed 2026-09-26 10:23 CST (`18b1d84`)**: salvage first (the 7 live runs'
+files: nvidia 1,057 keys → already pooled, agnes-ai 54 → +30, tavily 285 → +3;
+github/groq/kimi/mimo-cn/qwen-cn had no keys), fnos aligned (rollback
+`rollback-20260926-1022xx`, 0 local-only commits), whole-tree cp, restart;
+md5 host↔container MATCH, all three marker groups present
+(`client.py` 4 / `base.py` 1 / `runner.py` 2), `/health` ok, the 7 `running`
+rows reconciled to `failed: interrupted by service restart` (0 running).
+Functional check: openrouter re-triggered manually — see its row for the
+post-deploy behaviour.
 
 ## Tests & conventions
 
