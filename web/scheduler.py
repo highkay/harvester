@@ -16,18 +16,72 @@ the ``running`` state (see :meth:`SchedulerService.start_scan`).
 from __future__ import annotations
 
 import asyncio
+import os
+import time
+from datetime import datetime, timedelta
 from typing import Any
 
 from apscheduler.jobstores.memory import MemoryJobStore  # type: ignore[import-untyped]
 from apscheduler.executors.asyncio import AsyncIOExecutor  # type: ignore[import-untyped]
 from apscheduler.schedulers.asyncio import AsyncIOScheduler  # type: ignore[import-untyped]
 from apscheduler.triggers.cron import CronTrigger  # type: ignore[import-untyped]
+from apscheduler.triggers.date import DateTrigger  # type: ignore[import-untyped]
 from fastapi import HTTPException
 
 from tools.logger import get_logger
 from web.db import get_db
 
 logger = get_logger("web.scheduler")
+
+# ---------------------------------------------------------------------------
+# Admission control (2026-09-26)
+# ---------------------------------------------------------------------------
+# The daily chain overlapping 6-8 multi-hour scans is what turned one bad
+# egress/limiter hour into a 15-row pile-up (2026-09-24 incident), and a busy
+# provider's firing was DROPPED outright ("already running — skipping", e.g.
+# github's 6-hourly cron while its daily run was still live). Two knobs:
+# a global cap on concurrent runs, and a bounded deferred retry instead of a
+# dropped firing. Both are env-overridable; 0 disables the cap.
+_MAX_CONCURRENT_SCANS = max(
+    0, int(os.environ.get("HARVESTER_MAX_CONCURRENT_SCANS", "6") or 0)
+)
+_DEFER_DELAY_SECONDS = max(
+    60, int(os.environ.get("HARVESTER_DEFER_DELAY_SECONDS", "900") or 900)
+)
+_MAX_DEFERRALS = max(0, int(os.environ.get("HARVESTER_MAX_DEFERRALS", "3") or 3))
+
+
+async def _active_run_count(db_path: str) -> int:
+    """Number of runs currently in 'running' (authoritative, cross-process).
+
+    Read from run_records rather than the in-process runner dict so a manual
+    trigger and a cron firing see the same number (and rows stranded by a
+    restart are excluded by the startup reconciliation).
+
+    Fails OPEN (0) when the count cannot be read: a broken counter must never
+    refuse a scan the operator asked for, and a DB that cannot answer this
+    query has bigger problems than the cap (legacy/partial schemas in tests
+    are the realistic case).
+    """
+    try:
+        db = await get_db(db_path)
+    except Exception as exc:
+        logger.debug(f"concurrency check unavailable ({exc}) — cap not applied")
+        return 0
+    try:
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM run_records WHERE status = 'running'"
+        )
+        row = await cursor.fetchone()
+        return int(row[0]) if row else 0
+    except Exception as exc:
+        logger.debug(f"concurrency count query failed ({exc}) — cap not applied")
+        return 0
+    finally:
+        try:
+            await db.close()
+        except Exception:
+            pass
 
 # ---------------------------------------------------------------------------
 # Default seed schedules
@@ -120,7 +174,9 @@ _WATCH_POLL_FAILURE_ESCALATION = 3
 
 
 async def _run_provider_job(
-    provider_name: str, config_file: str | None = None
+    provider_name: str,
+    config_file: str | None = None,
+    deferred_attempts: int = 0,
 ) -> None:
     """Execute a scheduled scan for *provider_name*.
 
@@ -144,7 +200,17 @@ async def _run_provider_job(
         await svc.start_scan(provider_name, config_file)
     except HTTPException as exc:
         # 409 from either guard (scheduler-side watcher or the runner's own
-        # provider lock): a previous scan is still live — skip this firing.
+        # provider lock) or 429 from the global concurrency cap: the firing is
+        # DEFERRED (bounded) instead of dropped — a 6-hourly cron colliding
+        # with a live daily run used to lose that firing entirely.
+        if exc.status_code in (409, 429) and deferred_attempts < _MAX_DEFERRALS:
+            if svc.schedule_deferred(provider_name, config_file, deferred_attempts):
+                logger.warning(
+                    f"Provider {provider_name} deferred "
+                    f"(attempt {deferred_attempts + 1}/{_MAX_DEFERRALS}, "
+                    f"retry in {_DEFER_DELAY_SECONDS}s): {exc.detail}"
+                )
+                return
         logger.warning(
             f"Provider {provider_name} is already running — skipping "
             f"({exc.detail})"
@@ -210,6 +276,17 @@ class SchedulerService:
                 detail=f"Provider {provider_name} is already running",
             )
 
+        if _MAX_CONCURRENT_SCANS > 0:
+            active = await _active_run_count(self._db_path)
+            if active >= _MAX_CONCURRENT_SCANS:
+                raise HTTPException(
+                    status_code=429,
+                    detail=(
+                        f"concurrency cap reached ({active}/{_MAX_CONCURRENT_SCANS} "
+                        f"runs live) — deferring instead of stacking another scan"
+                    ),
+                )
+
         self._running.add(provider_name)
         try:
             runner = _lazy_get_runner()
@@ -222,6 +299,34 @@ class SchedulerService:
             self._watch_run(provider_name, run_id)
         )
         return run_id
+
+    def schedule_deferred(
+        self,
+        provider_name: str,
+        config_file: str | None,
+        deferred_attempts: int,
+    ) -> bool:
+        """Queue a one-shot retry of a deferred firing (bounded depth).
+
+        Returns False when the job could not be scheduled (the caller then
+        falls back to the old skip-and-log behaviour).
+        """
+        try:
+            self._scheduler.add_job(
+                _run_provider_job,
+                trigger=DateTrigger(
+                    run_date=datetime.now() + timedelta(seconds=_DEFER_DELAY_SECONDS)
+                ),
+                args=[provider_name, config_file, deferred_attempts + 1],
+                id=f"defer-{provider_name}-{int(time.time() * 1000)}",
+                max_instances=1,
+                replace_existing=False,
+                misfire_grace_time=_DEFER_DELAY_SECONDS,
+            )
+            return True
+        except Exception as exc:  # pragma: no cover - scheduler-level failure
+            logger.error(f"Could not defer {provider_name}: {exc}")
+            return False
 
     async def _watch_run(self, provider_name: str, run_id: str) -> None:
         """Release the guard when run *run_id* leaves the ``running`` state.

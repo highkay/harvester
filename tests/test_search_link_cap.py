@@ -1,0 +1,191 @@
+#!/usr/bin/env python3
+
+"""Per-run link cap: global.max_links_per_run bounds the corpus per run.
+
+Since the 2026-09-24 egress fix search works properly, so a wide dork set walks
+its full page + refinement tail and per-run corpora ballooned (openrouter 18.8k,
+modelscope 35.4k, glm 119k, tavily 146.7k, deepseek 336k links) with 14-28 h
+runtimes that collided with the next day's chain. The cap is enforced in
+SearchStage (per-Pipeline instance = per run), 0 = unlimited, and the drop is
+logged exactly once per run so the behaviour is never silent.
+"""
+
+from __future__ import annotations
+
+import os
+import pathlib
+import tempfile
+import types
+import unittest
+from typing import Any, cast
+from unittest import mock
+
+from config.schemas import StageConfig, TaskConfig
+from core.models import SearchTask
+from search import client
+from stage.base import StageResources
+from stage.definition import SearchStage
+
+
+class _Auth:
+    def get_session(self):
+        return ""
+
+    def get_token(self):
+        return "token"
+
+    def get_credential(self, prefer_token: bool = True):
+        return "token", "api"
+
+    def get_user_agent(self) -> str:
+        return "test-agent"
+
+
+def _resources(max_links: int) -> StageResources:
+    return StageResources(
+        limiter=mock.MagicMock(),
+        providers={},
+        config=cast(
+            Any,
+            types.SimpleNamespace(
+                global_config=types.SimpleNamespace(max_links_per_run=max_links)
+            ),
+        ),
+        task_configs={
+            "test": TaskConfig(name="test", provider_type="openai_like", stages=StageConfig())
+        },
+        auth=_Auth(),
+    )
+
+
+def _task(page: int = 2) -> SearchTask:
+    # page != 1 skips the pagination/refinement branch, isolating the cap.
+    return SearchTask(provider="test", query='"DORK"', regex="", page=page, use_api=True, max_pages=10)
+
+
+class TestSearchLinkCap(unittest.TestCase):
+    def _sheet(self, links_per_call: int = 3):
+        # page != 1 -> the worker calls client.search_code(query, session, page, ...)
+        # which returns (links, content).
+        return mock.MagicMock(
+            return_value=(
+                [f"https://github.com/o/r/blob/main/f{i}.env" for i in range(links_per_call)],
+                "",
+            )
+        )
+
+    def test_cap_stops_further_search_and_logs_once(self):
+        stage = SearchStage(_resources(max_links=5), handler=lambda _o: None)
+        search_mock = self._sheet(links_per_call=3)
+
+        with mock.patch.object(client, "search_code", search_mock), mock.patch.object(
+            client, "get_link_index", return_value=None
+        ), self.assertLogs("stage", level="WARNING") as logs:
+            first = stage.process_task(_task())
+            second = stage.process_task(_task())
+            third = stage.process_task(_task())
+            fourth = stage.process_task(_task())
+
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        self.assertIsNone(third, "task over the cap must be dropped")
+        self.assertIsNone(fourth)
+        self.assertEqual(6, stage._links_emitted)
+        self.assertEqual(2, search_mock.call_count, "no network work past the cap")
+        cap_lines = [r for r in logs.records if "per-run link cap reached" in r.getMessage()]
+        self.assertEqual(1, len(cap_lines), "the cap logs exactly once per run")
+
+    def test_zero_cap_means_unlimited(self):
+        stage = SearchStage(_resources(max_links=0), handler=lambda _o: None)
+        search_mock = self._sheet(links_per_call=4)
+
+        with mock.patch.object(client, "search_code", search_mock), mock.patch.object(
+            client, "get_link_index", return_value=None
+        ):
+            for _ in range(5):
+                self.assertIsNotNone(stage.process_task(_task()))
+
+        self.assertEqual(20, stage._links_emitted)
+        self.assertEqual(5, search_mock.call_count)
+
+    def test_unreadable_cap_config_degrades_to_unlimited(self):
+        # Production StageResources pass a real Config, but MagicMock configs
+        # (many stage tests) must not explode — and must not silently cap.
+        resources = _resources(0)
+        resources.config = mock.MagicMock()
+        stage = SearchStage(resources, handler=lambda _o: None)
+
+        self.assertEqual(0, stage._link_cap())
+
+
+class TestCapQuiescence(unittest.TestCase):
+    """Dropped search tasks must not block the worker/pipeline from settling.
+
+    The pipeline finishes when every stage's queue is empty and no worker is
+    active; the cap drops tasks at worker entry, so the contract is: the queue
+    drains, the worker goes idle, and no task waits on a dropped one.
+    """
+
+    def test_queue_drains_and_worker_settles_after_the_cap(self) -> None:
+        import threading
+        import time
+
+        stage = SearchStage(_resources(max_links=1), handler=lambda _o: None, thread_count=1)
+        search_mock = mock.MagicMock(
+            return_value=(
+                ["https://github.com/o/r/blob/main/a.env", "https://github.com/o/r/blob/main/b.env"],
+                "",
+            )
+        )
+        for _ in range(3):
+            stage.queue.put_nowait(_task())
+
+        with mock.patch.object(client, "search_code", search_mock), mock.patch.object(
+            client, "get_link_index", return_value=None
+        ):
+            stage.running = True
+            worker = threading.Thread(target=stage._worker_loop, daemon=True)
+            worker.start()
+            deadline = time.time() + 5
+            while time.time() < deadline and not (
+                stage.queue.empty() and not stage._has_active_workers()
+            ):
+                time.sleep(0.01)
+            settled = stage.queue.empty() and not stage._has_active_workers()
+            stage.running = False
+            worker.join(timeout=5)
+
+        self.assertTrue(settled, "worker/pipeline never quiesced after the cap drop")
+        self.assertEqual(1, search_mock.call_count, "only the first task may hit the network")
+        self.assertEqual(2, stage._links_emitted)
+
+
+class TestCapConfigContract(unittest.TestCase):
+    """The cap is a real config key: default 120000, 0 means unlimited."""
+
+    EXAMPLE = "examples/config-kimi-coding.yaml"
+
+    @unittest.skipUnless(os.path.exists(EXAMPLE), "example config not present")
+    def test_example_defaults_and_overrides(self) -> None:
+        from config.loader import ConfigLoader
+
+        with mock.patch.dict(
+            os.environ, {"GITHUB_TOKENS": "ghp_dummy_token_for_test_123456"}, clear=False
+        ):
+            default = ConfigLoader(self.EXAMPLE).load()
+            self.assertEqual(120000, default.global_config.max_links_per_run)
+
+            source = pathlib.Path(self.EXAMPLE).read_text(encoding="utf-8")
+            with tempfile.TemporaryDirectory() as td:
+                for value, expected in (("0", 0), ("7", 7)):
+                    path = pathlib.Path(td) / f"cap{value}.yaml"
+                    path.write_text(
+                        source.replace("global:", f"global:\n  max_links_per_run: {value}", 1),
+                        encoding="utf-8",
+                    )
+                    loaded = ConfigLoader(str(path)).load()
+                    self.assertEqual(expected, loaded.global_config.max_links_per_run)
+
+
+if __name__ == "__main__":
+    unittest.main()

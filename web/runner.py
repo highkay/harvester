@@ -376,17 +376,19 @@ class PipelineRunner:
             degradation = self._zero_yield_degradation(
                 provider_name, run_id, links_total, materials_total, app
             )
+            work_failed = False
             if degradation is None:
-                degradation = self._no_work_degradation(
+                degradation, work_failed = self._no_work_degradation(
                     provider_name, run_id, links_total, materials_total, valid_keys, app
                 )
+            run_status = "failed" if work_failed else "completed"
 
             # 5. Update DB — completed. Conditional on the row still being
             # 'running': a cancel_run that landed mid-scan has already
             # written 'cancelled', and this write must not flip it back.
             self._update_run_sync(
                 run_id=run_id,
-                status="completed",
+                status=run_status,
                 finished_at=True,
                 duration_seconds=duration,
                 valid_keys_found=valid_keys,
@@ -395,8 +397,13 @@ class PipelineRunner:
                 error_message=degradation,
                 only_if_running=True,
             )
+            if work_failed:
+                logger.error(
+                    f"Scan FAILED (no work): provider={provider_name} "
+                    f"run_id={run_id} links=0 materials=0 valid_keys=0"
+                )
             logger.info(
-                f"Scan completed: provider={provider_name} "
+                f"Scan {run_status}: provider={provider_name} "
                 f"run_id={run_id} valid_keys={valid_keys} "
                 f"links={links_total} materials={materials_total} "
                 f"duration={duration}s"
@@ -1038,8 +1045,8 @@ class PipelineRunner:
         materials_total: int | None,
         valid_keys: int,
         app: Any = None,
-    ) -> str | None:
-        """Marker for a 'completed' run that did NO work at all, or None.
+    ) -> tuple[str | None, bool]:
+        """Marker for a run that did NO work at all, plus whether it FAILED.
 
         Measured 2026-09-26 08:00 (openrouter): the run had ONE condition, its
         single search task was denied by the process-wide ``github_api`` rate
@@ -1052,20 +1059,29 @@ class PipelineRunner:
         recorded for the UI/API.
         """
         if links_total != 0 or materials_total != 0 or valid_keys:
-            return None
+            return None, False
         counters = self._stage_error_snapshot(app) if app is not None else {}
         if counters:
             detail = " ".join(f"{k}={v}" for k, v in sorted(counters.items()))
         else:
             detail = "stage counters unavailable"
+        search_attempts = counters.get("search_completed", 0) + counters.get(
+            "search_failed", 0
+        )
+        failed = search_attempts > 0
         message = (
             f"no-work run: provider={provider_name} run_id={run_id} "
             f"links_total=0 materials_total=0 valid_keys=0 — the search stage "
-            f"produced nothing ({detail}); look for 'task dropped' lines in the "
-            f"stage log"
+            f"produced nothing ({detail}); "
+            + (
+                "recorded as FAILED so it is visible in the failed view; the "
+                "provider can be re-triggered"
+                if failed
+                else "status kept 'completed' (no search tasks ran)"
+            )
         )
         logger.error(message)
-        return message
+        return message, failed
 
     def _count_valid_keys_for_failed_run(
         self, provider_name: str, temp_yaml_path: Path | None

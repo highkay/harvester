@@ -163,6 +163,7 @@ class ConfigLoader:
         return GlobalConfig(
             workspace=os.path.abspath(data.get("workspace", "./data")),
             max_retries_requeued=data.get("max_retries_requeued", 3),
+            max_links_per_run=max(0, int(data.get("max_links_per_run", 120000) or 0)),
             proxy=proxy,
             github_credentials=credentials,
             user_agents=data.get("user_agents", []),

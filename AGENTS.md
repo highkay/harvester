@@ -1672,6 +1672,66 @@ rows reconciled to `failed: interrupted by service restart` (0 running).
 Functional check: openrouter re-triggered manually — see its row for the
 post-deploy behaviour.
 
+**kimi-coding pattern tripwire RESOLVED — do NOT widen (measured 2026-09-26)**:
+the tripwire fired on the 09-25 run (84,635 links → 73 materials / 1 valid), so
+the pattern was re-measured against the same-generation corpus: a deterministic
+339-body sample (blob→raw mapped, fetched directly) matched **0 bodies with
+`sk-kimi-[0-9A-Za-z_-]{20,}`** and 4 with the wide `sk-(?!ant|proj|svcacct-)
+[A-Za-z0-9]{16,}` — and all 4 wide-only hits are placeholder/fixture strings
+(`sk-xxxxxxxxxxxxxxxx`, `sk-liveSECRET1234567890abcdef`), i.e. exactly the noise
+class the 2026-09-21 narrowing removed. The tripwire run's own check outputs
+(`backup-20260926-190000/`): 80 material rows all `sk-kimi-`-shaped (~50
+distinct), 12 wait-check all authentic `sk-kimi-`+72, 36 invalid, **zero
+wide-only candidates reached check**; the wide era's own probes (backup
+`20260920-040003`) had 463 candidates → 0 valid with all 13 plan-gated
+authentic keys `sk-kimi-`-shaped. Verdict: starvation is CORPUS COMPOSITION
+(≲0.1 % of links on this dork set carry any key-shaped string), not extraction —
+if a future run again shows near-zero candidates, widen the measurement once,
+but then chase dork/class diversity, not the pattern.
+
+**Edge-pool idea REJECTED (measured 2026-09-26)**: don't enable
+`github_transport.edge_pool.prefer_over_proxy` as a proxy-free path for
+`api.github.com`. Two independent reasons: (1) the feed it depends on,
+`https://hosts.ohmygh.com/v1/hosts`, is dead — `curl: (6) Could not resolve
+host` from the fnos host, and Cloudflare 530/502 from other vantages (the same
+530 is already in the 2026-09-22 local run log); (2) structural: the edge
+adapter rewrites the dial target by monkeypatching
+`urllib3.util.connection.create_connection`
+(`search/github/adapter.py`), which PySocks bypasses whenever a socks5 proxy is
+configured — so with a proxy the edge IP is never used, and without one the pool
+falls back to UNVERIFIED cached IPs and never rotates back to the proxy
+(`transport.py` cooldown/next_ip). The prod cache holds 8 verified IPs from
+2026-08-12, i.e. it worked once in a proxy-free run — do not resurrect it
+without re-measuring both halves. Also: the container image is python:3.12-slim
+— there is NO `curl` inside it; in-container probes must be python.
+
+**Admission control + corpus bounding (deployed 2026-09-26, `<sha>`)**: three
+guards against the pile-up class, all configurable:
+* `global.max_links_per_run` (`config/schemas.py`, default **120000**, 0 =
+  unlimited): `SearchStage` stops emitting links past the cap (the stage
+  instance is per-run) and logs once — bounds a run's corpus, hence its
+  duration, at ~3-4 h for the measured drain rate; the tail of a GitHub
+  best-match ranking is the lowest-signal part of a corpus anyway.
+* `web/scheduler.py`: `_MAX_CONCURRENT_SCANS` (env
+  `HARVESTER_MAX_CONCURRENT_SCANS`, default 6, 0 = unlimited) counted from
+  `run_records` (`_active_run_count`, which FAILS OPEN when the count cannot be
+  read); a firing that hits 409 (provider live) or 429 (cap) is now **deferred**
+  as a one-shot `DateTrigger` job (`_DEFER_DELAY_SECONDS` 900,
+  `_MAX_DEFERRALS` 3) instead of being dropped — github's 6-hourly cron used to
+  vanish silently whenever its daily run was still live.
+* `web/runner.py::_no_work_degradation` now returns `(message, failed)`: a run
+  that searched and produced nothing (links=0/materials=0/valid=0 AND ≥1 search
+  attempt) is recorded **failed** (visible + re-triggerable) instead of
+  `completed` with a note; a validate-only config keeps `completed`.
+
+**Log-sink nuance (measured 2026-09-26)**: `web.runner` lifecycle records DO
+reach the container stdout sink (4 h window: 7 `Scan started`, 2
+`Scan completed`, 23 `[runner.py` lines) — an earlier 0-count window was simply
+2 hours in which nothing started or finished. So: stdout is valid for
+throughput/error-rate metrics AND for lifecycle, but `run_records` is the
+authoritative lifecycle source (it also covers restarts that kill a run before
+its terminal write).
+
 ## Tests & conventions
 
 - Run: `python -m unittest discover -s tests`. **Measured baseline 2026-09-24

@@ -133,6 +133,17 @@ class GlobalConfig:
 
     workspace: str = "./data"
     max_retries_requeued: int = 3
+    # Per-run cap on links the SEARCH stage may emit (0 = unlimited).
+    # Bounds the corpus -> bounds run duration: since the 2026-09-24 egress fix
+    # search works properly, so a wide dork set walked its full page + refine
+    # tail and per-run corpora ballooned (openrouter 18.8k, modelscope 35.4k,
+    # glm 119k, tavily 146.7k, deepseek 336k links) with 14-28 h runtimes that
+    # then collided with the next day's chain. 120k keeps the largest typical
+    # corpus (~60k) intact while bounding the outliers to ~3-4 h at the
+    # measured post-fix drain rate (~585 links/min for a 35.7k run);
+    # GitHub's best-match ordering means the tail pages are the lowest-signal
+    # part of a corpus anyway. Set 0 to restore unlimited discovery.
+    max_links_per_run: int = 120000
     proxy: str = ""
     github_credentials: Optional[CredentialsConfig] = None
     user_agents: List[str] = field(default_factory=list)

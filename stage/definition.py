@@ -128,6 +128,43 @@ class SearchStage(BasePipelineStage):
 
     def __init__(self, resources: StageResources, handler: OutputHandler, **kwargs):
         super().__init__(PipelineStage.SEARCH.value, resources, handler, **kwargs)
+        # Per-run corpus bounding (global.max_links_per_run; 0 = unlimited).
+        # The stage instance is per-Pipeline, i.e. per run, so this counter is
+        # exactly "links this run discovered" — the same number that lands in
+        # run_records.links_total.
+        self._links_emitted = 0
+        self._link_cap_logged = False
+
+    def _link_cap(self) -> int:
+        """Per-run link cap from global.max_links_per_run (0 = unlimited).
+
+        Only a real int counts: `int(MagicMock()) == 1`, so coercing an
+        arbitrary attribute would silently cap every caller whose config is a
+        stub (many stage tests) after the first link.
+        """
+        raw = getattr(
+            getattr(self.resources.config, "global_config", None),
+            "max_links_per_run",
+            0,
+        )
+        if isinstance(raw, bool) or not isinstance(raw, int):
+            return 0
+        return max(0, raw)
+
+    def _link_cap_reached(self, provider: str) -> bool:
+        """True once this run has emitted its cap of links (logs once)."""
+        cap = self._link_cap()
+        if not cap or self._links_emitted < cap:
+            return False
+        if not self._link_cap_logged:
+            logger.warning(
+                f"[{self.name}] per-run link cap reached ({cap}) for {provider} — "
+                f"dropping further search tasks (pagination/refinement); the "
+                f"remaining dorks are left for the next run. Set "
+                f"global.max_links_per_run=0 to disable."
+            )
+            self._link_cap_logged = True
+        return True
 
     def _generate_id(self, task: ProviderTask) -> str:
         """Generate unique task identifier for deduplication"""
@@ -164,6 +201,8 @@ class SearchStage(BasePipelineStage):
 
     def _search_worker(self, task: SearchTask) -> Optional[StageOutput]:
         """Pure functional search worker"""
+        if self._link_cap_reached(task.provider):
+            return None
         try:
             # Execute search based on page number
             if task.page == 1:
@@ -228,6 +267,7 @@ class SearchStage(BasePipelineStage):
 
                 # Persist all discovered links (including ones skipped for gather)
                 output.add_links(task.provider, results)
+                self._links_emitted += len(results)
 
             # Handle first page results for pagination/refinement.
             # Reaching this gate with total == 0 now means the fetch SUCCEEDED
