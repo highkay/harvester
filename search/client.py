@@ -475,6 +475,15 @@ def configure_github_transport(
     if pool is not None:
         mount_edge_adapter(_HTTP_SESSION, pool)
 
+    # Close this scan's predecessors before rebinding the process-wide
+    # singletons: each ResponseCache/LinkIndex holds an open sqlite
+    # connection, so reassigning without closing leaks one connection per
+    # store per scan. Both close() calls are idempotent.
+    if _RESPONSE_CACHE is not None:
+        _RESPONSE_CACHE.close()
+    if _LINK_INDEX is not None:
+        _LINK_INDEX.close()
+
     if not os.path.isabs(cache_dir):
         cache_path = os.path.join(workspace, cache_dir)
     else:

@@ -222,8 +222,14 @@ def get_link_index() -> Optional[LinkIndex]:
 def init_link_index(directory: str, enabled: bool = True) -> Optional[LinkIndex]:
     global _link_index
     with _link_index_lock:
-        if not enabled:
+        # Close the previous singleton before rebinding: a LinkIndex holds an
+        # open sqlite connection, so reassigning without closing leaks one per
+        # re-init (configure_github_transport runs per scan). close() is
+        # idempotent, so a double close across call sites is safe.
+        if _link_index is not None:
+            _link_index.close()
             _link_index = None
+        if not enabled:
             logger.info("[index] link index disabled")
             return None
         _link_index = LinkIndex(directory=directory, enabled=True)
