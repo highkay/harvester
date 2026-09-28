@@ -1943,6 +1943,8 @@ net-new added):
 - **links.db "disappearance" is NOT a regression**: shipped configs set
   `github_transport.index.skip_known_links: false` — the link index is
   configured OFF for dedup, so its absence from `data/` changes nothing.
+  (2026-09-28 update: the index WRITE is now gated on the same flag, so
+  `links.db` no longer grows when dedup is off — see the evening section.)
 - **opencode provider LAUNCHED** (`b732e85` + `51d4dff`): endpoint
   live-verified (`GET /zen/go/v1/models` is PUBLIC 200 with 42 models incl.
   `glm-5.3` — presence-only trap, never used for validation; chat probe
@@ -1959,11 +1961,103 @@ net-new added):
   serpapi +2 / qwen-cn +0 / tavily +0 (dupes); the 6 killed runs reconciled
   with duration + valid counts (serpapi had 542 valid at kill time).
 
+## Ops: evening audit → restart-lifecycle hardening + disk bounds (2026-09-28, deployed `638fe74`)
+
+A five-agent audit (code + prod DB/logs/pools) in the afternoon surfaced two
+silent-loss classes and several unbounded stores; all fixed, tested (932 OK /
+8 skipped at `638fe74`), committed (`87b11bd`..`638fe74`, 7 atomic commits)
+and deployed the same evening (rollback `rollback-20260928-182659`, md5 MATCH
+×10, live-verified on first boot — see below).
+
+- **Restart forensics (7d, read-only audit)**: 10 restart windows, 5,126
+  validated keys in killed runs, 5,095 salvaged, **572 net-new**, **0
+  permanently lost**; 31 keys were never pushed but verified on disk (tavily
+  21 / serpapi 3 / nvidia 2 / qwen-cn 1 in current files; openrouter 3 / glm
+  1 in `backup-20260927-080000` / `backup-20260927-120000`). Every kill was a
+  deploy restart — zero organic failures in 7d.
+- **FIXED — deferral loss class**: pending deferral ladders lived only in the
+  (explicit) `MemoryJobStore`; a restart wiped them and the provider silently
+  missed its day (agnes-ai + openrouter missed 09-28 entirely). Scheduler now
+  does a **missed-run catch-up at startup** (`web/scheduler.py`
+  `_schedule_catchups`): for each enabled row, the latest cron fire time is
+  compared with `run_records` (started_at is UTC, fire times scheduler-tz —
+  the comparison is tz-corrected; APScheduler has no `get_previous_fire_time`
+  so it walks forward from now−8d); a provider with no run since that fire
+  gets ONE staggered one-shot through `_run_provider_job` (cap + deferral
+  ladder apply). Env gate `HARVESTER_SCHEDULER_CATCHUP` (default on).
+- **FIXED — unpushed-completion loss class**: the run row was written terminal
+  BEFORE the daemon push threads fired, and nothing re-pushed at startup.
+  `web/db.py::find_unpushed_terminal_runs` (terminal + valid>0 + finished
+  within 24h + NO push_logs row for the run_id — any row, incl. manual
+  salvage, skips it) + `PipelineRunner.recover_unpushed_runs` (lifespan:
+  AFTER reconcile, BEFORE init_scheduler, so recovery reads valid-keys.txt
+  before any catch-up run's `_on_start` resets it) re-dispatch through the
+  same `_push_completed_tasks` path. `_on_completed` is now a 1-line
+  delegation to the extracted `_dispatch_provider_pushes` (completion and
+  recovery cannot diverge). **Ops nuance**: manual salvage pushes should pass
+  the KILLED run's id as run_id (not a custom label like
+  `modelscope-salvage-20260928`) — the recovery dedup matches
+  `push_logs.run_id == run_records.id`, so a custom id causes a harmless
+  duplicate re-push at the next restart.
+- **Also in the lifecycle commit**: runtime orphan sweep (deletes
+  `runtime/config-*.yaml` older than 1h at runner startup — 32 orphans
+  removed on first boot) and web-mode log age cleanup
+  (`Logger.cleanup_old_logs(days=7)` now called from the app lifespan;
+  `_delete_existing_logs` semantics untouched).
+- **FIXED — disk bounds** (`638fe74` stack): (a) link-index WRITE is now
+  gated on the same `should_skip_known_links()` predicate as the read —
+  with `skip_known_links: false` (all shipped configs) `links.db` stops
+  growing (it was 1.1GB write-only dead weight; the existing 1.1GB file can
+  be deleted manually at leisure); (b) `prune_backup_dirs` keeps only the
+  newest 3 `backup-YYYYmmdd-HHMMSS` dirs per provider (76+ had accumulated);
+  (c) `configure_github_transport` / `init_link_index` now `close()` the
+  superseded ResponseCache/LinkIndex before rebinding (one leaked sqlite
+  connection per store per scan, before).
+- **tavily ops (prod, evening)**: pool key **2746 deactivated** (the
+  disabled-account 402 class, was still serving client-facing 402s the same
+  day; the sweep's /usage probe showed plan 14852/1000) plus 2783
+  (quota-spent, already unselectable; re-enable = one PUT if ever wanted).
+  The **eviction loop had been dead since 09-23** and is relaunched:
+  `CYCLES=130 /tmp/tavily_evict_loop_v2.sh`, pid 3456115, expires
+  ~2026-09-29 14:58 CST — it survives container restarts (host-side) but NOT
+  a container recreate (which wipes `/tmp/tavily_pool_evict.py`; re-copy from
+  the repo's `.omo/evidence/tavily_watch/`).
+- **tavily wait-bucket verdict (measured, supersedes the recovery recipe's
+  assumption)**: the 1,013-entry bucket decomposes as 110 junk + 3
+  placeholder + 351 already-pooled + 550 unknown-real-format; a 10-key live
+  sample of the unknowns gave **7 plan-exhausted (1000/1000) + 3 dead + 0
+  usable** → **skip wait-pool recovery for tavily** (expected salvage ≈ 0;
+  the bucket resets on the next clean-start run anyway). Real tavily key
+  formats are now FOUR shapes — `tvly-<32alnum>`, `tvly-dev-<32alnum>`,
+  `tvly-prod-<32alnum>`, `tvly-dev/prod-<5-6alnum>-<42alnum>` — the
+  "tvly-dev-+32" note earlier in this file is stale.
+- **Log timezone correction**: container stdout logs are CST (local), NOT
+  UTC — `run_records.started_at`/`push_logs.pushed_at` are UTC. Both facts
+  were re-measured 2026-09-28; an earlier "pipeline logs are UTC" note was
+  wrong for the stdout sink.
+- **Pool census (all healthy unless noted)**: gpt-load fnos — nvidia 1998,
+  glm 535 (all post-purge refills), zai 71, ollama 70, openrouter 109,
+  modelscope 59+2invalid, opencode 0 (unproven until tonight's 22:00 run —
+  its 14:38 verification run completed with valid=0 / 87 invalid / 28 wait,
+  i.e. the corpus judged truthfully but held no live subscribed keys; watch
+  the second run before investing further). 10/10 live spot-probes passed
+  (2 newest keys × nvidia/glm/zai/ollama/openrouter). serpapi pool 401 active
+  with 355k searches_left. push→pool correlation proven to the second
+  (push_logs.pushed_at == pool key created_at).
+- **Security note**: a census agent printed gpt-load per-group `proxy_keys`
+  (client access tokens for /proxy/<group>) unredacted into a session
+  transcript — rotate those if transcripts ever leave the box.
+- **First-boot proof of the new mechanisms** (18:27–18:30 CST): sweep removed
+  32 orphans; recovery re-pushed modelscope 164cc414 (success, +0 dupes);
+  catch-up fired agnes-ai (missed 02:00 UTC fire, +60s) and openrouter
+  (00:00 UTC, +120s stagger) — both scans started normally.
+
 ## Tests & conventions
 
-- Run: `python -m unittest discover -s tests`. **Measured baseline 2026-09-24
-  (workstation, dirty worktree on `main`): 846 OK / 8 skipped** — includes the
-  20 egress-routing tests added by the fix below. The 2026-09-23 baseline was
+- Run: `python -m unittest discover -s tests`. **Measured baseline 2026-09-28
+  (workstation, at `638fe74`): 932 OK / 8 skipped** — includes the
+  restart-lifecycle + disk-bounds tests added that day. The 2026-09-24 baseline was
+  846 OK / 8 skipped (dirty worktree on `main`). The 2026-09-23 baseline was
   726 OK / 8 skipped in a clean checkout of `0e3b8fc` (the "572 OK as of
   2026-09-22" note below was written before the same-day hardening landed; the
   old "490 tests" and "35 failures in test_web_ui / test_web_push_logs"
