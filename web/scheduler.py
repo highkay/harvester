@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
-from datetime import datetime, timedelta, tzinfo
+from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Any
 
 from apscheduler.jobstores.memory import MemoryJobStore  # type: ignore[import-untyped]
@@ -59,6 +59,25 @@ _MAX_DEFERRALS = max(0, int(os.environ.get("HARVESTER_MAX_DEFERRALS", "8") or 8)
 # `SchedulerService.has_pending_deferral()` admits ONE pending ladder per
 # provider (queried from APScheduler, which self-heals when the job runs) so a
 # provider's own cron cannot multiply retry chains.
+
+# ---------------------------------------------------------------------------
+# Missed-run catch-up (2026-09-28)
+# ---------------------------------------------------------------------------
+# Deferral jobs are one-shot DateTrigger jobs in the in-memory MemoryJobStore,
+# so a restart wipes every pending ladder — and any cron slot that passed
+# while the process was down is lost silently (measured: agnes-ai's 10:00 and
+# openrouter's 08:00 firings vanished after a 10:07 restart; no run_records
+# row, no error line). At startup, each ENABLED schedule's MOST RECENT cron
+# fire time is compared against run_records; a provider with no run started at
+# or after that fire gets ONE staggered one-shot catch-up through the normal
+# _run_provider_job path (so the concurrency cap + deferral ladder apply).
+# Env gate: HARVESTER_SCHEDULER_CATCHUP (default on).
+_CATCHUP_ENABLED = os.environ.get(
+    "HARVESTER_SCHEDULER_CATCHUP", "1"
+).strip().lower() not in ("0", "false", "no", "off", "")
+# Catch-up jobs are staggered by index so a restart does not fire a whole
+# missed chain at once (thundering herd on a box already at load ~8).
+_CATCHUP_STAGGER_SECONDS = 60
 
 
 async def _active_run_count(db_path: str) -> int:
@@ -254,6 +273,170 @@ async def _run_provider_job(
         )
     except Exception:
         logger.exception(f"Scheduled scan for {provider_name} failed")
+
+
+# ---------------------------------------------------------------------------
+# Missed-run catch-up at startup
+# ---------------------------------------------------------------------------
+
+# How far back the latest-fire search walks. Production seed crons are daily
+# or more frequent, so 8 days covers even a week-long outage on a weekly
+# cron; rarer crons skip catch-up (their slots are sparse by definition).
+_CATCHUP_LOOKBACK = timedelta(days=8)
+
+
+def _previous_fire_time(cron: str, tz: tzinfo | None) -> datetime | None:
+    """Most recent cron fire time at or before now, in the scheduler's tz.
+
+    APScheduler's ``CronTrigger`` exposes no ``get_previous_fire_time``, so
+    walk forward with ``get_next_fire_time`` from a bounded lookback window
+    and keep the last fire at or before now. Returns None when the cron
+    expression cannot be parsed (the row's own ``scan-`` job already logged
+    the parse error during job rebuild) or when no fire falls in the window.
+    """
+    try:
+        trigger = CronTrigger.from_crontab(cron, timezone=tz)
+    except (ValueError, TypeError):
+        return None
+
+    # Aware in the trigger's zone either way: tz=None means the trigger was
+    # built in the machine-local zone, so "now" must carry a zone too —
+    # get_next_fire_time returns aware fires and a naive now cannot compare.
+    now = datetime.now(tz) if tz is not None else datetime.now().astimezone()
+    previous = None
+    probe = now - _CATCHUP_LOOKBACK
+    while True:
+        fire = trigger.get_next_fire_time(previous, probe)
+        if fire is None or fire > now:
+            break
+        previous = fire
+        probe = fire
+    return previous
+
+
+def _parse_utc_started_at(value: object) -> datetime | None:
+    """Parse a ``run_records.started_at`` string as UTC into an aware datetime.
+
+    TIMEZONE TRAP: ``started_at`` is written via SQLite ``datetime('now')``
+    (UTC) while cron fire times are computed in the SCHEDULER's timezone
+    (prod: Asia/Shanghai, prod container runs UTC while the fnos host is CST).
+    Both sides must be aware before comparison — a naive string compare put a
+    local-zone fire time next to a UTC timestamp and misjudged every run up to
+    the tz offset (±8 h on prod). Unparseable values return None.
+    """
+    if value is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+async def _run_catchup_job(
+    provider_name: str,
+    config_file: str | None = None,
+    missed_fire_iso: str = "",
+) -> None:
+    """One-shot catch-up callback: log WHY at WARNING, then run the normal path.
+
+    Going through :func:`_run_provider_job` means the provider guard, the
+    concurrency cap and the deferral ladder apply to a catch-up firing exactly
+    as they do to a regular cron firing.
+    """
+    logger.warning(
+        f"Catch-up firing for {provider_name}: the cron fire at "
+        f"{missed_fire_iso} (UTC) had no run when the scheduler started — "
+        f"running it now"
+    )
+    await _run_provider_job(provider_name, config_file)
+
+
+async def _schedule_catchups(
+    scheduler: AsyncIOScheduler, db_path: str
+) -> int:
+    """Arm one-shot catch-up runs for the latest cron fire missed per provider.
+
+    Only the MOST RECENT fire per enabled provider is caught up (older missed
+    slots stay lost — a backfill storm after a long outage would hammer the
+    shared GitHub search budget). A provider is skipped when a run started at
+    or after that fire time exists in ``run_records``, or when it still has a
+    'running' row. Returns the number of catch-up jobs scheduled.
+    """
+    if not _CATCHUP_ENABLED:
+        return 0
+
+    tz = getattr(scheduler, "timezone", None)
+    if not isinstance(tz, tzinfo):
+        tz = None
+
+    try:
+        db = await get_db(db_path)
+    except Exception as exc:
+        logger.warning(f"Catch-up check skipped — database unavailable ({exc})")
+        return 0
+
+    scheduled = 0
+    try:
+        cursor = await db.execute(
+            "SELECT provider_name, cron_expression, config_file "
+            "FROM schedule_config WHERE enabled = 1 ORDER BY provider_name"
+        )
+        rows = list(await cursor.fetchall())
+        for row in rows:
+            provider = row["provider_name"]
+            try:
+                fire = _previous_fire_time(row["cron_expression"], tz)
+                if fire is None:
+                    continue
+                cursor = await db.execute(
+                    "SELECT MAX(started_at) AS last_started, "
+                    "SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) "
+                    "AS live_runs "
+                    "FROM run_records WHERE provider_name = ?",
+                    (provider,),
+                )
+                info = await cursor.fetchone()
+                if info is not None and int(info["live_runs"] or 0) > 0:
+                    logger.info(
+                        f"Catch-up skipped for {provider}: a run is still live"
+                    )
+                    continue
+                last_started = (
+                    _parse_utc_started_at(info["last_started"])
+                    if info is not None
+                    else None
+                )
+                if last_started is not None and last_started >= fire:
+                    continue  # ran at or after the latest fire — nothing missed
+                delay = _CATCHUP_STAGGER_SECONDS * (scheduled + 1)
+                missed_fire_iso = fire.astimezone(timezone.utc).isoformat()
+                scheduler.add_job(
+                    _run_catchup_job,
+                    trigger=DateTrigger(
+                        run_date=datetime.now(tz) + timedelta(seconds=delay)
+                    ),
+                    args=[provider, row["config_file"], missed_fire_iso],
+                    id=f"catchup-{provider}-{int(time.time() * 1000)}",
+                    max_instances=1,
+                    replace_existing=False,
+                    misfire_grace_time=None,
+                )
+                scheduled += 1
+                logger.info(
+                    f"Scheduled catch-up run for {provider}: missed cron fire "
+                    f"at {missed_fire_iso}, firing in {delay}s"
+                )
+            except Exception as exc:
+                logger.warning(f"Catch-up check failed for {provider}: {exc}")
+        return scheduled
+    finally:
+        try:
+            await db.close()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -766,6 +949,14 @@ async def init_scheduler(settings: object) -> SchedulerService:
             logger.info(f"Scheduled {provider} with cron '{cron}'")
         except (ValueError, TypeError) as exc:
             logger.error(f"Invalid cron for {provider}: {cron} — {exc}")
+
+    # Re-arm the LATEST cron fire each enabled provider missed while the
+    # process was down (MemoryJobStore wipes pending deferral jobs on
+    # restart). Never fatal: a catch-up failure must not stop the scheduler.
+    try:
+        await _schedule_catchups(scheduler, db_path)
+    except Exception as exc:
+        logger.warning(f"Missed-run catch-up scheduling failed: {exc}")
 
     scheduler.start()
     logger.info(f"Scheduler started with {len(rows)} job(s)")

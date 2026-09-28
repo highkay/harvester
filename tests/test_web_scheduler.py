@@ -10,6 +10,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 # Ensure project root is on sys.path so "web" and "tools" resolve
@@ -761,6 +762,354 @@ class TestConfigFileThreading(unittest.TestCase):
                     )
 
                 await svc.shutdown()
+
+        _run_async(_scenario())
+
+
+# ---------------------------------------------------------------------------
+# Test 7: Missed-run catch-up at startup (2026-09-28 deferral-loss class)
+# ---------------------------------------------------------------------------
+
+
+class TestMissedRunCatchup(unittest.TestCase):
+    """Given the scheduler restarting after cron slots passed while down,
+    When _schedule_catchups runs over the enabled schedule_config rows,
+    Then each provider whose LATEST fire has no run_records row started at or
+    after it (in UTC — started_at is UTC, cron fires are scheduler-tz) and no
+    live 'running' row gets ONE staggered one-shot catch-up job through the
+    _run_provider_job path; disabled providers and providers with a run since
+    the fire are skipped; the whole feature is env-gated.
+    """
+
+    @staticmethod
+    async def _make_db(
+        db_path: str,
+        schedules: list[tuple[str, str, int, str]],
+        run_inserts: list[tuple[str, str, str, str]] = (),
+    ) -> str:
+        """Full-schema DB with the given schedule rows + run_records rows.
+
+        ``run_inserts`` entries are (id, provider, status, started_at_sql)
+        where started_at_sql is a test-controlled SQLite expression.
+        """
+        from web.db import init_db
+
+        await init_db(db_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            for provider, cron, enabled, cfg in schedules:
+                conn.execute(
+                    "INSERT INTO schedule_config "
+                    "(provider_name, cron_expression, enabled, config_file) "
+                    "VALUES (?, ?, ?, ?)",
+                    (provider, cron, int(enabled), cfg),
+                )
+            for run_id, provider, status, started_sql in run_inserts:
+                conn.execute(
+                    "INSERT INTO run_records "
+                    "(id, provider_name, config_file, status, started_at) "
+                    f"VALUES (?, ?, 'c.yaml', ?, {started_sql})",
+                    (run_id, provider, status),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+        return db_path
+
+    def test_schedules_catchup_for_missed_enabled_provider(self) -> None:
+        from web.scheduler import _schedule_catchups
+
+        async def _scenario() -> None:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                db_path = await self._make_db(
+                    os.path.join(tmpdir, "h.db"),
+                    schedules=[
+                        ("deepseek", "0 3 * * *", 1, "examples/config-deepseek.yaml")
+                    ],
+                )
+                sched = MagicMock()
+
+                with self.assertLogs("web.scheduler", level="INFO") as logs:
+                    count = await _schedule_catchups(sched, db_path)
+
+                self.assertEqual(count, 1)
+                sched.add_job.assert_called_once()
+                kwargs = sched.add_job.call_args.kwargs
+                self.assertTrue(str(kwargs["id"]).startswith("catchup-deepseek-"))
+                self.assertEqual(kwargs["args"][0], "deepseek")
+                self.assertEqual(kwargs["args"][1], "examples/config-deepseek.yaml")
+                # ISO UTC missed-fire reason travels to the WARNING callback.
+                self.assertIn("T", kwargs["args"][2])
+                self.assertEqual(kwargs["max_instances"], 1)
+                self.assertIsNone(kwargs["misfire_grace_time"])
+                # One-shot DateTrigger at now + 60s (first stagger slot).
+                run_date = kwargs["trigger"].run_date
+                expected = datetime.now(run_date.tzinfo) + timedelta(seconds=60)
+                self.assertLess(abs((run_date - expected).total_seconds()), 5)
+                self.assertTrue(
+                    any(
+                        "Scheduled catch-up" in r.getMessage()
+                        for r in logs.records
+                    ),
+                    [r.getMessage() for r in logs.records],
+                )
+
+        _run_async(_scenario())
+
+    def test_skipped_when_run_exists_after_fire_time(self) -> None:
+        from web.scheduler import _schedule_catchups
+
+        async def _scenario() -> None:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                # A row started NOW is at/after ANY latest fire (fires are
+                # never in the future), whatever the current wall clock.
+                db_path = await self._make_db(
+                    os.path.join(tmpdir, "h.db"),
+                    schedules=[("deepseek", "0 3 * * *", 1, "cfg.yaml")],
+                    run_inserts=[("r1", "deepseek", "completed", "datetime('now')")],
+                )
+                sched = MagicMock()
+
+                count = await _schedule_catchups(sched, db_path)
+
+                self.assertEqual(count, 0)
+                sched.add_job.assert_not_called()
+
+        _run_async(_scenario())
+
+    def test_skipped_when_provider_disabled(self) -> None:
+        from web.scheduler import _schedule_catchups
+
+        async def _scenario() -> None:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                db_path = await self._make_db(
+                    os.path.join(tmpdir, "h.db"),
+                    schedules=[("deepseek", "0 3 * * *", 0, "cfg.yaml")],
+                )
+                sched = MagicMock()
+
+                self.assertEqual(await _schedule_catchups(sched, db_path), 0)
+                sched.add_job.assert_not_called()
+
+        _run_async(_scenario())
+
+    def test_skipped_when_provider_currently_running(self) -> None:
+        from web.scheduler import _schedule_catchups
+
+        async def _scenario() -> None:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                # The 'running' row started BEFORE the latest */5 fire, so
+                # ONLY the live-run check can suppress this catch-up.
+                db_path = await self._make_db(
+                    os.path.join(tmpdir, "h.db"),
+                    schedules=[("deepseek", "*/5 * * * *", 1, "cfg.yaml")],
+                    run_inserts=[
+                        ("r1", "deepseek", "running", "datetime('now','-1 day')")
+                    ],
+                )
+                sched = MagicMock()
+
+                self.assertEqual(await _schedule_catchups(sched, db_path), 0)
+                sched.add_job.assert_not_called()
+
+        _run_async(_scenario())
+
+    def test_staggered_in_provider_order(self) -> None:
+        from web.scheduler import _schedule_catchups
+
+        async def _scenario() -> None:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                db_path = await self._make_db(
+                    os.path.join(tmpdir, "h.db"),
+                    schedules=[
+                        # Insertion order deliberately NOT alphabetical:
+                        # ordering comes from ORDER BY provider_name.
+                        ("kimi", "0 3 * * *", 1, "examples/config-kimi.yaml"),
+                        ("deepseek", "0 3 * * *", 1, "examples/config-deepseek.yaml"),
+                    ],
+                )
+                sched = MagicMock()
+
+                count = await _schedule_catchups(sched, db_path)
+
+                self.assertEqual(count, 2)
+                calls = sched.add_job.call_args_list
+                self.assertEqual(calls[0].kwargs["args"][0], "deepseek")
+                self.assertEqual(calls[1].kwargs["args"][0], "kimi")
+                first = calls[0].kwargs["trigger"].run_date
+                second = calls[1].kwargs["trigger"].run_date
+                now = datetime.now(second.tzinfo)
+                self.assertLess(
+                    abs((first - (now + timedelta(seconds=60))).total_seconds()), 5
+                )
+                self.assertLess(
+                    abs((second - (now + timedelta(seconds=120))).total_seconds()), 5
+                )
+
+        _run_async(_scenario())
+
+    def test_env_gate_off_disables_feature(self) -> None:
+        import web.scheduler as scheduler_mod
+        from web.scheduler import _schedule_catchups
+
+        async def _scenario() -> None:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                db_path = await self._make_db(
+                    os.path.join(tmpdir, "h.db"),
+                    schedules=[("deepseek", "0 3 * * *", 1, "cfg.yaml")],
+                )
+                sched = MagicMock()
+
+                with patch.object(scheduler_mod, "_CATCHUP_ENABLED", False):
+                    count = await _schedule_catchups(sched, db_path)
+
+                self.assertEqual(count, 0)
+                sched.add_job.assert_not_called()
+
+        _run_async(_scenario())
+
+    def test_utc_started_at_converted_against_scheduler_tz_fire(self) -> None:
+        """TIMEZONE TRAP: run_records.started_at is UTC while cron fires are
+        computed in the scheduler tz. With a +5:30 zone, a run started AT the
+        latest fire (stored as its UTC instant, 5:30 behind the local fire
+        string) must count as RUN — a naive string compare would see
+        '12:30' < '18:00' and schedule a spurious catch-up."""
+        from apscheduler.triggers.cron import CronTrigger
+
+        from web.scheduler import _schedule_catchups
+
+        # Fixed-offset zone (no tzdata dependency on Windows CI): UTC+5:30.
+        ist = timezone(timedelta(hours=5, minutes=30))
+
+        def _fire_utc(now: datetime) -> datetime:
+            """Latest '0 * * * *' fire at or before *now*, computed via the
+            documented get_next_fire_time chain (independent of the module
+            helper under test)."""
+            trigger = CronTrigger.from_crontab("0 * * * *", timezone=ist)
+            local_now = now.astimezone(ist)
+            fire = trigger.get_next_fire_time(
+                None, local_now - timedelta(minutes=120)
+            )
+            assert fire is not None
+            while True:
+                nxt = trigger.get_next_fire_time(fire, fire)
+                if nxt is None or nxt > local_now:
+                    break
+                fire = nxt
+            return fire.astimezone(timezone.utc)
+
+        async def _scenario() -> None:
+            now = datetime.now(timezone.utc)
+            fire_utc = _fire_utc(now)
+            ran_at_fire = fire_utc.strftime("%Y-%m-%d %H:%M:%S")
+            before_fire = (fire_utc - timedelta(minutes=10)).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                # Case 1: a run row started AT the latest fire (UTC string)
+                # → correctly converted → SKIP.
+                db_ran = await self._make_db(
+                    os.path.join(tmpdir, "ran.db"),
+                    schedules=[("p", "0 * * * *", 1, "cfg.yaml")],
+                    run_inserts=[("r1", "p", "completed", f"'{ran_at_fire}'")],
+                )
+                sched_ran = MagicMock()
+                sched_ran.timezone = ist
+                self.assertEqual(await _schedule_catchups(sched_ran, db_ran), 0)
+                sched_ran.add_job.assert_not_called()
+
+                # Case 2: the only row started BEFORE the fire → catch-up,
+                # and the WARNING reason arg quotes the missed fire in UTC.
+                db_missed = await self._make_db(
+                    os.path.join(tmpdir, "missed.db"),
+                    schedules=[("p", "0 * * * *", 1, "cfg.yaml")],
+                    run_inserts=[("r1", "p", "completed", f"'{before_fire}'")],
+                )
+                sched_missed = MagicMock()
+                sched_missed.timezone = ist
+                self.assertEqual(await _schedule_catchups(sched_missed, db_missed), 1)
+                reason = sched_missed.add_job.call_args.kwargs["args"][2]
+                self.assertEqual(reason, fire_utc.isoformat())
+
+        _run_async(_scenario())
+
+    def test_invalid_cron_row_does_not_break_the_pass(self) -> None:
+        from web.scheduler import _schedule_catchups
+
+        async def _scenario() -> None:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                db_path = await self._make_db(
+                    os.path.join(tmpdir, "h.db"),
+                    schedules=[
+                        ("broken", "not-a-cron", 1, "cfg.yaml"),
+                        ("deepseek", "0 3 * * *", 1, "cfg.yaml"),
+                    ],
+                )
+                sched = MagicMock()
+
+                # The unparseable row is skipped (its scan- job logged the
+                # parse error during rebuild); the healthy row still catches up.
+                self.assertEqual(await _schedule_catchups(sched, db_path), 1)
+                self.assertEqual(
+                    sched.add_job.call_args.kwargs["args"][0], "deepseek"
+                )
+
+        _run_async(_scenario())
+
+    def test_catchup_job_logs_warning_and_delegates(self) -> None:
+        import web.scheduler as scheduler_mod
+        from web.scheduler import _run_catchup_job
+
+        async def _scenario() -> None:
+            with patch.object(
+                scheduler_mod, "_run_provider_job", new=AsyncMock()
+            ) as mock_run:
+                with self.assertLogs("web.scheduler", level="WARNING") as logs:
+                    await _run_catchup_job(
+                        "deepseek", "cfg.yaml", "2026-09-28T02:00:00+00:00"
+                    )
+            mock_run.assert_awaited_once_with("deepseek", "cfg.yaml")
+            messages = [r.getMessage() for r in logs.records]
+            self.assertTrue(
+                any("Catch-up firing" in m for m in messages), messages
+            )
+
+        _run_async(_scenario())
+
+    def test_init_scheduler_invokes_catchups(self) -> None:
+        import types
+
+        import web.scheduler as scheduler_mod
+        from web.scheduler import init_scheduler
+
+        async def _scenario() -> None:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                db_path = os.path.join(tmpdir, "sched.db")
+                # Pre-seed ONE far-future row so the seed list is skipped.
+                await self._make_db(
+                    db_path,
+                    schedules=[
+                        ("probe", "0 0 1 1 *", 1, "examples/config-deepseek.yaml")
+                    ],
+                )
+                settings = types.SimpleNamespace(db_path=db_path)
+
+                with patch.object(
+                    scheduler_mod, "_schedule_catchups", new=AsyncMock(return_value=0)
+                ) as mock_catchups:
+                    svc = await init_scheduler(settings)
+                    try:
+                        mock_catchups.assert_awaited_once()
+                        self.assertEqual(
+                            mock_catchups.await_args.args[1], db_path
+                        )
+                    finally:
+                        await svc.shutdown()
+                        # Don't leak the stopped service into the module
+                        # global — later tests call the real
+                        # shutdown_scheduler and would hit a dead instance.
+                        scheduler_mod._scheduler_service = None
 
         _run_async(_scenario())
 
