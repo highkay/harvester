@@ -167,6 +167,23 @@ class TestOpenCodePushServiceBasic(unittest.TestCase):
                 if saved is not None:
                     os.environ["GPT_LOAD_AUTH_KEY"] = saved
 
+    def test_auth_fallback_never_leaks_to_overridden_base(self) -> None:
+        """GPT_LOAD_AUTH_KEY must NOT be sent to a non-default base URL: the
+        fallback exists for the fnos instance only."""
+        with _clear_opencode_env():
+            with patch.dict(
+                os.environ,
+                {
+                    "GPT_LOAD_AUTH_KEY": "gpt-key",
+                    "OPENCODE_LOAD_BASE_URL": "http://203.0.113.9:43001",
+                },
+                clear=False,
+            ):
+                svc = OpenCodePushService(db_path=":memory:", workspace=".")
+                self.assertEqual(
+                    svc._auth_key, "", "foreign base URL must not receive the fnos key"
+                )
+
     def test_push_happy_path_single_post_success(self) -> None:
         """Env-configured base/group; 2 sk- keys + 1 junk line -> one POST,
         junk counted ignored, no Authorization header, row success."""

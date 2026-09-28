@@ -85,12 +85,13 @@ class OpenCodePushService:
         if base_url is None:
             base_url = os.environ.get("OPENCODE_LOAD_BASE_URL", _DEFAULT_BASE_URL)
         if auth_key is None:
-            # Fall back to the generic gpt-load key: the default target IS the
-            # instance GPT_LOAD_AUTH_KEY belongs to, and that instance requires
-            # auth (no-auth GET /api/groups -> 401, measured 2026-09-28).
-            auth_key = os.environ.get("OPENCODE_LOAD_AUTH_KEY") or os.environ.get(
-                "GPT_LOAD_AUTH_KEY", ""
-            )
+            auth_key = os.environ.get("OPENCODE_LOAD_AUTH_KEY") or ""
+            if not auth_key and base_url.rstrip("/") == _DEFAULT_BASE_URL:
+                # Fall back to the generic gpt-load key ONLY when talking to
+                # the default (fnos) instance that the key belongs to — its
+                # management API 401s without auth (measured 2026-09-28).
+                # Never send the key to an overridden base URL.
+                auth_key = os.environ.get("GPT_LOAD_AUTH_KEY", "")
         if group_id is None:
             try:
                 group_id = int(os.environ.get("OPENCODE_LOAD_GROUP_ID", str(_DEFAULT_GROUP_ID)))
