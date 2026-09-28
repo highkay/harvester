@@ -279,7 +279,7 @@ class TestAgnesAIPushServiceBasic(unittest.TestCase):
             self.assertEqual(_count_logs(db_path, "run-test-005"), 1)
 
     def test_push_chunks_over_max_keys_per_post(self) -> None:
-        """501 valid keys → 6 POST calls (100-key chunks: 5×100 + 1)."""
+        """501 valid keys → 51 POST calls (10-key chunks: 50×10 + 1)."""
         db_path = _temp_db_path()
         with tempfile.TemporaryDirectory() as workspace:
             _init_schema(db_path)
@@ -293,11 +293,11 @@ class TestAgnesAIPushServiceBasic(unittest.TestCase):
             ) as mock_post:
                 svc.push_valid_keys("agnes-ai", "run-test-006")
 
-            self.assertEqual(mock_post.call_count, 6, "501 keys → 5×100 + 1 chunks")
+            self.assertEqual(mock_post.call_count, 51, "501 keys → 50×10 + 1 chunks")
             first_call = mock_post.call_args_list[0]
             last_call = mock_post.call_args_list[-1]
             self.assertEqual(
-                len(first_call[1]["json"]["keys_text"].splitlines()), 100
+                len(first_call[1]["json"]["keys_text"].splitlines()), 10
             )
             self.assertEqual(
                 len(last_call[1]["json"]["keys_text"].splitlines()), 1

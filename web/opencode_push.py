@@ -38,10 +38,12 @@ logger = get_logger("web.opencode_push")
 _DEFAULT_BASE_URL: str = "http://192.168.1.18:43001"
 _DEFAULT_GROUP_ID: int = 20
 _PROVIDER_NAME: str = "opencode"
-# Chunk/timeout mirror the agnes-ai fix (2026-09-28): a slow gpt-load instance
-# (rn answers a plain GET /api/groups in ~2.5s) exceeded a 30s read timeout on
-# 500-key add-multiple POSTs, dropping whole runs' yields. 100 keys / 180s is
-# the measured-safe shape.
+# Chunk/timeout reference the agnes-ai measurements (2026-09-28): a WAN
+# gpt-load instance drops multi-KB POST bodies (server-side body-read i/o
+# timeout), so chunks must stay small. The default target here is the fnos
+# LAN instance (0.0s RTT, 500-key chunks proven), so 100/180 is comfortable
+# headroom — shrink _MAX_KEYS_PER_POST if this service is ever pointed at a
+# WAN instance.
 _TIMEOUT_SECONDS: int = 180
 _MAX_RETRIES: int = 3
 _RETRY_BACKOFF_BASE: float = 1.0  # seconds
