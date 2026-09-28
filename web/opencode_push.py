@@ -55,6 +55,18 @@ _MAX_KEYS_PER_POST: int = 100
 # as ignored.
 _KEY_RE: re.Pattern[str] = re.compile(r"sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,64}")
 
+# A 4xx body containing one of these markers is a transport failure wearing a
+# 400 costume (gpt-load embeds its own body-read i/o timeout in INVALID_JSON),
+# so it is retried like a network error instead of failing the chunk. Mirrors
+# web/agnes_ai_push.py exactly — the trap was measured on the fnos->rn WAN
+# path (2026-09-28) and applies to ANY gpt-load target, not just agnes's.
+_TRANSPORT_400_MARKERS: tuple[str, ...] = (
+    "read tcp",
+    "i/o timeout",
+    "connection reset",
+    "unexpected EOF",
+)
+
 
 # ---------------------------------------------------------------------------
 # OpenCodePushService
@@ -286,8 +298,19 @@ class OpenCodePushService:
 
                 last_error = f"HTTP {resp.status_code}: {resp.text[:200]}"
                 if resp.status_code < 500 and resp.status_code != 429:
-                    # Other 4xx — non-retryable failure
-                    return "failed", 0, 0, last_error
+                    # A 400 whose body embeds a transport-level read failure is
+                    # a network problem, not a client error: gpt-load reports
+                    # its OWN body-read timeout as INVALID_JSON (measured on
+                    # the fnos->rn WAN path 2026-09-28:
+                    # HTTP 400 {"code":"INVALID_JSON","message":"read tcp
+                    # 172.18.0.2:43001->...: i/o timeout"} on a ~5KB body).
+                    if resp.status_code == 400 and any(
+                        m in resp.text for m in _TRANSPORT_400_MARKERS
+                    ):
+                        pass  # fall through to the retry sleep
+                    else:
+                        # Other 4xx — non-retryable failure
+                        return "failed", 0, 0, last_error
 
             except requests.ConnectionError as exc:
                 last_error = f"ConnectionError: {exc}"
