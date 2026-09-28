@@ -172,11 +172,12 @@ _DEFAULT_SCHEDULES: tuple[tuple[str, str, str], ...] = (
     ("ollama", "20 3 * * *", "examples/config-ollama.yaml"),
     ("openrouter", "40 8 * * *", "examples/config-openrouter.yaml"),
     ("nvidia", "50 11 * * *", "examples/config-nvidia.yaml"),
-    # OpenCode Go subscription keys — daily at 22:00, after the evening
-    # regional chain (18:00-21:00) and clear of every other minute in this
-    # list. Endpoint live-verified 2026-09-28 (models list public, chat
-    # completion auth-gated).
-    ("opencode", "0 22 * * *", "examples/config-opencode.yaml"),
+    # OpenCode Go subscription keys — WEEKLY (Sat 22:00), downgraded from
+    # daily on 2026-09-28 after two consecutive zero-valid runs (92k links →
+    # 265 materials → 0 valid each time): the corpus carries docs/placeholders
+    # and dead/unsubscribed keys only. Weekly keeps the provider warm at ~1/7
+    # of the GitHub-search budget; re-promote if a weekly run ever yields.
+    ("opencode", "0 22 * * 6", "examples/config-opencode.yaml"),
 )
 
 

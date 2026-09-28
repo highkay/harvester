@@ -113,7 +113,7 @@ class TestSeedData(unittest.TestCase):
         "ollama": "20 3 * * *",
         "openrouter": "40 8 * * *",
         "nvidia": "50 11 * * *",
-        "opencode": "0 22 * * *",
+        "opencode": "0 22 * * 6",
     }
     _EXPECTED_CONFIG_FILES = {
         "deepseek": "examples/config-deepseek.yaml",
