@@ -83,6 +83,9 @@ class TestSeedData(unittest.TestCase):
             "ollama",
             "openrouter",
             "nvidia",
+            # 2026-09-28: opencode seeded — endpoint live-verified the same
+            # day (public /models list, auth-gated chat probe).
+            "opencode",
         }
     )
     _EXPECTED_CRONS = {
@@ -109,6 +112,7 @@ class TestSeedData(unittest.TestCase):
         "ollama": "20 3 * * *",
         "openrouter": "40 8 * * *",
         "nvidia": "50 11 * * *",
+        "opencode": "0 22 * * *",
     }
     _EXPECTED_CONFIG_FILES = {
         "deepseek": "examples/config-deepseek.yaml",
@@ -129,6 +133,7 @@ class TestSeedData(unittest.TestCase):
         "ollama": "examples/config-ollama.yaml",
         "openrouter": "examples/config-openrouter.yaml",
         "nvidia": "examples/config-nvidia.yaml",
+        "opencode": "examples/config-opencode.yaml",
     }
 
     def test_seeds_defaults_on_empty_table(self) -> None:

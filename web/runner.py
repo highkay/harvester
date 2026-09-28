@@ -398,6 +398,9 @@ class PipelineRunner:
                 only_if_running=True,
             )
             if work_failed:
+                # Not just annotated: a run that searched and produced NOTHING
+                # is recorded failed so it shows up in the failed view (and can
+                # be re-triggered) instead of looking healthy in run_records.
                 logger.error(
                     f"Scan FAILED (no work): provider={provider_name} "
                     f"run_id={run_id} links=0 materials=0 valid_keys=0"
@@ -683,6 +686,37 @@ class PipelineRunner:
         except Exception as exc:
             logger.error(
                 f"ModelScope push hook error: provider={provider_name} "
+                f"run_id={run_id} error={exc}"
+            )
+
+        # OpenCode push — symmetric to the modelscope block above. Only fires
+        # for opencode scans; the target gpt-load instance + group default via
+        # OPENCODE_LOAD_BASE_URL / OPENCODE_LOAD_GROUP_ID (+ optional
+        # OPENCODE_LOAD_AUTH_KEY). Env gating lives inside OpenCodePushService.
+        try:
+            from web.opencode_push import get_opencode_push_service  # type: ignore[import-untyped,unused-ignore]
+
+            if provider_name == "opencode":
+                opencode_push_service = get_opencode_push_service()
+                # Run push in a new thread to avoid blocking the completion callback
+                t = threading.Thread(
+                    target=opencode_push_service.push_valid_keys,
+                    args=(provider_name, run_id),
+                    daemon=True,
+                )
+                t.start()
+                logger.info(
+                    f"OpenCode push triggered: "
+                    f"provider={provider_name} run_id={run_id}"
+                )
+        except ImportError:
+            logger.info(
+                f"OpenCode push service not available: "
+                f"provider={provider_name} run_id={run_id}"
+            )
+        except Exception as exc:
+            logger.error(
+                f"OpenCode push hook error: provider={provider_name} "
                 f"run_id={run_id} error={exc}"
             )
 
@@ -1046,7 +1080,7 @@ class PipelineRunner:
         valid_keys: int,
         app: Any = None,
     ) -> tuple[str | None, bool]:
-        """Marker for a run that did NO work at all, plus whether it FAILED.
+        """Marker for a 'completed' run that did NO work at all, or None.
 
         Measured 2026-09-26 08:00 (openrouter): the run had ONE condition, its
         single search task was denied by the process-wide ``github_api`` rate
@@ -1065,6 +1099,9 @@ class PipelineRunner:
             detail = " ".join(f"{k}={v}" for k, v in sorted(counters.items()))
         else:
             detail = "stage counters unavailable"
+        # Failure only when the run actually TRIED to search and produced
+        # nothing: a validate-only config (no search tasks at all) keeps its
+        # 'completed' status with the marker as a quality note.
         search_attempts = counters.get("search_completed", 0) + counters.get(
             "search_failed", 0
         )

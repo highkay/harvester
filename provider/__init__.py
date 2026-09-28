@@ -22,6 +22,7 @@ from .kimi import KimiProvider
 from .mimo import MiMoProvider
 from .modelscope import ModelScopeProvider
 from .ollama import OllamaProvider
+from .opencode import OpenCodeProvider
 from .openai import OpenAIProvider
 from .openai_like import OpenAILikeProvider
 from .openrouter import OpenRouterProvider
@@ -50,6 +51,7 @@ __all__ = [
     "KimiProvider",
     "MiMoProvider",
     "ModelScopeProvider",
+    "OpenCodeProvider",
     "GLMProvider",
     "OllamaProvider",
     "QianFanProvider",

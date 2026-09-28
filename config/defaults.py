@@ -641,6 +641,86 @@ def get_default_config() -> Dict[str, Any]:
                 },
             },
         {
+                "name": "opencode",
+                "enabled": False,
+                "provider_type": "opencode",
+                "use_api": True,
+                "max_pages": 1000,
+                "stages": {
+                    "search": True,
+                    "gather": True,
+                    "check": True,
+                    "inspect": True,
+                },
+                "extras": {},
+                "api": {
+                    "base_url": "https://opencode.ai/zen/go/v1",
+                    "completion_path": "/chat/completions",
+                    "model_path": "/models",
+                    "default_model": "glm-5.3",
+                    "auth_key": "",
+                    "extra_headers": {},
+                    "api_version": "",
+                    "timeout": 30,
+                    "retries": 3,
+                },
+                "patterns": {
+                    # Env-anchored extraction only; the lookahead excludes
+                    # Anthropic/OpenAI project & service-account sk- keys.
+                    # Domain conditions below widen to Bearer/quoted sk- keys.
+                    "key_pattern": (
+                        r"(?i)(?:OPENCODE_API_KEY|OPENCODE_KEY|"
+                        r"opencode[_-]?api[_-]?key)"
+                        r"[\"'\]]{0,2}\s*[:=]\s*[\"']?"
+                        r"(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,64})"
+                        r"[\"']?"
+                    ),
+                    "address_pattern": "",
+                    "endpoint_pattern": "",
+                    "model_pattern": "",
+                },
+                "conditions": [
+                    {"query": '"OPENCODE_API_KEY"'},
+                    {"query": '"OPENCODE_API_KEY="'},
+                    {"query": '"OPENCODE_API_KEY:"'},
+                    {"query": '"OPENCODE_API_KEY" language:Python'},
+                    {"query": '"OPENCODE_API_KEY" extension:env'},
+                    {"query": '"OPENCODE_API_KEY" extension:yaml'},
+                    {
+                        "query": '"opencode.ai/zen"',
+                        "patterns": {
+                            "key_pattern": (
+                                r"(?i)(?:Bearer\s+|[\"']\s*)?"
+                                r"(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,64})"
+                            ),
+                        },
+                    },
+                    {
+                        "query": '"opencode.ai" "Authorization"',
+                        "patterns": {
+                            "key_pattern": (
+                                r"(?i)(?:Bearer\s+|[\"']\s*)?"
+                                r"(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,64})"
+                            ),
+                        },
+                    },
+                    {
+                        "query": '"opencode.ai" "api_key"',
+                        "patterns": {
+                            "key_pattern": (
+                                r"(?i)(?:Bearer\s+|[\"']\s*)?"
+                                r"(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,64})"
+                            ),
+                        },
+                    },
+                ],
+                "rate_limit": {"base_rate": 1.0, "burst_limit": 5, "adaptive": True},
+                "storage": {
+                    "directory": "",
+                    "plan": "",
+                },
+            },
+        {
                 "name": "deepseek",
                 "enabled": False,
                 "provider_type": "deepseek",
