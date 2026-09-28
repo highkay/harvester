@@ -38,11 +38,17 @@ logger = get_logger("web.agnes_ai_push")
 _DEFAULT_BASE_URL: str = "http://107.172.141.203:43001"
 _DEFAULT_GROUP_ID: int = 19
 _PROVIDER_NAME: str = "agnes-ai"
-_TIMEOUT_SECONDS: int = 30
+# Measured 2026-09-27/28 on prod: the rn gpt-load instance answers a plain
+# GET /api/groups in ~2.5s (vs 0.0s for the fnos LAN instance), and every
+# 500-key add-multiple POST exceeded the old 30s read timeout — three agnes
+# pushes failed with 0 keys pushed (run pushes of 32/34/67 keys on
+# 09-16/09-20/09-27). Smaller chunks + a 180s read timeout keep a slow
+# instance from dropping the whole run's yield.
+_TIMEOUT_SECONDS: int = 180
 _MAX_RETRIES: int = 3
 _RETRY_BACKOFF_BASE: float = 1.0  # seconds
 _RETRY_BACKOFF_MULTIPLIER: float = 3.0
-_MAX_KEYS_PER_POST: int = 500
+_MAX_KEYS_PER_POST: int = 100
 
 # Generic sk- keys (OpenAI-compatible, e.g. deepseek/kimi/qwen line); excluded:
 # anthropic (sk-ant-), OpenAI project (sk-proj-) and service-account
