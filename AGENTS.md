@@ -1896,6 +1896,28 @@ net-new added):
   `"OPENCODE_API_KEY"` ≈33k, `extension:yaml` 586, `language:Python` 3.4k,
   `extension:env` 29. Supply is real; the domain dorks are the big wells.
   Baseline for judging tonight's 22:00 first run.
+- **Review-fix the same day (`0c79712`)**: the `GPT_LOAD_AUTH_KEY` fallback
+  now applies ONLY when the effective base URL is the default fnos instance —
+  an overridden `OPENCODE_LOAD_BASE_URL` with an unset dedicated key would
+  otherwise have leaked the fnos master key to a foreign host. Deployed by
+  `docker compose cp` WITHOUT a restart on purpose: the only import of
+  `web.opencode_push` is the lazy one inside `runner._on_completed`, and no
+  opencode run had completed since the process started, so the 22:00 run
+  picks the new file up fresh.
+- **Cleanup sweep (2026-09-28)**: workstation worktrees `hv-final` /
+  `hx-deploy2` removed (detached deploy-validation leftovers, both SHAs
+  merged); fnos: 4 `fnos-custom` stashes dropped (all were
+  Dockerfile.web/docker-compose.yml variants, superseded by rollback dirs),
+  stray helpers (`fnos_poll.py`/`fnos_status.py`/`monitor_scan.py`) moved
+  into `rollback-20260928-100300/`, old rollback dirs pruned to the latest
+  two (`-20260926-230034`, `-20260928-100300`), and ~30 dead watcher/recovery
+  files in `data/` removed (named list) or moved to `data/_attic/` (the
+  sibling-session tavily recovery scripts, kept for replay). fnos repo root
+  now carries only the two intentional live edits (`Dockerfile.web`,
+  `docker-compose.yml`) plus `.env` backups and the gemini rollback export.
+- **Cross-instance auth note (measured)**: the rn and fnos gpt-load instances
+  accept the SAME master key (the rn row's decrypted key authenticated
+  against the fnos instance) — rotate both together.
 - **tavily master-key exposure scrubbed**: `/tmp/tavily_key_recovery.py`
   (hardcoded proxy master key fallback, 09-22) deleted from the container.
   Rotation still optional (the key itself never left the box).
