@@ -196,10 +196,22 @@ class OpenCodeProvider(AIBaseProvider):
 
         if code == 200:
             try:
-                json.loads(message)
+                data = json.loads(message)
             except Exception:
                 # Proxies/gateways answer 200 with junk — not proof of validity
                 return CheckResult.fail(ErrorReason.UNKNOWN)
+
+            # House precedent (2026-09-23 openai_like hardening): a 200 whose
+            # parseable body carries a non-empty top-level `error` (dict OR
+            # non-empty string — the native soft-error shape) is a FAILED
+            # request, not an accepted key. SERVER_ERROR is retryable, so the
+            # key lands in the recoverable wait-check bucket rather than being
+            # silently pooled as valid (or, if mapped to a permanent reason,
+            # burned to invalid). Empty/falsy/None `error` keeps success.
+            if isinstance(data, dict):
+                error = data.get("error")
+                if (isinstance(error, dict) and error) or (isinstance(error, str) and trim(error)):
+                    return CheckResult.fail(ErrorReason.SERVER_ERROR)
 
             return CheckResult.success(message="OpenCode API accepted key")
 

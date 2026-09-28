@@ -167,6 +167,43 @@ class TestOpenCodeProviderCheck(unittest.TestCase):
             result = self.provider.check(token=_TOKEN)
         self.assertEqual(result.reason, ErrorReason.UNKNOWN)
 
+    def test_check_200_dict_error_is_server_error(self):
+        """House precedent (openai_like 2026-09-23): a 200 whose parseable body
+        carries a non-empty top-level ``error`` dict is a soft error, NOT an
+        accepted key — SERVER_ERROR (retryable -> wait-check), never valid and
+        never the permanent-discard bucket."""
+        body = json.dumps(
+            {"id": "x", "error": {"type": "server_error", "message": "upstream boom"}}
+        )
+        with _patch_request(FakeResponse(200, body)):
+            result = self.provider.check(token=_TOKEN)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.reason, ErrorReason.SERVER_ERROR)
+        self.assertTrue(result.reason.is_retryable(), "must route to wait-check, not invalid")
+
+    def test_check_200_string_error_is_server_error(self):
+        """The native soft-error shape can be a plain STRING ({"error": "..."}),
+        exactly as openai_like guards — a string error must not be pooled."""
+        body = json.dumps({"error": "model overloaded, retry later"})
+        with _patch_request(FakeResponse(200, body)):
+            result = self.provider.check(token=_TOKEN)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.reason, ErrorReason.SERVER_ERROR)
+        self.assertTrue(result.reason.is_retryable())
+
+    def test_check_200_empty_error_string_stays_success(self):
+        """An empty/falsy ``error`` is NOT a soft error — the guard only fires
+        on a non-empty value, so a normal success body is still accepted."""
+        with _patch_request(FakeResponse(200, json.dumps({**_CHAT_JSON, "error": ""}))):
+            result = self.provider.check(token=_TOKEN)
+        self.assertTrue(result.ok)
+
+    def test_check_200_normal_json_success(self):
+        # A clean chat-completion body with no top-level error stays success.
+        with _patch_request(FakeResponse(200, json.dumps(_CHAT_JSON))):
+            result = self.provider.check(token=_TOKEN)
+        self.assertTrue(result.ok)
+
     def test_check_401_autherror_invalid_key(self):
         error = _http_error(401, _err_body("AuthError", "Invalid API key."))
         with mock.patch("provider.opencode.request", side_effect=error) as req_mock:
