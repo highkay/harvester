@@ -8,6 +8,7 @@ Supports batch saving for keys, links, and other results with atomic file operat
 import datetime
 import json
 import os
+import re
 import shutil
 import tempfile
 import threading
@@ -41,6 +42,14 @@ _REQUEUE_CAP_FLOOR = 1000
 # add path. flush_all() forces its way past it.
 _FLUSH_RETRY_COOLDOWN_SEC = 30.0
 
+# Number of newest backup-<timestamp> dirs kept per provider. backup runs on
+# EVERY run start (manager/task.py), so without retention prod accumulated
+# 76+ dirs per provider directory; only directories matching the exact
+# backup-YYYYmmdd-HHMMSS naming are ever pruned (sibling dirs like
+# data/_attic/ must remain untouched).
+_BACKUP_RETENTION = 3
+_BACKUP_DIR_RE = re.compile(r"^backup-\d{8}-\d{6}$")
+
 # ---------------------------------------------------------------------------
 # Gather-outcome counters (observability contract)
 # ---------------------------------------------------------------------------
@@ -68,6 +77,44 @@ _GATHER_COUNTER_FIELDS = frozenset({GATHER_OK, GATHER_EMPTY, GATHER_ERROR_404, G
 # dies, and the entry evaporates.
 _RESULT_MANAGERS: "WeakKeyDictionary[IProvider, weakref.ReferenceType[ResultManager]]" = WeakKeyDictionary()
 _RESULT_MANAGERS_LOCK = threading.Lock()
+
+
+def prune_backup_dirs(directory: str, name: str = "") -> int:
+    """Delete all but the newest ``_BACKUP_RETENTION`` backup-<ts> dirs.
+
+    Only directories matching the exact ``backup-YYYYmmdd-HHMMSS`` naming are
+    considered; anything else (``_attic/``, result files, ``backup-`` prefixes
+    with a different shape) is left untouched. Fixed-width timestamps sort
+    lexicographically == chronologically, so the newest keepers are the last
+    ``_BACKUP_RETENTION`` names. Per-dir failures are logged and swallowed so a
+    locked/partial dir can never abort a run start. Returns dirs removed.
+    """
+    if not os.path.isdir(directory):
+        return 0
+
+    try:
+        backups = sorted(
+            entry
+            for entry in os.listdir(directory)
+            if _BACKUP_DIR_RE.match(entry) and os.path.isdir(os.path.join(directory, entry))
+        )
+    except OSError as e:
+        logger.warning(f"[persist] failed to list backups in {directory} for {name}: {e}")
+        return 0
+
+    stale = backups[:-_BACKUP_RETENTION] if len(backups) > _BACKUP_RETENTION else []
+    removed = 0
+    for entry in stale:
+        target = os.path.join(directory, entry)
+        try:
+            shutil.rmtree(target)
+            removed += 1
+        except OSError as e:
+            logger.warning(f"[persist] failed to prune backup dir {target} for {name}: {e}")
+
+    if removed:
+        logger.info(f"[persist] pruned {removed} old backup dir(s) for {name}, kept newest {_BACKUP_RETENTION}")
+    return removed
 
 
 class ResultBuffer:
@@ -422,6 +469,10 @@ class ResultManager:
                 logger.error(f"Failed to backup {file_type} for {self.name}: {e}")
 
         logger.info(f"Backed up {len(existing_files)} files for {self.name} to {backup_dir}")
+
+        # Bound disk growth: backup runs on every run start but nothing ever
+        # pruned the dirs (prod carried 76+). Keep only the newest few.
+        prune_backup_dirs(self.directory, self.name)
 
     def _process_links_data(self, obj: Dict[str, Any]) -> Optional[str]:
         """Process links data from NDJSON object.
