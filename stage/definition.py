@@ -242,6 +242,11 @@ class SearchStage(BasePipelineStage):
                 gather_links = list(results)
                 link_index = client.get_link_index()
                 if link_index is not None and link_index.enabled:
+                    # The WRITE is gated on the same predicate as the
+                    # read/dedup: with skip_known_links=false nothing ever
+                    # reads the index, so add_many would only grow an
+                    # evict-less sqlite file forever (links.db was 1.1GB on
+                    # prod, write-only dead weight under every shipped config).
                     if client.should_skip_known_links():
                         gather_links = link_index.filter_new(results, task.provider)
                         skipped = len(results) - len(gather_links)
@@ -250,17 +255,17 @@ class SearchStage(BasePipelineStage):
                                 f"[{self.name}] skipped {skipped} known links for {task.provider} "
                                 f"(index dedup)"
                             )
-                    new_count = link_index.add_many(
-                        results,
-                        provider=task.provider,
-                        search_type=search_type,
-                        query=task.query,
-                    )
-                    if new_count < len(results):
-                        logger.debug(
-                            f"[{self.name}] link index: {new_count} new / {len(results)} total "
-                            f"for {task.provider} ({search_type})"
+                        new_count = link_index.add_many(
+                            results,
+                            provider=task.provider,
+                            search_type=search_type,
+                            query=task.query,
                         )
+                        if new_count < len(results):
+                            logger.debug(
+                                f"[{self.name}] link index: {new_count} new / {len(results)} total "
+                                f"for {task.provider} ({search_type})"
+                            )
 
                 for link in gather_links:
                     acquisition_task = TaskFactory.create_acquisition_task(task.provider, link, patterns)

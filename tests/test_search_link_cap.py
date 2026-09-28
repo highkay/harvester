@@ -23,6 +23,7 @@ from unittest import mock
 from config.schemas import StageConfig, TaskConfig
 from core.models import SearchTask
 from search import client
+from search.github.index import LinkIndex
 from stage.base import StageResources
 from stage.definition import SearchStage
 
@@ -223,6 +224,58 @@ class TestCapConfigContract(unittest.TestCase):
                     )
                     loaded = ConfigLoader(str(path)).load()
                     self.assertEqual(expected, loaded.global_config.max_links_per_run)
+
+
+class TestLinkIndexWriteGating(unittest.TestCase):
+    """The link-index WRITE is gated on should_skip_known_links().
+
+    Every shipped config sets skip_known_links=false, and search/github/index.py
+    has no eviction — so an ungated write made links.db a write-only dead weight
+    (1.1GB on prod). Read/dedup semantics are unchanged; only the write is bound
+    to the same predicate as the read.
+    """
+
+    def _sheet(self, links_per_call: int = 3) -> Any:
+        # page != 1 -> the worker calls client.search_code(query, ...) -> (links, content).
+        return mock.MagicMock(
+            return_value=(
+                [f"https://github.com/o/r/blob/main/g{i}.env" for i in range(links_per_call)],
+                "",
+            )
+        )
+
+    def _index_after_run(self, *, skip_known: bool, tmp: str) -> LinkIndex:
+        stage = SearchStage(_resources(max_links=0), handler=lambda _o: None)
+        idx = LinkIndex(tmp, enabled=True)
+        search_mock = self._sheet(links_per_call=3)
+        with mock.patch.object(client, "search_code", search_mock), mock.patch.object(
+            client, "get_link_index", return_value=idx
+        ), mock.patch.object(client, "should_skip_known_links", return_value=skip_known):
+            # page=2 isolates the index block from pagination/refinement.
+            self.assertIsNotNone(stage.process_task(_task(page=2)))
+        return idx
+
+    def test_no_write_when_skip_known_false(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            idx = self._index_after_run(skip_known=False, tmp=tmp)
+            try:
+                self.assertEqual(
+                    0, idx.stats("test")["count"], "skip_known=false must not write the index"
+                )
+            finally:
+                idx.close()
+
+    def test_write_when_skip_known_true(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            idx = self._index_after_run(skip_known=True, tmp=tmp)
+            try:
+                self.assertEqual(
+                    3,
+                    idx.stats("test")["count"],
+                    "skip_known=true must index the discovered links (read/write parity kept)",
+                )
+            finally:
+                idx.close()
 
 
 if __name__ == "__main__":
