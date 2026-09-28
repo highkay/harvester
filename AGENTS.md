@@ -1875,16 +1875,27 @@ net-new added):
   were already disabled. Re-enable = same PUT with `enabled: true`.
 - **KEPT (10 enabled)**: serpapi, nvidia, tavily, glm, glm-ai, modelscope,
   ollama, openrouter, agnes-ai + the new opencode.
-- **agnes-ai push timeout root cause + fix (d9012eb)**: the rn gpt-load
-  (`107.172.141.203:43001`, a DIFFERENT instance from fnos `192.168.1.18` —
-  group lists are disjoint: fnos ids 1-15, rn ids 9/12/13/17/19/23) answers
-  a plain GET /api/groups in ~2.5s vs 0.0s on LAN, and every 500-key
-  add-multiple POST exceeded the 30s read timeout (09-16/20/27 pushes lost
-  32/34/67 keys). `web/agnes_ai_push.py` now chunks 100 keys / 180s timeout.
-  Proof pending: next agnes run 10:00.
-- **mimo-sg 404s self-resolved**: group 17 (`mimosg`) exists on the rn
-  instance NOW (created between 09-21 and 09-28); the 09-28 00:33 push
-  succeeded. The 12 failures (09-08→09-21) were "group didn't exist yet".
+- **agnes-ai push root cause + fix (d9012eb, faca500, 3c5686f)**: the rn
+  gpt-load (`107.172.141.203:43001`) is a genuinely remote VPS — its group
+  list is DISJOINT from the fnos instance (fnos ids 1-15+20, rn ids
+  9/12/13/17/19/23; the old "same host" comment was wrong). The fnos→rn WAN
+  path drops POST bodies larger than a few KB: gpt-load answers
+  `HTTP 400 INVALID_JSON` wrapping its own `read tcp … i/o timeout` after
+  ~60s (its body-read deadline). Size ladder measured: 1-3 keys ≈0.5s OK,
+  10 keys ≈1.5s OK, 32-67 keys (2-5KB) fail 4/4. Fix: chunks of **10 keys**,
+  180s timeout, and transport-flavoured 400s (markers `read tcp` /
+  `i/o timeout` / `connection reset` / `unexpected EOF`) retry like network
+  errors. mimo-sg's 09-08→09-21 "404" streak self-resolved (group 17 was
+  created on rn between 09-21 and 09-28). **The 09-27 "lost" 67 agnes keys
+  were never lost** — re-push after the fix returned added=0/ignored=67,
+  `total_in_group=73`: they were already pooled by earlier pushes. Same trap
+  applies to ANY future WAN-targeted push service (opencode defaults to the
+  fnos LAN instance and stays at 100-key chunks).
+- **opencode supply probe (2026-09-28, GitHub code-search total_count via a
+  prod token)**: `"opencode.ai" "api_key"` ≈55k, `"opencode.ai/zen"` ≈42k,
+  `"OPENCODE_API_KEY"` ≈33k, `extension:yaml` 586, `language:Python` 3.4k,
+  `extension:env` 29. Supply is real; the domain dorks are the big wells.
+  Baseline for judging tonight's 22:00 first run.
 - **tavily master-key exposure scrubbed**: `/tmp/tavily_key_recovery.py`
   (hardcoded proxy master key fallback, 09-22) deleted from the container.
   Rotation still optional (the key itself never left the box).
