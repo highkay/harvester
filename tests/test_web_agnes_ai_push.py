@@ -327,6 +327,57 @@ class TestAgnesAIPushServiceBasic(unittest.TestCase):
             self.assertIsNotNone(row)
             self.assertEqual(row["status"], "failed")
 
+    def test_push_retries_transport_400_then_succeeds(self) -> None:
+        """400 INVALID_JSON embedding a server-side TCP read timeout is a
+        transport failure (gpt-load could not read the request body over a
+        lossy WAN path), so it is retried like a network error; a plain 400
+        without transport markers stays terminal."""
+        db_path = _temp_db_path()
+
+        def _resp400(text: str) -> MagicMock:
+            resp = MagicMock()
+            resp.status_code = 400
+            resp.text = text
+            return resp
+
+        transport_400 = _resp400(
+            '{"code":"INVALID_JSON","message":"read tcp 172.18.0.2:43001->'
+            '139.59.1.1:52344: i/o timeout"}'
+        )
+        real_400 = _resp400('{"code":"INVALID_JSON","message":"invalid character"}')
+
+        with tempfile.TemporaryDirectory() as workspace:
+            _init_schema(db_path)
+            _write_valid_keys(workspace, [_valid_key(1)])
+
+            svc = _make_service(db_path, workspace)
+
+            # transport-flavoured 400 then success -> one retry, success row
+            with patch(
+                "web.agnes_ai_push.requests.post",
+                side_effect=[transport_400, _resp200({"data": {"added_count": 1, "ignored_count": 0}})],
+            ) as mock_post, patch("web.agnes_ai_push.time.sleep"):
+                svc.push_valid_keys("agnes-ai", "run-test-009")
+
+            self.assertEqual(mock_post.call_count, 2, "transport 400 must be retried")
+            row = _fetch_log(db_path, "run-test-009")
+            self.assertIsNotNone(row)
+            self.assertEqual(row["status"], "success")
+            self.assertEqual(row["added_count"], 1)
+
+            # a genuine 400 stays terminal (no retry)
+            svc2 = _make_service(db_path, workspace)
+            with patch(
+                "web.agnes_ai_push.requests.post",
+                return_value=real_400,
+            ) as mock_post2, patch("web.agnes_ai_push.time.sleep"):
+                svc2.push_valid_keys("agnes-ai", "run-test-010")
+
+            self.assertEqual(mock_post2.call_count, 1, "plain 400 must NOT be retried")
+            row2 = _fetch_log(db_path, "run-test-010")
+            self.assertIsNotNone(row2)
+            self.assertEqual(row2["status"], "failed")
+
     def test_push_env_defaults_when_unset(self) -> None:
         """No AGNES_LOAD_* env → default base url and group id 19."""
         db_path = _temp_db_path()
