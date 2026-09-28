@@ -1975,6 +1975,18 @@ and deployed the same evening (rollback `rollback-20260928-182659`, md5 MATCH
   21 / serpapi 3 / nvidia 2 / qwen-cn 1 in current files; openrouter 3 / glm
   1 in `backup-20260927-080000` / `backup-20260927-120000`). Every kill was a
   deploy restart — zero organic failures in 7d.
+  **Evening follow-up resolved the 31**: re-pushing the four current
+  `valid-keys.txt` files under their ORIGINAL killed run ids returned
+  added=0 across the board (tavily 30/30, serpapi 542/542, nvidia 533/533,
+  qwen-cn 4/4 ignored), and diffing the two backup files against the gpt-load
+  pools showed 0 missing — every "stranded" key had already been re-discovered
+  and pooled by later runs. Salvage pushes SHOULD use the killed run's id as
+  run_id (these four did), which also keeps the startup recovery's
+  `push_logs.run_id == run_records.id` dedup exact. Also done: the dead 1.1GB
+  `cache/search_index/links.db` deleted in-container (space reclaims when the
+  next scan's rebind closes the old fd; the write gate keeps it empty), and
+  `.omo/evidence/tavily_watch/` copied back to fnos (the 09-28 cleanup had
+  left the eviction loop's recovery source only on the workstation).
 - **FIXED — deferral loss class**: pending deferral ladders lived only in the
   (explicit) `MemoryJobStore`; a restart wiped them and the provider silently
   missed its day (agnes-ai + openrouter missed 09-28 entirely). Scheduler now
