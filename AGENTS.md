@@ -1904,6 +1904,25 @@ net-new added):
   `web.opencode_push` is the lazy one inside `runner._on_completed`, and no
   opencode run had completed since the process started, so the 22:00 run
   picks the new file up fresh.
+- **opencode session-header trap (`7611534`, found by live-probing the first
+  run's wait bucket)**: the gateway 400s chat probes WITHOUT
+  `x-opencode-session` before judging the key (`MissingSessionID` "cannot be
+  routed efficiently") — garbage keys 401 fast, but every well-formed key
+  lands in wait-check unjudged, making 0 valid structural. With the header
+  the corpus resolves truthfully: dead → 401 `server_error` "Invalid
+  credential" (a DIFFERENT body shape — no top-level `type:"error"` wrapper;
+  the generic 401 fallthrough already maps it INVALID_KEY), authentic but
+  unsubscribed → 403 "An active OpenCode Go subscription required"
+  (NO_ACCESS → wait, never pushed — 6/16 of the first bucket were this
+  class). The provider now sends a fresh `x-opencode-session` per probe;
+  live-verified post-deploy: the re-run's invalid bucket holds exactly the
+  keys my manual probes judged dead, its wait bucket exactly the
+  subscription-lapsed ones. Manual corpus probes used
+  `socks5://192.168.1.18:1090` — opencode.ai is reachable through the trio.
+- **agnes push fix — service-level proof (2026-09-28 14:23)**: the fixed
+  service pushed 67 keys in 6s with zero retries (`success|67|0|67`), vs
+  4/4 failures over 255s before. The 10-key chunk + transport-400 retry
+  combination is the correct WAN shape.
 - **Cleanup sweep (2026-09-28)**: workstation worktrees `hv-final` /
   `hx-deploy2` removed (detached deploy-validation leftovers, both SHAs
   merged); fnos: 4 `fnos-custom` stashes dropped (all were
