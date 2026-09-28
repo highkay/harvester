@@ -18,6 +18,19 @@ enumerates model IDs for keys that already passed ``check()``.
 Error response shape (live-verified 2026-09-22 against the production API):
     {"type":"error","error":{"type":"<ClassName>","message":"<string>"}}
 
+Additionally measured on prod 2026-09-28 (real corpus probes):
+    - No ``x-opencode-session`` header -> 400 MissingSessionID "Request is
+      missing x-opencode-session and cannot be routed efficiently" — a
+      PRE-AUTH routing gate: garbage keys 401 without it, but every
+      well-formed key gets 400 and can never be judged. The provider always
+      sends a session header, so this must never fire.
+    - Routed dead key -> 401 {"error":{"type":"server_error","message":
+      "Upstream request failed: Invalid credential"}} (no top-level
+      "type":"error" wrapper) -> INVALID_KEY via the generic 401 fallthrough.
+    - Routed authentic key with lapsed/absent subscription -> 403
+      {"error":{"type":"server_error","message":"An active OpenCode Go
+      subscription ..."}} -> NO_ACCESS -> wait-check (never pushed).
+
 Status mapping traps (from the opencode gateway source, handler.ts:480-543):
     - 401 AuthError           -> INVALID_KEY (bad/expired key)
     - 401 CreditsError        -> NO_QUOTA (insufficient balance — NOT 402!)
@@ -39,6 +52,7 @@ so the body is parsed as JSON regardless of the content-type header.
 import json
 import time
 import urllib.parse
+import uuid
 from typing import Dict, List, Optional
 
 import requests
@@ -117,6 +131,13 @@ class OpenCodeProvider(AIBaseProvider):
         # type (same trap as agnes-ai — unlike OpenAI-compatible endpoints
         # that tolerate a missing header for raw data= posts).
         headers["Content-Type"] = "application/json"
+        # The gateway also 400s chat requests without a session id BEFORE
+        # judging the key (400 MissingSessionID "Request is missing
+        # x-opencode-session and cannot be routed efficiently", measured on
+        # prod 2026-09-28: every well-formed key landed in wait-check while
+        # garbage keys 401'd without it). Any value satisfies the routing
+        # gate; a fresh id per probe avoids sticky-affinity pinning.
+        headers["x-opencode-session"] = f"harvester-check-{uuid.uuid4().hex[:12]}"
 
         payload = json.dumps(
             {

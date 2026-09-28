@@ -122,6 +122,45 @@ class TestOpenCodeProviderCheck(unittest.TestCase):
         self.assertEqual(payload["max_tokens"], 1)
         self.assertEqual(payload["messages"], [{"role": "user", "content": "ping"}])
 
+    def test_check_sends_session_header(self):
+        """The gateway 400s chat probes without x-opencode-session BEFORE
+        judging the key (MissingSessionID, measured on prod 2026-09-28), so
+        every check must carry one."""
+        with _patch_request(FakeResponse(200, json.dumps(_CHAT_JSON))) as req_mock:
+            self.provider.check(token=_TOKEN)
+        headers = req_mock.call_args.kwargs["headers"]
+        self.assertTrue(
+            headers.get("x-opencode-session"), "session header must be present"
+        )
+
+    def test_check_401_server_error_shape_invalid_key(self):
+        """Routed dead key: 401 {"error":{"type":"server_error","message":
+        "Upstream request failed: Invalid credential"}} (no top-level wrapper)
+        — measured 2026-09-28 on the real corpus."""
+        body = json.dumps(
+            {"error": {"type": "server_error",
+                       "message": "Upstream request failed: Invalid credential"}}
+        )
+        with _patch_request(FakeResponse(401, body)):
+            result = self.provider.check(token=_TOKEN)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.reason, ErrorReason.INVALID_KEY)
+
+    def test_check_403_subscription_lapsed_no_access(self):
+        """Routed authentic key with lapsed subscription: 403 server_error
+        'An active OpenCode Go subscription ...' — auth-valid but plan-gated,
+        so NO_ACCESS (wait-check), never INVALID_KEY."""
+        body = json.dumps(
+            {"error": {"type": "server_error",
+                       "message": "Upstream request failed: An active OpenCode "
+                                  "Go subscription is required"}}
+        )
+        with _patch_request(FakeResponse(403, body)):
+            result = self.provider.check(token=_TOKEN)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.reason, ErrorReason.NO_ACCESS)
+
+
     def test_check_200_non_json_unknown(self):
         # Proxies may answer 200 with junk — a bare 200 is NOT proof of validity
         with _patch_request(FakeResponse(200, "<html>ok</html>")):
