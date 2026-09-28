@@ -142,6 +142,31 @@ class TestOpenCodePushServiceBasic(unittest.TestCase):
     one push_logs row is written.
     """
 
+    def test_auth_key_falls_back_to_gpt_load_auth_key(self) -> None:
+        """OPENCODE_LOAD_AUTH_KEY unset -> GPT_LOAD_AUTH_KEY is used (the
+        default target is the same auth-enforced instance); an explicit
+        OPENCODE_LOAD_AUTH_KEY wins over the fallback."""
+        with _clear_opencode_env():
+            with patch.dict(os.environ, {"GPT_LOAD_AUTH_KEY": "gpt-key"}, clear=False):
+                svc = OpenCodePushService(db_path=":memory:", workspace=".")
+                self.assertEqual(svc._auth_key, "gpt-key")
+
+            with patch.dict(
+                os.environ,
+                {"GPT_LOAD_AUTH_KEY": "gpt-key", "OPENCODE_LOAD_AUTH_KEY": "oc-key"},
+                clear=False,
+            ):
+                svc = OpenCodePushService(db_path=":memory:", workspace=".")
+                self.assertEqual(svc._auth_key, "oc-key", "explicit opencode key wins")
+
+            saved = os.environ.pop("GPT_LOAD_AUTH_KEY", None)
+            try:
+                svc = OpenCodePushService(db_path=":memory:", workspace=".")
+                self.assertEqual(svc._auth_key, "", "no env keys -> no auth header")
+            finally:
+                if saved is not None:
+                    os.environ["GPT_LOAD_AUTH_KEY"] = saved
+
     def test_push_happy_path_single_post_success(self) -> None:
         """Env-configured base/group; 2 sk- keys + 1 junk line -> one POST,
         junk counted ignored, no Authorization header, row success."""
