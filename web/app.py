@@ -16,12 +16,32 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from tools.logger import get_logger
+from tools.logger import Logger, get_logger
 
 from .deps import get_settings
 from .router_schedule import router as schedule_router
 
 logger = get_logger("web.app")
+
+# Rotated log files older than this are deleted at web startup — matches the
+# CLI's init_logging(cleanup_days=7) default, which web mode never calls.
+_WEB_LOG_RETENTION_DAYS = 7
+
+
+def _cleanup_old_web_logs() -> None:
+    """Delete aged log files once at startup (never raises).
+
+    ``tools.logger.cleanup_old_logs`` only ran from ``init_logging``, which
+    only the CLI (main.py) calls — so web-mode logs/ had no age cleanup.
+    ``_delete_existing_logs`` (the startup wipe of CURRENT module logs) is
+    untouched by this: only files whose mtime is past the retention window
+    are removed.
+    """
+    try:
+        Logger.cleanup_old_logs(days=_WEB_LOG_RETENTION_DAYS)
+    except Exception as exc:
+        logger.warning(f"log cleanup skipped: {exc}")
+
 
 # ---------------------------------------------------------------------------
 # Lazy imports (modules created by parallel tasks)
@@ -60,6 +80,8 @@ async def _lifespan(app: FastAPI):  # type: ignore[type-arg]
     # --- Startup ---
     logger.info(f"Web server starting on {settings.host}:{settings.port}")
 
+    _cleanup_old_web_logs()
+
     if init_db is not None:
         await init_db(settings.db_path)
     else:
@@ -72,6 +94,19 @@ async def _lifespan(app: FastAPI):  # type: ignore[type-arg]
             logger.info(f"Reconciled {reconciled} interrupted run(s) as failed")
     except Exception as exc:
         logger.warning(f"run reconciliation skipped: {exc}")
+
+    # Unpushed-run push recovery — MUST run before init_scheduler: the
+    # catch-up runs the scheduler arms would let a new scan's _on_start back
+    # up and reset providers/<p>/valid-keys.txt before the recovery threads
+    # (which read those files) ever ran. Never fatal.
+    try:
+        from web.runner import get_runner  # type: ignore[import-untyped]
+
+        recovered = await get_runner().recover_unpushed_runs()
+        if recovered:
+            logger.info(f"Recovered {recovered} unpushed run(s) at startup")
+    except Exception as exc:
+        logger.warning(f"push recovery skipped: {exc}")
 
     if init_scheduler is not None:
         await init_scheduler(settings)

@@ -40,6 +40,19 @@ logger = get_logger("web.runner")
 # nothing in the row said the EXTRACTION stage was the silent failure point.
 _ZERO_YIELD_LINK_THRESHOLD = 1000
 
+# Unpushed-completion recovery window: a terminal run that recorded valid
+# keys but has NO push_logs row within this window gets its pushes
+# re-dispatched once at startup (see recover_unpushed_runs). The run row is
+# written terminal BEFORE the daemon push threads fire, so a process dying in
+# that window used to lose the push silently.
+_PUSH_RECOVERY_WINDOW_HOURS = 24
+
+# Runtime orphan sweep: generated per-run YAMLs older than this can only be
+# leftovers of killed runs — a live scan deletes its own in the _execute
+# finally block, and no legitimate scan keeps one around for an hour after
+# the process that wrote it is gone.
+_RUNTIME_ORPHAN_AGE_SECONDS = 3600
+
 # ---------------------------------------------------------------------------
 # Workspace helper
 # ---------------------------------------------------------------------------
@@ -98,6 +111,9 @@ class PipelineRunner:
         # Proxy round-robin state (HARVESTER_PROXY comma-separated list)
         self._proxy_index = 0
         self._proxy_lock = threading.Lock()
+        # Killed runs leave their generated runtime YAML behind (only the
+        # scan thread's finally deletes it) — sweep the orphans at startup.
+        self._sweep_orphan_runtime_configs()
 
     # ------------------------------------------------------------------
     # Public API (async — called from FastAPI routes)
@@ -259,6 +275,62 @@ class PipelineRunner:
 
         logger.info(f"Run cancelled: run_id={run_id}")
         return True
+
+    async def recover_unpushed_runs(self) -> int:
+        """Re-dispatch pushes for terminal runs that never got one. Returns count.
+
+        Called from the web lifespan AFTER ``reconcile_running_runs`` and
+        BEFORE ``init_scheduler`` — the ordering matters: the recovery threads
+        must read ``providers/<p>/valid-keys.txt`` before a catch-up run's
+        ``_on_start`` can back up and reset those files.
+
+        A run qualifies when it is terminal (completed/failed), finished
+        within the last ``_PUSH_RECOVERY_WINDOW_HOURS``, recorded
+        ``valid_keys_found > 0`` and has NO push_logs row bearing its run_id
+        (ANY row — including a manual-salvage row — skips it; see
+        ``web.db.find_unpushed_terminal_runs``). Each recovered run goes
+        through the SAME :meth:`_push_completed_tasks` path a completion
+        uses, in a daemon thread. Never raises.
+        """
+        try:
+            from web.db import find_unpushed_terminal_runs  # type: ignore[import-untyped]
+
+            rows = await find_unpushed_terminal_runs(
+                self._db_path, window_hours=_PUSH_RECOVERY_WINDOW_HOURS
+            )
+        except Exception as exc:
+            logger.warning(f"Push recovery skipped: {exc}")
+            return 0
+
+        recovered = 0
+        for row in rows:
+            run_id = str(row.get("id") or "")
+            provider_name = str(row.get("provider_name") or "")
+            if not run_id or not provider_name:
+                continue
+            config_file = row.get("config_file")
+            config_path = Path(config_file) if config_file else None
+            try:
+                t = threading.Thread(
+                    target=self._push_completed_tasks,
+                    args=(provider_name, run_id, config_path),
+                    daemon=True,
+                    name=f"push-recovery-{run_id[:8]}",
+                )
+                t.start()
+                recovered += 1
+                logger.info(
+                    f"Push recovery: re-dispatching pushes for unpushed run: "
+                    f"provider={provider_name} run_id={run_id} "
+                    f"status={row.get('status')} "
+                    f"valid_keys={row.get('valid_keys_found')}"
+                )
+            except Exception as exc:
+                logger.warning(
+                    f"Push recovery dispatch failed: provider={provider_name} "
+                    f"run_id={run_id} error={exc}"
+                )
+        return recovered
 
     # ------------------------------------------------------------------
     # Background execution (runs in thread — synchronous)
@@ -510,9 +582,22 @@ class PipelineRunner:
     def _on_completed(self, provider_name: str, run_id: str) -> None:
         """Fire-and-forget push notification (T6 integration point).
 
-        Called from HarvesterApp's completion listener (in the scan thread).
-        Tries to import ``web.push``; if not available (T6 not yet built),
-        logs a message and continues.
+        Called from HarvesterApp's completion listener (in the scan thread)
+        and from :meth:`_push_completed_tasks`. Thin delegation kept so the
+        completion path and the startup push recovery
+        (:meth:`recover_unpushed_runs`) cannot diverge — the actual
+        per-provider dispatch lives in :meth:`_dispatch_provider_pushes`.
+        """
+        self._dispatch_provider_pushes(provider_name, run_id)
+
+    def _dispatch_provider_pushes(self, provider_name: str, run_id: str) -> None:
+        """Fire every push service that self-gates on *provider_name*.
+
+        The generic ``provider_group_mapping`` gpt-load push runs for ALL
+        providers; the dedicated services (tavily / github self-bootstrap /
+        serpapi / agnes-ai / modelscope / opencode) gate on their own provider
+        name internally. Each push runs in a daemon thread; import failures
+        and service errors are logged, never raised.
         """
         try:
             from web.push import get_push_service  # type: ignore[import-untyped,unused-ignore]
@@ -799,6 +884,32 @@ class PipelineRunner:
         runtime_dir = workspace / "runtime"
         runtime_dir.mkdir(parents=True, exist_ok=True)
         return runtime_dir / f"config-{provider_name}-{run_id}.yaml"
+
+    def _sweep_orphan_runtime_configs(self) -> None:
+        """Delete runtime/config-*.yaml older than the orphan age (never raises).
+
+        A live scan deletes its own generated YAML in ``_execute``'s finally
+        block; anything older than ``_RUNTIME_ORPHAN_AGE_SECONDS`` can only be
+        an orphan of a killed run. Logs the removed count.
+        """
+        runtime_dir = Path(self._workspace) / "runtime"
+        cutoff = time.time() - _RUNTIME_ORPHAN_AGE_SECONDS
+        removed = 0
+        try:
+            candidates = list(runtime_dir.glob("config-*.yaml"))
+        except OSError:
+            return
+        for path in candidates:
+            try:
+                if path.is_file() and path.stat().st_mtime < cutoff:
+                    path.unlink()
+                    removed += 1
+            except OSError:
+                pass
+        logger.info(
+            f"Runtime orphan sweep: removed {removed} stale runtime config(s) "
+            f"from {runtime_dir}"
+        )
 
     def _generate_temp_yaml(
         self,

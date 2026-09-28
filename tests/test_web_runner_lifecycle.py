@@ -19,6 +19,7 @@ import os
 import sqlite3
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -726,6 +727,298 @@ class TestReconcileDurationAndKeys(unittest.TestCase):
             assert row is not None
             self.assertEqual(row[0], 0)
             self.assertIsNotNone(row[1])
+
+
+# ---------------------------------------------------------------------------
+# BUG 3 — unpushed-completion loss: startup push recovery
+# ---------------------------------------------------------------------------
+
+
+class TestFindUnpushedTerminalRuns(unittest.TestCase):
+    """Given a mix of terminal/live/pushed/old/zero-key run rows,
+    When find_unpushed_terminal_runs runs,
+    Then exactly the terminal, valid (>0), in-window, push_logs-less rows come
+    back — oldest first."""
+
+    def test_selects_only_terminal_valid_unpushed_in_window(self) -> None:
+        from web.db import find_unpushed_terminal_runs, init_db
+
+        async def _scenario() -> None:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                db_path = os.path.join(tmpdir, "h.db")
+                await init_db(db_path)
+                conn = sqlite3.connect(db_path)
+                try:
+                    def ins(
+                        run_id: str,
+                        status: str,
+                        valid: int,
+                        finished_sql: str,
+                    ) -> None:
+                        conn.execute(
+                            "INSERT INTO run_records (id, provider_name, "
+                            "config_file, status, valid_keys_found, finished_at) "
+                            f"VALUES (?, 'p', 'c.yaml', ?, ?, {finished_sql})",
+                            (run_id, status, valid),
+                        )
+
+                    ins("r-hit", "completed", 5, "datetime('now','-1 hours')")
+                    ins("r-hit-failed", "failed", 2, "datetime('now','-2 hours')")
+                    ins("r-pushed", "completed", 5, "datetime('now','-1 hours')")
+                    ins("r-zero", "completed", 0, "datetime('now','-1 hours')")
+                    ins("r-old", "completed", 5, "datetime('now','-25 hours')")
+                    ins("r-cancelled", "cancelled", 5, "datetime('now','-1 hours')")
+                    conn.execute(
+                        "INSERT INTO run_records (id, provider_name, "
+                        "config_file, status) VALUES "
+                        "('r-running','p','c.yaml','running')"
+                    )
+                    conn.execute(
+                        "INSERT INTO push_logs (run_id, provider_name, "
+                        "gpt_load_config_id, group_id, keys_count, added_count, "
+                        "ignored_count, status) VALUES "
+                        "('r-pushed','p',0,1,5,5,0,'success')"
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
+
+                rows = await find_unpushed_terminal_runs(db_path)
+                self.assertEqual(
+                    {r["id"] for r in rows}, {"r-hit", "r-hit-failed"}
+                )
+                self.assertEqual(rows[0]["id"], "r-hit-failed", "oldest first")
+                self.assertEqual(rows[0]["provider_name"], "p")
+                self.assertEqual(rows[0]["config_file"], "c.yaml")
+                self.assertEqual(rows[0]["status"], "failed")
+                self.assertEqual(rows[0]["valid_keys_found"], 2)
+
+                # The window is a parameter: 48 h admits the old row.
+                wide = await find_unpushed_terminal_runs(db_path, window_hours=48)
+                self.assertIn("r-old", {r["id"] for r in wide})
+
+        _run_async(_scenario())
+
+
+class TestPushRecovery(unittest.TestCase):
+    """Given terminal runs whose pushes never fired (process died between the
+    terminal row write and the daemon push threads),
+    When recover_unpushed_runs runs at startup,
+    Then each qualifying run is re-dispatched through _push_completed_tasks in
+    a daemon thread — and nothing is dispatched for runs that already have a
+    push_logs row, recorded 0 valid keys, or finished outside the window.
+    The method never raises."""
+
+    @staticmethod
+    def _insert_terminal(
+        db_path: str,
+        run_id: str,
+        *,
+        status: str = "completed",
+        valid: int = 5,
+        finished_sql: str = "datetime('now','-1 hours')",
+        config_file: str = "c.yaml",
+        pushed: bool = False,
+    ) -> None:
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "INSERT INTO run_records (id, provider_name, config_file, "
+                "status, valid_keys_found, finished_at) "
+                f"VALUES (?, 'test-provider', ?, ?, ?, {finished_sql})",
+                (run_id, config_file, status, valid),
+            )
+            if pushed:
+                conn.execute(
+                    "INSERT INTO push_logs (run_id, provider_name, "
+                    "gpt_load_config_id, group_id, keys_count, added_count, "
+                    "ignored_count, status) VALUES "
+                    "(?, 'test-provider', 0, 1, 5, 5, 0, 'success')",
+                    (run_id,),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _capture_dispatch(runner: PipelineRunner):
+        """Patch _push_completed_tasks with a recorder + completion event."""
+        calls: list[tuple[str, str, object]] = []
+        done = threading.Event()
+
+        def fake_push(provider, run_id, config_path):
+            calls.append((provider, run_id, config_path))
+            done.set()
+
+        patcher = patch.object(
+            runner, "_push_completed_tasks", side_effect=fake_push
+        )
+        patcher.start()
+        return patcher, calls, done
+
+    def test_recovers_terminal_valid_run_without_push_row(self) -> None:
+        from web.db import init_db
+
+        async def _scenario() -> None:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                workdir = Path(tmpdir)
+                db_path = str(workdir / "h.db")
+                await init_db(db_path)
+                gone = str(workdir / "runtime" / "config-gone.yaml")
+                self._insert_terminal(db_path, "run-p-1", config_file=gone)
+                runner = _make_runner(workdir, db_path)
+
+                patcher, calls, done = self._capture_dispatch(runner)
+                try:
+                    recovered = await runner.recover_unpushed_runs()
+                    self.assertEqual(recovered, 1)
+                    self.assertTrue(done.wait(timeout=5), "dispatch never ran")
+                    self.assertEqual(calls[0][0], "test-provider")
+                    self.assertEqual(calls[0][1], "run-p-1")
+                    self.assertEqual(str(calls[0][2]), gone)
+                finally:
+                    patcher.stop()
+
+        _run_async(_scenario())
+
+    def test_skipped_when_push_logs_row_exists(self) -> None:
+        from web.db import init_db
+
+        async def _scenario() -> None:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                workdir = Path(tmpdir)
+                db_path = str(workdir / "h.db")
+                await init_db(db_path)
+                # ANY push_logs row skips the run (manual salvage writes one).
+                self._insert_terminal(db_path, "run-p-2", pushed=True)
+                runner = _make_runner(workdir, db_path)
+
+                patcher, calls, _done = self._capture_dispatch(runner)
+                try:
+                    self.assertEqual(await runner.recover_unpushed_runs(), 0)
+                    self.assertEqual(calls, [])
+                finally:
+                    patcher.stop()
+
+        _run_async(_scenario())
+
+    def test_skipped_when_valid_keys_zero(self) -> None:
+        from web.db import init_db
+
+        async def _scenario() -> None:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                workdir = Path(tmpdir)
+                db_path = str(workdir / "h.db")
+                await init_db(db_path)
+                self._insert_terminal(db_path, "run-p-3", valid=0)
+                runner = _make_runner(workdir, db_path)
+
+                patcher, calls, _done = self._capture_dispatch(runner)
+                try:
+                    self.assertEqual(await runner.recover_unpushed_runs(), 0)
+                    self.assertEqual(calls, [])
+                finally:
+                    patcher.stop()
+
+        _run_async(_scenario())
+
+    def test_skipped_when_finished_outside_window(self) -> None:
+        from web.db import init_db
+
+        async def _scenario() -> None:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                workdir = Path(tmpdir)
+                db_path = str(workdir / "h.db")
+                await init_db(db_path)
+                self._insert_terminal(
+                    db_path,
+                    "run-p-4",
+                    finished_sql="datetime('now','-25 hours')",
+                )
+                runner = _make_runner(workdir, db_path)
+
+                patcher, calls, _done = self._capture_dispatch(runner)
+                try:
+                    self.assertEqual(await runner.recover_unpushed_runs(), 0)
+                    self.assertEqual(calls, [])
+                finally:
+                    patcher.stop()
+
+        _run_async(_scenario())
+
+    def test_never_raises_on_unreadable_db(self) -> None:
+        """A dead/missing database (or a schema without push_logs) must log a
+        warning and return 0 — startup recovery is best-effort by contract."""
+        async def _scenario() -> None:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                workdir = Path(tmpdir)
+                # No schema at all: connecting creates an empty file whose
+                # run_records query raises OperationalError.
+                runner = _make_runner(workdir, str(workdir / "missing.db"))
+                self.assertEqual(await runner.recover_unpushed_runs(), 0)
+
+        _run_async(_scenario())
+
+
+# ---------------------------------------------------------------------------
+# BUG 4 — runtime orphan sweep at runner startup
+# ---------------------------------------------------------------------------
+
+
+class TestRuntimeOrphanSweep(unittest.TestCase):
+    """Given leftover runtime/config-*.yaml files of killed runs,
+    When the sweep runs (runner startup),
+    Then only config-*.yaml files older than the cutoff are deleted."""
+
+    def test_sweep_deletes_only_old_config_yamls(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workdir = Path(tmpdir)
+            runtime = workdir / "runtime"
+            runtime.mkdir()
+            old = runtime / "config-deepseek-aaa.yaml"
+            fresh = runtime / "config-deepseek-bbb.yaml"
+            other = runtime / "notes.yaml"
+            for p in (old, fresh, other):
+                p.write_text("x: 1\n", encoding="utf-8")
+            stale = time.time() - 7200
+            os.utime(old, (stale, stale))
+            os.utime(other, (stale, stale))
+
+            runner = _make_runner(workdir, str(workdir / "h.db"))
+            runner._sweep_orphan_runtime_configs()
+
+            self.assertFalse(old.exists(), "stale orphan must be removed")
+            self.assertTrue(fresh.exists(), "fresh config must survive")
+            self.assertTrue(other.exists(), "non-config files are not touched")
+
+    def test_sweep_survives_missing_runtime_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workdir = Path(tmpdir)
+            runner = _make_runner(workdir, str(workdir / "h.db"))
+            runner._sweep_orphan_runtime_configs()  # must not raise
+
+    def test_constructor_sweeps_at_startup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workdir = Path(tmpdir)
+            runtime = workdir / "runtime"
+            runtime.mkdir()
+            old = runtime / "config-x-1.yaml"
+            old.write_text("t: 1\n", encoding="utf-8")
+            stale = time.time() - 7200
+            os.utime(old, (stale, stale))
+
+            env = {
+                "HARVESTER_WORKSPACE": str(workdir),
+                "HARVESTER_DB_PATH": str(workdir / "h.db"),
+            }
+            runner: PipelineRunner | None = None
+            try:
+                with patch.dict(os.environ, env, clear=False):
+                    runner = PipelineRunner()
+                self.assertFalse(old.exists())
+            finally:
+                if runner is not None:
+                    runner._executor.shutdown(wait=False)
 
 
 if __name__ == "__main__":

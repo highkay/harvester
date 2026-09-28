@@ -222,6 +222,52 @@ async def reconcile_running_runs(db_path: str | None = None) -> int:
         await db.close()
 
 
+async def find_unpushed_terminal_runs(
+    db_path: str | None = None, window_hours: int = 24
+) -> list[dict]:
+    """Terminal runs with validated keys that never produced a push_logs row.
+
+    Consumed by the startup push recovery
+    (``web.runner.PipelineRunner.recover_unpushed_runs``): the run row is
+    written terminal BEFORE the daemon push threads fire, so a process dying
+    in that window used to lose the push silently — and
+    :func:`reconcile_running_runs` only touches 'running' rows.
+
+    Selection (derived from EXISTING columns only — no schema change):
+
+    - ``status`` IN ('completed','failed') — 'cancelled' rows are left to the
+      documented manual salvage recipe;
+    - ``valid_keys_found > 0`` (NULL counts as 0);
+    - ``finished_at`` inside the last *window_hours*. Both ``finished_at``
+      (SQLite ``datetime('now')``) and the window expression are UTC, so no
+      timezone conversion is needed here;
+    - NO push_logs row bearing the run_id — ANY existing row skips the run
+      (manual salvage pushes write such rows).
+
+    Oldest first. Returns a list of dicts (id, provider_name, status,
+    valid_keys_found, finished_at, config_file).
+    """
+    path = db_path if db_path is not None else resolve_db_path()
+    db = await get_db(path)
+    try:
+        cursor = await db.execute(
+            "SELECT id, provider_name, status, valid_keys_found, finished_at, "
+            "config_file FROM run_records "
+            "WHERE status IN ('completed','failed') "
+            "AND COALESCE(valid_keys_found, 0) > 0 "
+            "AND finished_at IS NOT NULL "
+            "AND finished_at >= datetime('now', ?) "
+            "AND NOT EXISTS ("
+            "SELECT 1 FROM push_logs WHERE push_logs.run_id = run_records.id"
+            ") "
+            "ORDER BY finished_at",
+            (f"-{int(window_hours)} hours",),
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+    finally:
+        await db.close()
+
+
 # ---------------------------------------------------------------------------
 # Lightweight migrations for pre-existing databases
 # ---------------------------------------------------------------------------
