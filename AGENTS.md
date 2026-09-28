@@ -1861,6 +1861,52 @@ link cap reached` was 0 as of 23:05 — the six 20:49 runs had not crossed it);
 since the deploy). The comparison baseline for (c)/(d) is the table above plus
 `push_logs.added_count` per provider.
 
+## Ops: yield audit → provider cull + opencode launch (2026-09-28)
+
+User-directed full audit ("verify everything live; deploy what works, disable
+what doesn't"). 7-day `run_records`×`push_logs` evidence (links → valid →
+net-new added):
+
+- **DISABLED via `PUT /api/schedule/{p}` (hot reload, rows kept)**:
+  github (1.03M links → 3 valid, ~344k links/valid — the self-bootstrap loop
+  was the cluster's biggest search-quota consumer), kimi (341k→0), kimi-ai
+  (171k→0), kimi-coding (290k→1), mimo-cn (246k→0), deepseek (691k→+3),
+  qwen-intl (186k→+0), qwen-cn (326k→+10), mimo-sg (167k→+3). cerebras/groq
+  were already disabled. Re-enable = same PUT with `enabled: true`.
+- **KEPT (10 enabled)**: serpapi, nvidia, tavily, glm, glm-ai, modelscope,
+  ollama, openrouter, agnes-ai + the new opencode.
+- **agnes-ai push timeout root cause + fix (d9012eb)**: the rn gpt-load
+  (`107.172.141.203:43001`, a DIFFERENT instance from fnos `192.168.1.18` —
+  group lists are disjoint: fnos ids 1-15, rn ids 9/12/13/17/19/23) answers
+  a plain GET /api/groups in ~2.5s vs 0.0s on LAN, and every 500-key
+  add-multiple POST exceeded the 30s read timeout (09-16/20/27 pushes lost
+  32/34/67 keys). `web/agnes_ai_push.py` now chunks 100 keys / 180s timeout.
+  Proof pending: next agnes run 10:00.
+- **mimo-sg 404s self-resolved**: group 17 (`mimosg`) exists on the rn
+  instance NOW (created between 09-21 and 09-28); the 09-28 00:33 push
+  succeeded. The 12 failures (09-08→09-21) were "group didn't exist yet".
+- **tavily master-key exposure scrubbed**: `/tmp/tavily_key_recovery.py`
+  (hardcoded proxy master key fallback, 09-22) deleted from the container.
+  Rotation still optional (the key itself never left the box).
+- **links.db "disappearance" is NOT a regression**: shipped configs set
+  `github_transport.index.skip_known_links: false` — the link index is
+  configured OFF for dedup, so its absence from `data/` changes nothing.
+- **opencode provider LAUNCHED** (`b732e85` + `51d4dff`): endpoint
+  live-verified (`GET /zen/go/v1/models` is PUBLIC 200 with 42 models incl.
+  `glm-5.3` — presence-only trap, never used for validation; chat probe
+  without a key → 401 `AuthError`). gpt-load group **20 `opencode`** created
+  on the fnos instance (auto-id luckily landed on the code default),
+  upstream `https://opencode.ai/zen/go`, test_model `glm-5.3`.
+  `web/opencode_push.py` falls back to `GPT_LOAD_AUTH_KEY` when
+  `OPENCODE_LOAD_AUTH_KEY` is unset — the fnos instance 401s no-auth
+  management calls (measured). Seeded `0 22 * * *` (also inserted on prod,
+  hot-reloaded; next run 2026-09-28 22:00). **Proof pending: tonight's first
+  run** — watch `run_records` + `push_logs` (group 20 adds).
+- **Deploy**: fnos @ `51d4dff` (rollback `rollback-20260928-100300`), whole
+  tree cp + restart, md5 MATCH ×6, `/health` ok. Pre-restart salvage:
+  serpapi +2 / qwen-cn +0 / tavily +0 (dupes); the 6 killed runs reconciled
+  with duration + valid counts (serpapi had 542 valid at kill time).
+
 ## Tests & conventions
 
 - Run: `python -m unittest discover -s tests`. **Measured baseline 2026-09-24
