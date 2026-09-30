@@ -77,9 +77,25 @@ def _wait_for_rate_limit(resources: StageResources, service_type: str, label: st
         time.sleep(wait_time)
 
 
-# https://github.com/<owner>/<repo>/blob/<ref>/<path> — ref is matched as a
-# single path segment (the shape GitHub search results carry); path is the rest.
-_GITHUB_BLOB_PATH_RE = re.compile(r"^/([^/]+)/([^/]+)/blob/([^/]+)/(.+)$")
+# https://github.com/<owner>/<repo>/blob/<ref>/<path> — parsed STRUCTURALLY
+# (host prefix + regex on the remainder), NOT via urlsplit: a '#' can be a
+# genuine part of the path (directory "C#Code/", AutoSDK snapshot filenames
+# like "_#G.Models….verified.cs"), and urlsplit truncates it as a fragment —
+# a proven false-404 class on production (2026-09-30 evidence: links.txt holds
+# 367 lines with '#', 107 unique). ref is matched as a single path segment
+# (the shape GitHub search results carry); path is the rest.
+_GITHUB_BLOB_PREFIX = "https://github.com/"
+_GITHUB_BLOB_PATH_RE = re.compile(r"^([^/]+)/([^/]+)/blob/([^/]+)/(.+)$")
+
+# The only legitimate fragment on a blob URL is a trailing line anchor.
+_BLOB_LINE_ANCHOR_RE = re.compile(r"#L\d+(?:-L\d+)?$")
+
+# Kept literal when re-quoting the decoded path: '/' separators plus '@' and
+# ' ' (requests requotes a raw space to %20 on the wire). Everything else
+# outside quote()'s unreserved set is percent-encoded — notably '#' -> %23 —
+# while valid pre-existing escapes round-trip through unquote+quote unchanged
+# (%23 -> '#' -> %23, never %2523).
+_BLOB_PATH_SAFE = "/@ "
 
 
 def github_blob_to_raw(url: str) -> str:
@@ -92,10 +108,14 @@ def github_blob_to_raw(url: str) -> str:
     it and every fetch pays an ~85x bandwidth amplification.
 
     Only ``https://github.com/<owner>/<repo>/blob/<ref>/<path>`` (optionally
-    with a ``#L…`` fragment, which is stripped) is rewritten; the path is
-    percent-decoded. Everything else — non-github URLs, huggingface
-    ``resolve`` URLs, issue/commit pages, query-string URLs, malformed
-    input — is returned byte-identical.
+    with a trailing ``#L<num>`` / ``#L<num>-L<num>`` line anchor, which is
+    stripped) is rewritten. Any OTHER '#' in the URL is path content — it is
+    percent-encoded for the wire (raw '#' and pre-encoded '%23' both end up
+    as '%23', non-ASCII as UTF-8 escapes); the decoded path keeps '@' and ' '
+    literal (requests requotes the space). Everything else — non-github URLs,
+    huggingface ``resolve`` URLs, issue/commit pages, query-string URLs,
+    malformed input — is returned byte-identical, and links.txt / dedup keep
+    the ORIGINAL blob URL.
 
     Args:
         url: Candidate fetch URL (trailing whitespace/newline tolerant).
@@ -104,17 +124,21 @@ def github_blob_to_raw(url: str) -> str:
         str: The raw equivalent for blob pages, else the original input.
     """
     candidate = url.strip()
-    try:
-        parsed = urllib.parse.urlsplit(candidate)
-    except ValueError:
+    if candidate[: len(_GITHUB_BLOB_PREFIX)].lower() != _GITHUB_BLOB_PREFIX:
         return url
-    if parsed.scheme != "https" or parsed.netloc.lower() != "github.com" or parsed.query:
+    rest = candidate[len(_GITHUB_BLOB_PREFIX) :]
+    if "?" in rest:  # query-string URLs stay byte-identical
         return url
-    match = _GITHUB_BLOB_PATH_RE.match(parsed.path)
+    match = _GITHUB_BLOB_PATH_RE.match(rest)
     if not match:
         return url
     owner, repo, ref, path = match.groups()
-    return f"https://raw.githubusercontent.com/{owner}/{repo}/{ref}/{urllib.parse.unquote(path)}"
+    path = _BLOB_LINE_ANCHOR_RE.sub("", path)
+    try:
+        path = urllib.parse.quote(urllib.parse.unquote(path), safe=_BLOB_PATH_SAFE)
+    except UnicodeEncodeError:  # undecodable surrogate junk — keep as harvested
+        return url
+    return f"https://raw.githubusercontent.com/{owner}/{repo}/{ref}/{path}"
 
 
 @register_stage(

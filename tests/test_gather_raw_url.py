@@ -12,8 +12,17 @@ cannot match a quoted assignment in the escaped blob text.
 
 These tests pin:
 1. ``github_blob_to_raw`` maps only ``https://github.com/<o>/<r>/blob/<ref>/<path>``
-   to ``https://raw.githubusercontent.com/<o>/<r>/<ref>/<path>`` (fragment
-   stripped, path percent-decoded); everything else returns byte-identical.
+   to ``https://raw.githubusercontent.com/<o>/<r>/<ref>/<path>``. The URL is
+   parsed STRUCTURALLY (prefix + regex), not via ``urlsplit``: a ``#`` that is
+   genuinely part of the path (directory ``C#Code/``, AutoSDK snapshot
+   filenames like ``_#G.Models….verified.cs`` — production false-404 class B,
+   ulw-20260930 g1) must NOT be treated as a fragment. Only a trailing line
+   anchor ``#L<num>`` / ``#L<num>-L<num>`` is stripped; every other ``#``
+   stays path content and is percent-encoded (``%23``) for the wire, while
+   pre-existing valid escapes round-trip unchanged (``%23`` never becomes
+   ``%2523``). Everything else — non-github URLs, huggingface ``resolve``
+   URLs, issue/commit pages, query-string URLs, malformed input — returns
+   byte-identical, and ``links.txt`` / dedup keep the ORIGINAL blob URL.
 2. ``AcquisitionStage._acquisition_worker`` fetches the raw URL with a real
    User-Agent, while ``links.txt`` / dedup keying keep the ORIGINAL blob URL.
 3. The shipped task patterns from ``examples/config-deepseek.yaml`` and
@@ -72,6 +81,87 @@ class TestGithubBlobToRaw(unittest.TestCase):
             github_blob_to_raw(url),
             "https://raw.githubusercontent.com/owner/repo/main/dir one/app@.env",
         )
+
+    def test_raw_hash_in_path_is_encoded_not_treated_as_fragment(self):
+        # Given a blob URL whose PATH genuinely contains '#' (directory "C#Code/"
+        # — production evidence ulw-20260930 g1 CLASS B, chadesiel999/denoise-all)
+        url = "https://github.com/o/r/blob/main/C#Code/f.cs"
+        # When mapped
+        # Then '#' stays path content, percent-encoded for the wire; the old
+        # urlsplit() implementation truncated the path to ".../C" (false 404)
+        self.assertEqual(
+            github_blob_to_raw(url),
+            "https://raw.githubusercontent.com/o/r/main/C%23Code/f.cs",
+        )
+
+    def test_mid_path_hash_segment_autosdk_shape(self):
+        # Given the AutoSDK snapshot filename shape ('#' mid-path, after a dir)
+        url = (
+            "https://github.com/tryAGI/AutoSDK/blob/58008900abcdef0123/"
+            "src/tests/Snapshots/NewtonsoftJson/_#G.Models.DeepSeekModelModel.g.verified.cs"
+        )
+        # When mapped
+        # Then the whole filename survives with '#' encoded (was: truncated to "_")
+        self.assertEqual(
+            github_blob_to_raw(url),
+            "https://raw.githubusercontent.com/tryAGI/AutoSDK/58008900abcdef0123/"
+            "src/tests/Snapshots/NewtonsoftJson/_%23G.Models.DeepSeekModelModel.g.verified.cs",
+        )
+
+    def test_pre_encoded_hash_survives_not_double_encoded(self):
+        # Given a blob path already carrying the valid escape %23
+        url = "https://github.com/o/r/blob/main/C%23Code/f.cs"
+        # When mapped
+        # Then %23 round-trips unchanged (no decode-to-'#', no %2523)
+        self.assertEqual(
+            github_blob_to_raw(url),
+            "https://raw.githubusercontent.com/o/r/main/C%23Code/f.cs",
+        )
+
+    def test_line_anchor_range_stripped(self):
+        # Given a trailing #L10-L20 line anchor
+        url = "https://github.com/owner/repo/blob/main/src/app.py#L10-L20"
+        # When mapped
+        result = github_blob_to_raw(url)
+        # Then only the anchor is removed
+        self.assertEqual(result, "https://raw.githubusercontent.com/owner/repo/main/src/app.py")
+        self.assertNotIn("#", result)
+
+    def test_non_line_anchor_hashes_stay_path_content(self):
+        # Given trailing '#' fragments that are NOT GitHub line anchors
+        cases = {
+            "https://github.com/o/r/blob/main/app.py#Lfoo": "https://raw.githubusercontent.com/o/r/main/app.py%23Lfoo",
+            "https://github.com/o/r/blob/main/app.py#L12x": "https://raw.githubusercontent.com/o/r/main/app.py%23L12x",
+            "https://github.com/o/r/blob/main/README.md#section": "https://raw.githubusercontent.com/o/r/main/README.md%23section",
+        }
+        for url, expected in cases.items():
+            with self.subTest(url=url):
+                # When mapped
+                # Then the '#' is ambiguous-but-not-a-line-anchor => path content, encoded
+                self.assertEqual(github_blob_to_raw(url), expected)
+
+    def test_combined_cjk_dir_hash_segment_and_line_anchor(self):
+        # Given a CJK directory + raw-'#' segment + a trailing line anchor
+        url = "https://github.com/o/r/blob/main/代码/C#Code/f.cs#L5"
+        # When mapped
+        # Then the anchor is stripped, '#' -> %23, CJK -> UTF-8 percent-escapes
+        self.assertEqual(
+            github_blob_to_raw(url),
+            "https://raw.githubusercontent.com/o/r/main/%E4%BB%A3%E7%A0%81/C%23Code/f.cs",
+        )
+
+    def test_hash_bearing_non_blob_and_query_urls_unchanged(self):
+        # Given URLs that carry '#' but must stay byte-identical
+        urls = [
+            "https://example.com/a/b#C/x",  # non-github
+            "https://huggingface.co/datasets/o/n/resolve/main/C#Code/f.env",  # hf resolve
+            "https://github.com/o/r/blob/main/app.env?plain=1#L5",  # query string wins
+            "https://github.com/o/r/issues/5#C1",  # non-blob github page
+            "not-a-url#C",  # malformed
+        ]
+        for url in urls:
+            with self.subTest(url=url):
+                self.assertEqual(github_blob_to_raw(url), url)
 
     def test_trailing_whitespace_is_tolerated(self):
         # Given a blob URL with a trailing newline / spaces (links.txt shape)
