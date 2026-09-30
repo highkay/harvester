@@ -207,6 +207,17 @@ _WATCH_POLL_SECONDS = 5.0
 # keeps retrying either way).
 _WATCH_POLL_FAILURE_ESCALATION = 3
 
+# Upper bound on a single run-watch lifetime, in hours (env-configurable like
+# the other HARVESTER_* knobs). Default 36 h sits above the longest measured
+# prod run (28.3 h, deepseek 2026-09-25→26) so a legitimate long scan is never
+# cut short, while a row whose terminal DB write was lost (sqlite locked /
+# disk full in the failure path) can no longer wedge the provider's guard —
+# and inflate _active_run_count — until process restart. The floor keeps a
+# nonsensical env value (0/negative) from expiring healthy runs on sight.
+_RUN_WATCH_MAX_HOURS = max(
+    0.01, float(os.environ.get("HARVESTER_RUN_WATCH_MAX_HOURS", "36") or "36")
+)
+
 
 async def _run_provider_job(
     provider_name: str,
@@ -658,16 +669,29 @@ class SchedulerService:
         poll failures escalate the log to ERROR (once, at the threshold) while
         the guard stays held and the watcher keeps retrying.
 
-        Known residual: if the terminal DB write itself is lost (e.g. the scan
-        process dies after its last 'running' heartbeat but before the
-        terminal update lands), the row stays ``running`` forever and this
-        watcher holds the scheduler guard for *provider_name* until the
-        process restarts — startup ``web.db.reconcile_running_runs`` flips such
-        stale rows to failed and clears the state. Scheduled firings in the
-        meantime are skipped with a visible warning ("already running —
-        skipping"), never silently double-started.
+        Bounded lifetime: the watch is NOT open-ended. Its deadline is the
+        row's own ``started_at`` (UTC, via :_parse_utc_started_at) +
+        ``_RUN_WATCH_MAX_HOURS``, falling back to the watcher start when
+        ``started_at`` is missing or unparseable — so a row started long ago
+        (e.g. stranded by a lost terminal DB write before this process even
+        started watching) expires on the first poll. On expiry the guard is
+        released through the same ``finally`` mechanics as a normal release,
+        an ERROR is logged with the shortened run id, and a best-effort
+        ``running→failed`` flip goes through the runner's ``_update_run_sync``
+        with ``only_if_running=True`` (wrapped in try/except — the watcher
+        never raises): the flip cannot clobber a terminal status the scan
+        thread managed to land in the meantime, and if the scan thread is
+        somehow still alive the runner's OWN provider guard keeps blocking a
+        true duplicate scan even though the scheduler-side guard is free.
+        Without this bound a stuck ``running`` row held the guard until
+        process restart, silently blocking every future cron firing for the
+        provider and inflating ``_active_run_count`` toward the concurrency
+        cap. (Startup ``web.db.reconcile_running_runs`` remains the backstop
+        for rows stranded across a restart.)
         """
         consecutive_poll_failures = 0
+        watch_started_utc = datetime.now(timezone.utc)
+        run_id_short = run_id[:8]
         try:
             runner = _lazy_get_runner()
             while True:
@@ -688,6 +712,44 @@ class SchedulerService:
                 consecutive_poll_failures = 0
                 if record is None or record.get("status") != "running":
                     return
+
+                started = _parse_utc_started_at(record.get("started_at"))
+                deadline_base = (
+                    started if started is not None else watch_started_utc
+                )
+                if datetime.now(timezone.utc) - deadline_base < timedelta(
+                    hours=_RUN_WATCH_MAX_HOURS
+                ):
+                    continue
+
+                logger.error(
+                    f"Run watch deadline exceeded for {provider_name} "
+                    f"({run_id_short}…): row still 'running' "
+                    f"{_RUN_WATCH_MAX_HOURS:g} h past its "
+                    f"{'started_at' if started is not None else 'watch start'} "
+                    f"— releasing the scheduler guard and marking the run "
+                    f"failed (a lost terminal DB write most likely left the "
+                    f"row stuck)"
+                )
+                try:
+                    runner._update_run_sync(
+                        run_id,
+                        "failed",
+                        finished_at=True,
+                        duration_from_started_at=True,
+                        error_message=(
+                            "run watch deadline exceeded: row stayed 'running' "
+                            f"past {_RUN_WATCH_MAX_HOURS:g} h — scheduler guard "
+                            "released (see web/scheduler.py _watch_run)"
+                        ),
+                        only_if_running=True,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        f"Best-effort failed-flip for stuck run {run_id_short}… "
+                        f"raised {exc} — releasing the guard anyway"
+                    )
+                return
         except asyncio.CancelledError:
             raise
         except Exception:

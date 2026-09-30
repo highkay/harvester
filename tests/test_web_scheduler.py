@@ -526,6 +526,196 @@ class TestGuardHeldForScanLifetime(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Test 3c: Watch-deadline — a stuck 'running' row must not wedge the guard
+# ---------------------------------------------------------------------------
+
+
+async def _released_within(svc, provider: str, attempts: int, delay: float = 0.01):
+    """Poll until the guard for *provider* is released; False on timeout."""
+    for _ in range(attempts):
+        await asyncio.sleep(delay)
+        if not svc.is_running(provider):
+            return True
+    return False
+
+
+class TestWatchRunDeadline(unittest.TestCase):
+    """F7 leak contract: ``_watch_run`` polled with NO timeout, so a row
+    stuck in 'running' (terminal DB write lost — sqlite locked / disk full)
+    held the scheduler guard until process restart, blocking every future
+    cron for the provider and inflating ``_active_run_count``.
+
+    Fixed contract (pinned below): the watch expires at the row's deadline —
+    ``started_at`` + ``_RUN_WATCH_MAX_HOURS`` (env
+    HARVESTER_RUN_WATCH_MAX_HOURS, default 36; missing/unparseable
+    ``started_at`` falls back to watcher start) — releasing the guard,
+    logging ERROR (shortened run id), and attempting a best-effort
+    ``running→failed`` flip through the runner's update path with
+    ``only_if_running`` semantics.
+    """
+
+    def test_stuck_row_releases_guard_at_deadline_and_flips_failed(self) -> None:
+        """Given a row that NEVER leaves 'running' (no started_at → watcher-start
+        fallback) and a tiny patched deadline,
+        When the watcher passes the deadline,
+        Then the guard is released, an ERROR is logged with the short run id,
+        and one terminal flip is attempted: status 'failed' + only_if_running."""
+        async def _scenario() -> None:
+            fake = _FakeRunner()  # status stays "running" forever
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                svc = _make_service_with_row(
+                    tmpdir, "deepseek", "examples/config-deepseek.yaml"
+                )
+                mock_logger = MagicMock()
+                with patch("web.scheduler._lazy_get_runner", return_value=fake), patch(
+                    "web.scheduler._WATCH_POLL_SECONDS", 0.01
+                ), patch(
+                    "web.scheduler._RUN_WATCH_MAX_HOURS", 1e-5, create=True
+                ), patch(  # 1e-5 h = 36 ms — a few polls past watcher start
+                    "web.scheduler.logger", mock_logger
+                ):
+                    await svc.trigger_manual("deepseek")
+                    self.assertTrue(svc.is_running("deepseek"))
+
+                    released = await _released_within(svc, "deepseek", attempts=300)
+                    self.assertTrue(
+                        released,
+                        "watcher must release the guard at the deadline, not "
+                        "loop forever on a stuck 'running' row",
+                    )
+
+                    # ERROR logged, masked to the short run id
+                    self.assertTrue(mock_logger.error.called, "expiry must log ERROR")
+                    logged = " ".join(
+                        str(c.args[0])
+                        for c in mock_logger.error.call_args_list
+                        if c.args
+                    )
+                    self.assertIn(fake.run_id[:8], logged)
+
+                    # Best-effort terminal flip: running → failed, conditional
+                    self.assertEqual(len(fake.update_run_calls), 1)
+                    args, kwargs = fake.update_run_calls[0]
+                    self.assertEqual(args[:2], (fake.run_id, "failed"))
+                    self.assertIs(kwargs.get("only_if_running"), True)
+
+                await svc.shutdown()
+
+        _run_async(_scenario())
+
+    def test_row_started_long_ago_expires_on_first_poll(self) -> None:
+        """Given the DEFAULT deadline (36 h) and a row whose started_at is
+        100 h old, When the watcher polls it, Then it expires on the first
+        poll (guard released within a few poll intervals) and flips failed."""
+        async def _scenario() -> None:
+            fake = _FakeRunner()
+            fake.started_at = (
+                datetime.now(timezone.utc) - timedelta(hours=100)
+            ).strftime("%Y-%m-%d %H:%M:%S")  # the datetime('now') UTC shape
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                svc = _make_service_with_row(
+                    tmpdir, "deepseek", "examples/config-deepseek.yaml"
+                )
+                with patch("web.scheduler._lazy_get_runner", return_value=fake), patch(
+                    "web.scheduler._WATCH_POLL_SECONDS", 0.01
+                ):
+                    await svc.trigger_manual("deepseek")
+                    self.assertTrue(svc.is_running("deepseek"))
+
+                    # No deadline patch: the module default applies, and a
+                    # 100 h-old started_at is already past it → the FIRST poll
+                    # (≈10 ms) must release. A 20-poll (0.2 s) budget pins
+                    # "immediately", not "eventually".
+                    released = await _released_within(svc, "deepseek", attempts=20)
+                    self.assertTrue(
+                        released,
+                        "a started_at older than the deadline must expire on "
+                        "the first poll",
+                    )
+                    self.assertEqual(len(fake.update_run_calls), 1)
+                    args, kwargs = fake.update_run_calls[0]
+                    self.assertEqual(args[:2], (fake.run_id, "failed"))
+                    self.assertIs(kwargs.get("only_if_running"), True)
+
+                await svc.shutdown()
+
+        _run_async(_scenario())
+
+    def test_unparseable_started_at_falls_back_to_watch_start(self) -> None:
+        """Given garbage started_at and a tiny patched deadline,
+        When the watcher polls, Then it neither crashes nor loops forever —
+        the deadline falls back to watcher start and expires normally."""
+        async def _scenario() -> None:
+            fake = _FakeRunner()
+            fake.started_at = "not-a-timestamp"
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                svc = _make_service_with_row(
+                    tmpdir, "deepseek", "examples/config-deepseek.yaml"
+                )
+                with patch("web.scheduler._lazy_get_runner", return_value=fake), patch(
+                    "web.scheduler._WATCH_POLL_SECONDS", 0.01
+                ), patch(
+                    "web.scheduler._RUN_WATCH_MAX_HOURS", 1e-5, create=True
+                ):
+                    await svc.trigger_manual("deepseek")
+                    released = await _released_within(svc, "deepseek", attempts=300)
+                    self.assertTrue(
+                        released,
+                        "unparseable started_at must fall back to the watcher "
+                        "start, not wedge the guard",
+                    )
+                    self.assertEqual(len(fake.update_run_calls), 1)
+
+                await svc.shutdown()
+
+        _run_async(_scenario())
+
+    def test_terminal_before_deadline_releases_quietly(self) -> None:
+        """Regression: the normal path is untouched — a row that goes
+        terminal BEFORE the deadline releases the guard with NO ERROR log
+        and NO flip attempt (the row already carries its own terminal
+        status)."""
+        async def _scenario() -> None:
+            fake = _FakeRunner()
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                svc = _make_service_with_row(
+                    tmpdir, "deepseek", "examples/config-deepseek.yaml"
+                )
+                mock_logger = MagicMock()
+                with patch("web.scheduler._lazy_get_runner", return_value=fake), patch(
+                    "web.scheduler._WATCH_POLL_SECONDS", 0.01
+                ), patch(
+                    "web.scheduler._RUN_WATCH_MAX_HOURS", 24.0, create=True
+                ), patch(  # huge vs the test's millisecond runtime
+                    "web.scheduler.logger", mock_logger
+                ):
+                    await svc.trigger_manual("deepseek")
+                    self.assertTrue(svc.is_running("deepseek"))
+
+                    await asyncio.sleep(0.05)  # let it poll a few times
+                    fake.status = "completed"  # -- When: terminal pre-deadline
+                    released = await _released_within(svc, "deepseek", attempts=100)
+                    self.assertTrue(released)
+
+                    self.assertFalse(
+                        mock_logger.error.called,
+                        "a pre-deadline terminal row must not log ERROR",
+                    )
+                    self.assertEqual(
+                        fake.update_run_calls, [],
+                        "a pre-deadline terminal row must not be flipped",
+                    )
+
+                await svc.shutdown()
+
+        _run_async(_scenario())
+
+
+# ---------------------------------------------------------------------------
 # Test 4: next_run_time exists after add_job
 # ---------------------------------------------------------------------------
 
@@ -1350,13 +1540,19 @@ class _FakeRunner:
     the runner's own guard, ValueError for a missing config template.
     ``get_run`` reports the mutable ``status`` so tests can keep the watcher
     polling ('running') and then flip it terminal to observe guard release.
+    ``started_at`` (optional, UTC string like ``datetime('now')`` writes)
+    feeds the watch-deadline computation. ``_update_run_sync`` records calls
+    so tests can pin the watcher's best-effort ``running→failed`` flip
+    (status + ``only_if_running`` kwargs) without touching a real DB.
     """
 
     def __init__(self, run_id: str = "run-fake-1") -> None:
         self.run_id = run_id
         self.status = "running"
+        self.started_at: str | None = None
         self.run_scan_calls: list[tuple[str, str | None]] = []
         self.run_scan_error: Exception | None = None
+        self.update_run_calls: list[tuple[tuple, dict]] = []
 
     async def run_scan(
         self, provider_name: str, config_file: str | None = None
@@ -1367,7 +1563,13 @@ class _FakeRunner:
         return self.run_id
 
     async def get_run(self, run_id: str) -> dict[str, object] | None:
-        return {"status": self.status}
+        record: dict[str, object] = {"status": self.status}
+        if self.started_at is not None:
+            record["started_at"] = self.started_at
+        return record
+
+    def _update_run_sync(self, *args: object, **kwargs: object) -> None:
+        self.update_run_calls.append((args, kwargs))
 
 
 def _make_service_with_row(tmpdir: str, provider: str, config_file: str):
