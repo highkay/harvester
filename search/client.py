@@ -1103,13 +1103,28 @@ class GitHubClient:
 # Global GitHub client instance
 _github_client: Optional[GitHubClient] = None
 
+# Snapshot of the limits mapping the current client was built from. Every web
+# scan constructs a Pipeline, which calls init_github_client(config.ratelimits);
+# without this guard each construction replaced the process-wide client AND its
+# RateLimiter, resetting adaptive backoff under all in-flight scans and
+# replacing the token buckets threads were waiting on (non-monotonic waits).
+# The mapping is compared by CONTENT (RateLimitConfig is a value dataclass), and
+# the whole check-and-build runs under one lock so concurrent equal calls build
+# exactly one client.
+_github_client_limits: Optional[Dict[str, RateLimitConfig]] = None
+_github_client_lock = threading.Lock()
+
 
 def init_github_client(limits: Dict[str, RateLimitConfig]) -> None:
-    """Initialize GitHub client with rate limiter"""
-    global _github_client
-    limiter = RateLimiter(limits)
-    _github_client = GitHubClient(limiter, limits=limits)
-    logger.info("GitHub client initialized with rate limiting")
+    """Initialize GitHub client with rate limiter (idempotent for equal limits)."""
+    global _github_client, _github_client_limits
+    with _github_client_lock:
+        if _github_client is not None and _github_client_limits == limits:
+            return  # unchanged limits: keep the shared client/limiter intact
+        limiter = RateLimiter(limits)
+        _github_client = GitHubClient(limiter, limits=limits)
+        _github_client_limits = dict(limits)
+        logger.info("GitHub client initialized with rate limiting")
 
 
 def get_github_client() -> GitHubClient:
