@@ -225,7 +225,7 @@ async def reconcile_running_runs(db_path: str | None = None) -> int:
 async def find_unpushed_terminal_runs(
     db_path: str | None = None, window_hours: int = 24
 ) -> list[dict]:
-    """Terminal runs with validated keys that never produced a push_logs row.
+    """Terminal runs with validated keys that never produced a SUCCESSFUL push.
 
     Consumed by the startup push recovery
     (``web.runner.PipelineRunner.recover_unpushed_runs``): the run row is
@@ -241,8 +241,12 @@ async def find_unpushed_terminal_runs(
     - ``finished_at`` inside the last *window_hours*. Both ``finished_at``
       (SQLite ``datetime('now')``) and the window expression are UTC, so no
       timezone conversion is needed here;
-    - NO push_logs row bearing the run_id — ANY existing row skips the run
-      (manual salvage pushes write such rows).
+    - NO push_logs row bearing the run_id with ``status='success'`` — ONLY a
+      successful push suppresses re-dispatch. Runs whose pushes failed or
+      partially failed stay selectable so their stranded keys are retried at
+      the next startup; re-dispatch is duplicate-safe because every push
+      target dedups server-side (e.g. gpt-load ``ignored_count``), and a
+      successful manual-salvage row suppresses the run the same way.
 
     Oldest first. Returns a list of dicts (id, provider_name, status,
     valid_keys_found, finished_at, config_file).
@@ -258,7 +262,8 @@ async def find_unpushed_terminal_runs(
             "AND finished_at IS NOT NULL "
             "AND finished_at >= datetime('now', ?) "
             "AND NOT EXISTS ("
-            "SELECT 1 FROM push_logs WHERE push_logs.run_id = run_records.id"
+            "SELECT 1 FROM push_logs WHERE push_logs.run_id = run_records.id "
+            "AND push_logs.status = 'success'"
             ") "
             "ORDER BY finished_at",
             (f"-{int(window_hours)} hours",),

@@ -817,6 +817,68 @@ class TestFindUnpushedTerminalRuns(unittest.TestCase):
         _run_async(_scenario())
 
 
+class TestFindUnpushedTerminalRunsPushStatusSemantics(unittest.TestCase):
+    """Given a terminal, valid (>0), in-window run with push_logs rows of
+    specific statuses,
+    When find_unpushed_terminal_runs runs,
+    Then ONLY a status='success' row suppresses re-dispatch — failed-only and
+    partial histories stay selectable (their keys were stranded), and a
+    success+failed mix stays suppressed (the run already pushed something)."""
+
+    @staticmethod
+    def _selected_ids(push_statuses: list[str]) -> set[str]:
+        from web.db import find_unpushed_terminal_runs, init_db
+
+        async def _scenario() -> set[str]:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                db_path = os.path.join(tmpdir, "h.db")
+                await init_db(db_path)
+                conn = sqlite3.connect(db_path)
+                try:
+                    conn.execute(
+                        "INSERT INTO run_records (id, provider_name, "
+                        "config_file, status, valid_keys_found, finished_at) "
+                        "VALUES ('r1', 'p', 'c.yaml', 'completed', 5, "
+                        "datetime('now','-1 hours'))"
+                    )
+                    for st in push_statuses:
+                        conn.execute(
+                            "INSERT INTO push_logs (run_id, provider_name, "
+                            "gpt_load_config_id, group_id, keys_count, "
+                            "added_count, ignored_count, status) VALUES "
+                            "('r1', 'p', 0, 1, 5, 0, 0, ?)",
+                            (st,),
+                        )
+                    conn.commit()
+                finally:
+                    conn.close()
+
+                rows = await find_unpushed_terminal_runs(db_path)
+                return {r["id"] for r in rows}
+
+        return _run_async(_scenario())
+
+    def test_no_push_rows_selected(self) -> None:
+        # Existing recovery regression: the no-row path stays selectable.
+        self.assertEqual(self._selected_ids([]), {"r1"})
+
+    def test_success_row_suppresses(self) -> None:
+        # Regression: a successful push must never be re-dispatched.
+        self.assertEqual(self._selected_ids(["success"]), set())
+
+    def test_failed_row_is_selected(self) -> None:
+        # The blind spot: a failed push wrote a row, stranding the keys.
+        self.assertEqual(self._selected_ids(["failed"]), {"r1"})
+
+    def test_partial_row_is_selected(self) -> None:
+        self.assertEqual(self._selected_ids(["partial"]), {"r1"})
+
+    def test_success_plus_failed_stays_suppressed(self) -> None:
+        # Any-success suppression: one success row among failures still
+        # means the run pushed something — retry would be a pure duplicate.
+        self.assertEqual(self._selected_ids(["success", "failed"]), set())
+
+
 class TestPushRecovery(unittest.TestCase):
     """Given terminal runs whose pushes never fired (process died between the
     terminal row write and the daemon push threads),
