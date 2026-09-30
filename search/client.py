@@ -15,7 +15,7 @@ import time
 import traceback
 import urllib.parse
 from email.utils import parsedate_to_datetime
-from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Set, Tuple
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -110,7 +110,10 @@ _LIMIT_WAIT_MAX_ROUNDS = 64
 # but only when the answer carries NO upstream rate-limit headers, because
 # api.github.com advertises `x-ratelimit-*` even on 403 (see
 # search/github/transport.py) and that flavour is routine token/quota state,
-# not exit health.
+# not exit health — AND only when the streak spans >=2 distinct hosts, because
+# app-level per-key verdicts (nvidia's header-less 403 "Authorization failed"
+# for every invalid key) are single-host and routine; see the misattribution
+# note on _proxy_degraded_hosts.
 _PROXY_DEGRADED_STATUSES = frozenset({403, 429})
 _PROXY_DEGRADED_WARN_THRESHOLD = 25
 _RATE_LIMIT_HEADER_PREFIXES = ("x-ratelimit", "retry-after")
@@ -192,6 +195,16 @@ _proxy_rotations = 0
 _proxy_degraded_streak = 0
 _proxy_degraded_warned = False
 _proxy_degraded_rotations = 0
+# Distinct request hosts seen in the CURRENT degraded streak (reset with it).
+# Exit-level degradation is UNIFORM across destinations; app-level per-key
+# verdicts are single-host — nvidia validation answers 403 "Authorization
+# failed" (no rate-limit headers) for EVERY invalid key, and nvidia runs are
+# invalid-key dominated, so a host-agnostic streak would rotate the
+# process-wide egress mid-run on a daily cadence (worst case: an agnes-ai run
+# pinned to socks5h for DNS-pollution reasons rotated onto socks5:// → mass
+# NETWORK_ERROR, AGENTS.md 2026-09-04). Rotation therefore requires the
+# streak to span >=2 distinct hosts.
+_proxy_degraded_hosts: Set[str] = set()
 
 
 def _apply_proxy(proxy: str) -> None:
@@ -281,7 +294,11 @@ def _has_rate_limit_headers(headers: Optional[Mapping[str, str]]) -> bool:
     return False
 
 
-def _note_proxy_status(status: int, headers: Optional[Mapping[str, str]] = None) -> None:
+def _note_proxy_status(
+    status: int,
+    headers: Optional[Mapping[str, str]] = None,
+    host: Optional[str] = None,
+) -> None:
     """Count consecutive UNEXPLAINED 403/429 answers; rotate the exit at the threshold.
 
     Such an exit is "alive" as far as the transport failover is concerned (any
@@ -290,13 +307,20 @@ def _note_proxy_status(status: int, headers: Optional[Mapping[str, str]] = None)
     flavours of this state: Cloudflare-edge blocks and per-IP ``blocked due to
     excessive requests`` 429s, which answer identically for good and dead keys
     (prod 2026-09-29: 30 warnings in 2.5 h while the exit poisoned every
-    proxied request). When the streak reaches ``_PROXY_DEGRADED_WARN_THRESHOLD``
-    and at least two candidates exist, rotate to the next ``HARVESTER_PROXY``
-    candidate using the SAME mechanics as :func:`_note_proxy_transport`
-    (``_apply_proxy`` under ``_proxy_lock``, masked log) and re-arm — one
-    rotation per streak, so the next exit can warn/rotate on its own streak.
-    A single candidate stays warn-only. ``get_egress_state()`` exposes
-    ``degraded_streak`` and ``degraded_rotations`` to probes. A 403/429 WITH
+    proxied request). When the streak reaches ``_PROXY_DEGRADED_WARN_THRESHOLD``,
+    spans ``>=2`` DISTINCT hosts, and at least two candidates exist, rotate to
+    the next ``HARVESTER_PROXY`` candidate using the SAME mechanics as
+    :func:`_note_proxy_transport` (``_apply_proxy`` under ``_proxy_lock``,
+    masked log) and re-arm — one rotation per streak, so the next exit can
+    warn/rotate on its own streak. The host gate is the misattribution guard:
+    exit-level degradation is uniform across destinations, while app-level
+    per-key verdicts (nvidia answers a header-less 403 for EVERY invalid key,
+    and its runs are invalid-key dominated) are single-host — rotating on
+    those would move the process-wide egress on a daily cadence, e.g. off an
+    agnes-ai run's DNS-pollution socks5h pin. A single-host streak — or a
+    single configured candidate — stays warn-once. ``get_egress_state()``
+    exposes ``degraded_streak`` and ``degraded_rotations`` to probes;
+    ``degraded_rotations`` counts actual rotations only. A 403/429 WITH
     rate-limit headers resets the streak (quota state, not exit state) and can
     therefore never rotate.
     """
@@ -306,27 +330,38 @@ def _note_proxy_status(status: int, headers: Optional[Mapping[str, str]] = None)
     streak = 0
     rotated_from = ""
     rotated_to: Optional[str] = None
+    single_host = ""
     with _proxy_lock:
         if status in _PROXY_DEGRADED_STATUSES and not _has_rate_limit_headers(headers):
             _proxy_degraded_streak += 1
+            if host:
+                _proxy_degraded_hosts.add(host)
             streak = _proxy_degraded_streak
-            if streak >= _PROXY_DEGRADED_WARN_THRESHOLD and not _proxy_degraded_warned:
+            host_count = len(_proxy_degraded_hosts)
+            if streak < _PROXY_DEGRADED_WARN_THRESHOLD:
+                return
+            if host_count >= 2 and len(_proxy_candidates) >= 2:
+                rotated_from = _HTTP_PROXY
+                try:
+                    index = _proxy_candidates.index(rotated_from)
+                except ValueError:
+                    index = -1
+                rotated_to = _proxy_candidates[(index + 1) % len(_proxy_candidates)]
+                _apply_proxy(rotated_to)
+                _proxy_degraded_rotations += 1
+                # Re-arm: never rotate more than once per streak.
+                _proxy_degraded_streak = 0
+                _proxy_degraded_hosts.clear()
+                _proxy_degraded_warned = False
+                fire = True
+            elif not _proxy_degraded_warned:
                 _proxy_degraded_warned = True
                 fire = True
-                if len(_proxy_candidates) >= 2:
-                    rotated_from = _HTTP_PROXY
-                    try:
-                        index = _proxy_candidates.index(rotated_from)
-                    except ValueError:
-                        index = -1
-                    rotated_to = _proxy_candidates[(index + 1) % len(_proxy_candidates)]
-                    _apply_proxy(rotated_to)
-                    _proxy_degraded_rotations += 1
-                    # Re-arm: never rotate more than once per streak.
-                    _proxy_degraded_streak = 0
-                    _proxy_degraded_warned = False
+                if host_count == 1:
+                    single_host = next(iter(_proxy_degraded_hosts))
         else:
             _proxy_degraded_streak = 0
+            _proxy_degraded_hosts.clear()
             _proxy_degraded_warned = False
             return
 
@@ -336,16 +371,25 @@ def _note_proxy_status(status: int, headers: Optional[Mapping[str, str]] = None)
     if rotated_to is not None:
         logger.warning(
             f"Proxy rotation after {streak} consecutive degraded "
-            f"{sorted(_PROXY_DEGRADED_STATUSES)} answers (no rate-limit headers): "
+            f"{sorted(_PROXY_DEGRADED_STATUSES)} answers across >=2 hosts "
+            f"(no rate-limit headers): "
             f"{_mask_proxy(rotated_from)} -> {_mask_proxy(rotated_to)} "
             f"({len(_proxy_candidates)} candidates)"
         )
     else:
+        scope = f"on the single host {single_host}" if single_host else "to everything"
+        qualifier = (
+            " — single-host streak, likely app-level per-key verdicts "
+            "(not exit health); rotation requires >=2 distinct hosts"
+            if single_host
+            else ""
+        )
         logger.warning(
-            f"Exit answering {sorted(_PROXY_DEGRADED_STATUSES)} to everything: "
-            f"{streak} consecutive degraded responses — the transport failover "
-            f"cannot rotate this away (any answer resets its streak); diagnose "
-            f"with a per-node 'SOCKS5 CONNECT' census before blaming keys or quota"
+            f"Exit answering {sorted(_PROXY_DEGRADED_STATUSES)} {scope}: "
+            f"{streak} consecutive degraded responses{qualifier} — the transport "
+            f"failover cannot rotate this away (any answer resets its streak); "
+            f"diagnose with a per-node 'SOCKS5 CONNECT' census before blaming "
+            f"keys or quota"
         )
 
 
@@ -418,6 +462,7 @@ def set_proxy(proxy: Optional[str]) -> None:
         _proxy_failures = 0
         _proxy_degraded_streak = 0
         _proxy_degraded_warned = False
+        _proxy_degraded_hosts.clear()
 
     if not proxy:
         logger.info("HTTP proxy disabled")
@@ -578,7 +623,7 @@ def request(method: str, url: str, timeout: float = 10, use_proxy: bool = True, 
 
     if proxied:
         _note_proxy_transport(True)
-        _note_proxy_status(response.status_code, response.headers)
+        _note_proxy_status(response.status_code, response.headers, host=_url_host(url))
     response.raise_for_status()
     return response
 

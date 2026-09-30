@@ -27,6 +27,7 @@ import search.client as client
 
 RAW_URL = "https://raw.githubusercontent.com/o/r/abc123/conf/app.env"
 API_URL = "https://api.github.com/search/code?q=x&page=2"
+NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 
 
 class _FakeResponse:
@@ -218,6 +219,15 @@ class TestDegradedExitRotation(unittest.TestCase):
     failover mechanics: next HARVESTER_PROXY candidate under _proxy_lock,
     masked log, one rotation per streak (re-armed for the next exit).
     Quota-flavoured 403/429 (rate-limit headers) must NEVER rotate.
+
+    Round-2 review addendum: rotation requires MULTI-HOST evidence. Exit-level
+    degradation is uniform across destinations; application-level per-key
+    verdicts are single-host — nvidia validation answers 403 "Authorization
+    failed" (no rate-limit headers) for EVERY invalid key, and nvidia runs are
+    invalid-key dominated, so a host-agnostic streak rotated the process-wide
+    egress mid-run on a daily cadence (worst case: an agnes-ai run pinned to
+    socks5h for DNS-pollution reasons gets rotated onto socks5:// → mass
+    NETWORK_ERROR, AGENTS.md 2026-09-04). A single-host streak stays warn-only.
     """
 
     PROXIES = [
@@ -240,7 +250,7 @@ class TestDegradedExitRotation(unittest.TestCase):
     def _rotations(self) -> int:
         return client.get_egress_state()["degraded_rotations"] - self._rot0
 
-    def _drive(self, response, count: int = 1) -> None:
+    def _drive(self, response, count: int = 1, url: str = API_URL) -> None:
         # One patch context PER request: when a streak rotates, _apply_proxy
         # rebinds the module-global _HTTP_SESSION inside the running context —
         # a shared multi-request context would let later requests escape to a
@@ -252,16 +262,26 @@ class TestDegradedExitRotation(unittest.TestCase):
                 client, "_DIRECT_SESSION", mock.MagicMock()
             ):
                 try:
-                    client.request("GET", API_URL)
+                    client.request("GET", url)
                 except requests.exceptions.HTTPError:
                     pass  # raise_for_status fires after the status was recorded
 
-    def _drive_degraded(self, count: int, status: int = 429) -> None:
-        self._drive(_FakeResponse(status_code=status), count)
+    def _drive_degraded(self, count: int, status: int = 429, url: str = API_URL) -> None:
+        self._drive(_FakeResponse(status_code=status), count, url)
+
+    def _drive_two_hosts(self, total: int, status: int = 429) -> None:
+        """Alternate degraded votes across two hosts — exit-level evidence.
+
+        Rotation is gated on the streak spanning >=2 distinct hosts (uniform
+        degradation across destinations), so rotation-expecting drives must
+        cross hosts; even totals still put both hosts inside the streak.
+        """
+        for i in range(total):
+            self._drive_degraded(1, status=status, url=API_URL if i % 2 == 0 else NVIDIA_URL)
 
     def test_threshold_streak_rotates_to_next_exit_with_masked_warning(self) -> None:
         with self.assertLogs("search", level="WARNING") as logs:
-            self._drive_degraded(client._PROXY_DEGRADED_WARN_THRESHOLD)
+            self._drive_two_hosts(client._PROXY_DEGRADED_WARN_THRESHOLD)
 
         state = client.get_egress_state()
         self.assertEqual(state["proxy"], self.PROXIES[1])
@@ -276,17 +296,17 @@ class TestDegradedExitRotation(unittest.TestCase):
         self.assertIn("10.0.0.2", warnings[0])
 
     def test_never_rotates_twice_within_one_streak(self) -> None:
-        self._drive_degraded(client._PROXY_DEGRADED_WARN_THRESHOLD)
+        self._drive_two_hosts(client._PROXY_DEGRADED_WARN_THRESHOLD)
         self.assertEqual(self._rotations(), 1)
 
         # A fresh streak that has not completed must not rotate again.
-        self._drive_degraded(client._PROXY_DEGRADED_WARN_THRESHOLD - 1)
+        self._drive_two_hosts(client._PROXY_DEGRADED_WARN_THRESHOLD - 1)
         state = client.get_egress_state()
         self.assertEqual(state["proxy"], self.PROXIES[1])
         self.assertEqual(self._rotations(), 1)
 
     def test_second_streak_on_new_exit_rotates_again(self) -> None:
-        self._drive_degraded(2 * client._PROXY_DEGRADED_WARN_THRESHOLD)
+        self._drive_two_hosts(2 * client._PROXY_DEGRADED_WARN_THRESHOLD)
 
         state = client.get_egress_state()
         self.assertEqual(state["proxy"], self.PROXIES[2])
@@ -298,9 +318,9 @@ class TestDegradedExitRotation(unittest.TestCase):
         response = _FakeResponse(status_code=403)
         response.headers = {"x-ratelimit-remaining": "0"}
 
-        self._drive_degraded(client._PROXY_DEGRADED_WARN_THRESHOLD - 1)
+        self._drive_two_hosts(client._PROXY_DEGRADED_WARN_THRESHOLD - 1)
         self._drive(response, count=1)
-        self._drive_degraded(client._PROXY_DEGRADED_WARN_THRESHOLD - 1)
+        self._drive_two_hosts(client._PROXY_DEGRADED_WARN_THRESHOLD - 1)
 
         state = client.get_egress_state()
         self.assertEqual(state["proxy"], self.PROXIES[0])
@@ -320,9 +340,9 @@ class TestDegradedExitRotation(unittest.TestCase):
 
     def test_interleaved_200_resets_streak_without_rotating(self) -> None:
         threshold = client._PROXY_DEGRADED_WARN_THRESHOLD
-        self._drive_degraded(threshold - 1)
+        self._drive_two_hosts(threshold - 1)
         self._drive(_FakeResponse(status_code=200))
-        self._drive_degraded(threshold - 1)
+        self._drive_two_hosts(threshold - 1)
 
         state = client.get_egress_state()
         self.assertEqual(state["proxy"], self.PROXIES[0])
@@ -333,7 +353,7 @@ class TestDegradedExitRotation(unittest.TestCase):
         client.set_proxy(self.PROXIES[0])
 
         with self.assertLogs("search", level="WARNING") as logs:
-            self._drive_degraded(client._PROXY_DEGRADED_WARN_THRESHOLD + 5)
+            self._drive_two_hosts(client._PROXY_DEGRADED_WARN_THRESHOLD + 5)
 
         state = client.get_egress_state()
         self.assertEqual(state["proxy"], self.PROXIES[0])
@@ -344,6 +364,72 @@ class TestDegradedExitRotation(unittest.TestCase):
             1,
             sum(1 for r in logs.records if "degraded responses" in r.getMessage()),
         )
+
+    def test_single_host_flood_never_rotates(self) -> None:
+        # Given an nvidia-style check phase: EVERY invalid key answers 403
+        # "Authorization failed" without rate-limit headers, so header-less
+        # 403 floods on ONE host are routine app-level verdicts.
+        # When 30 consecutive 403s all hit integrate.api.nvidia.com,
+        # Then the exit must NOT rotate — warn-only, streak stays visible.
+        with self.assertLogs("search", level="WARNING") as logs:
+            self._drive_degraded(
+                client._PROXY_DEGRADED_WARN_THRESHOLD + 5, status=403, url=NVIDIA_URL
+            )
+
+        state = client.get_egress_state()
+        self.assertEqual(state["proxy"], self.PROXIES[0])
+        self.assertEqual(self._rotations(), 0)
+        self.assertEqual(state["degraded_streak"], client._PROXY_DEGRADED_WARN_THRESHOLD + 5)
+        self.assertEqual(
+            1,
+            sum(1 for r in logs.records if "degraded responses" in r.getMessage()),
+        )
+
+    def test_multi_host_threshold_streak_rotates(self) -> None:
+        # Given a uniform-degradation signature: 13 api.github.com + 12
+        # integrate.api.nvidia.com header-less 403s in one streak.
+        # When the streak reaches the threshold spanning 2 distinct hosts,
+        # Then it rotates to the next candidate and re-arms.
+        self._drive_degraded(13, status=403, url=API_URL)
+        self._drive_degraded(12, status=403, url=NVIDIA_URL)
+
+        state = client.get_egress_state()
+        self.assertEqual(state["proxy"], self.PROXIES[1])
+        self.assertEqual(self._rotations(), 1)
+        self.assertEqual(state["degraded_streak"], 0)
+
+    def test_second_host_completing_threshold_rotates(self) -> None:
+        # Given 24 header-less 403s on one host (below threshold, no rotation),
+        # When the 25th vote arrives on a SECOND host,
+        # Then the threshold is reached with multi-host evidence → rotates.
+        self._drive_degraded(
+            client._PROXY_DEGRADED_WARN_THRESHOLD - 1, status=403, url=API_URL
+        )
+        self.assertEqual(self._rotations(), 0)
+        self.assertEqual(client.get_egress_state()["proxy"], self.PROXIES[0])
+
+        self._drive_degraded(1, status=403, url=NVIDIA_URL)
+
+        state = client.get_egress_state()
+        self.assertEqual(state["proxy"], self.PROXIES[1])
+        self.assertEqual(self._rotations(), 1)
+
+    def test_single_host_streaks_around_a_healthy_reset_never_rotate(self) -> None:
+        # Given a single-host flood, then a healthy 200 (streak + host set
+        # reset), then another single-host flood,
+        # Then neither streak may rotate — the reset must not leak host
+        # evidence into the next streak.
+        threshold = client._PROXY_DEGRADED_WARN_THRESHOLD
+        self._drive_degraded(threshold, status=403, url=NVIDIA_URL)
+        self._drive(_FakeResponse(status_code=200), url=NVIDIA_URL)
+        self.assertEqual(0, client.get_egress_state()["degraded_streak"])
+
+        self._drive_degraded(threshold, status=403, url=NVIDIA_URL)
+
+        state = client.get_egress_state()
+        self.assertEqual(state["proxy"], self.PROXIES[0])
+        self.assertEqual(self._rotations(), 0)
+        self.assertEqual(state["degraded_streak"], threshold)
 
 
 class _FakeLimiter:
