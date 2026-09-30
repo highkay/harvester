@@ -2225,6 +2225,22 @@ suite 932 → **984 OK / 8 skipped**.
   2026-09-22" note below was written before the same-day hardening landed; the
   old "490 tests" and "35 failures in test_web_ui / test_web_push_logs"
   baselines are stale).
+- **Test-env gotchas (learned 2026-09-30, workstation)**: (1) the web API tests
+  (`test_web_middleware` / `test_web_auth` / `test_web_ui` /
+  `test_web_push_logs`) fail with "starlette.testclient requires the httpx2
+  package" if the env lacks it — `httpx2` is a TEST-only dep (starlette
+  TestClient) NOT in `requirements.txt`; a fresh venv must
+  `pip install -r requirements.txt httpx2`. (2) The workstation Python was
+  switched 3.13 → 3.12 (uv-managed) mid-day; the F7 `TestWatchRunDeadline`
+  tests went red under 3.12 because they relied on sub-50ms `asyncio.sleep`
+  precision — under 3.12+Windows a tiny sleep returns ~0 ms when a concurrent
+  task also sleeps (measured: 10× sleep(0.01) = 0.0 ms with a concurrent
+  sleeper vs 156 ms alone). Fixed by making the shared `_released_within`
+  helper wall-clock-bounded instead of attempt-counted. **Lesson: never write
+  a deadline test that races real millisecond sleeps against a real
+  millisecond deadline — control time or bound by wall clock.** Baseline at
+  `65014bb` (py3.12 venv): **1028 OK / 8 skipped**.
+
 - **Env-pollution trap (cost a false 35-red suite on 2026-09-23)**: the
   workstation `.env` carries the *container* paths
   (`HARVESTER_DB_PATH=/app/data/harvester.db`, `HARVESTER_WORKSPACE=/app/data`).
