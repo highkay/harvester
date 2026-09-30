@@ -336,17 +336,96 @@ def _parse_utc_started_at(value: object) -> datetime | None:
     return parsed
 
 
+async def _catchup_state(db: Any, provider: str) -> tuple[bool, datetime | None]:
+    """Return ``(has_live_run, last_started_utc)`` for *provider*.
+
+    Single query shared by BOTH catch-up decision points — arming
+    (:_schedule_catchups) and execution (:_run_catchup_job) — so the two can
+    never disagree about what "already satisfied" means. ``last_started`` is
+    parsed via :_parse_utc_started_at (started_at is UTC; the missed-fire
+    comparison happens against an aware datetime on both sides). Raises
+    whatever the DB raises — each caller owns its own failure policy (arming
+    skips the provider; execution proceeds toward running).
+    """
+    cursor = await db.execute(
+        "SELECT MAX(started_at) AS last_started, "
+        "SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS live_runs "
+        "FROM run_records WHERE provider_name = ?",
+        (provider,),
+    )
+    info = await cursor.fetchone()
+    has_live_run = info is not None and int(info["live_runs"] or 0) > 0
+    last_started = (
+        _parse_utc_started_at(info["last_started"]) if info is not None else None
+    )
+    return has_live_run, last_started
+
+
 async def _run_catchup_job(
     provider_name: str,
     config_file: str | None = None,
     missed_fire_iso: str = "",
 ) -> None:
-    """One-shot catch-up callback: log WHY at WARNING, then run the normal path.
+    """One-shot catch-up callback: RE-CHECK the missed fire, then run.
 
-    Going through :func:`_run_provider_job` means the provider guard, the
-    concurrency cap and the deferral ladder apply to a catch-up firing exactly
-    as they do to a regular cron firing.
+    The re-check exists because this callback fires 60s+ after
+    :_schedule_catchups armed it: the provider's own cron may have satisfied
+    the missed fire during the stagger delay, and blind delegation would then
+    409 on the live run and DEFER the catch-up — so the deferred retry later
+    starts a DUPLICATE scan for an already-satisfied fire. Re-running the same
+    :_catchup_state query at execution time closes that hole: a run started at
+    or after *missed_fire_iso*, or a still-'running' row, skips the catch-up
+    with an INFO log instead.
+
+    Failure policy is deliberately FAIL-TOWARD-RUNNING at execution time (the
+    opposite of arming, which skips): an unparseable/absent *missed_fire_iso*
+    (legacy job args) or a broken re-check query logs and delegates anyway — a
+    duplicate-risk run is safer than silently losing the missed firing, and
+    the provider guard + concurrency cap in :_run_provider_job still apply.
+
+    Going through :func:`_run_provider_job` when the re-check passes means the
+    provider guard, the concurrency cap and the deferral ladder apply to a
+    catch-up firing exactly as they do to a regular cron firing.
     """
+    # _parse_utc_started_at: same ISO→aware-UTC parse the arming side compares
+    # against (None = legacy/garbage arg → no re-check possible).
+    missed_fire = (
+        _parse_utc_started_at(missed_fire_iso) if missed_fire_iso else None
+    )
+    if missed_fire is not None:
+        svc = get_scheduler_service()
+        db_path = getattr(svc, "_db_path", None)
+        if isinstance(db_path, str):
+            try:
+                db = await get_db(db_path)
+                try:
+                    has_live_run, last_started = await _catchup_state(
+                        db, provider_name
+                    )
+                finally:
+                    try:
+                        await db.close()
+                    except Exception:
+                        pass
+                if has_live_run:
+                    logger.info(
+                        f"Catch-up skipped for {provider_name}: a run is still "
+                        f"live"
+                    )
+                    return
+                if last_started is not None and last_started >= missed_fire:
+                    logger.info(
+                        f"Catch-up skipped for {provider_name}: a run started "
+                        f"at/after the missed fire {missed_fire_iso} — "
+                        f"already satisfied"
+                    )
+                    return
+            except Exception as exc:
+                logger.warning(
+                    f"Catch-up re-check failed for {provider_name} ({exc}) — "
+                    f"proceeding with the run"
+                )
+
     logger.warning(
         f"Catch-up firing for {provider_name}: the cron fire at "
         f"{missed_fire_iso} (UTC) had no run when the scheduler started — "
@@ -392,24 +471,12 @@ async def _schedule_catchups(
                 fire = _previous_fire_time(row["cron_expression"], tz)
                 if fire is None:
                     continue
-                cursor = await db.execute(
-                    "SELECT MAX(started_at) AS last_started, "
-                    "SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) "
-                    "AS live_runs "
-                    "FROM run_records WHERE provider_name = ?",
-                    (provider,),
-                )
-                info = await cursor.fetchone()
-                if info is not None and int(info["live_runs"] or 0) > 0:
+                has_live_run, last_started = await _catchup_state(db, provider)
+                if has_live_run:
                     logger.info(
                         f"Catch-up skipped for {provider}: a run is still live"
                     )
                     continue
-                last_started = (
-                    _parse_utc_started_at(info["last_started"])
-                    if info is not None
-                    else None
-                )
                 if last_started is not None and last_started >= fire:
                     continue  # ran at or after the latest fire — nothing missed
                 delay = _CATCHUP_STAGGER_SECONDS * (scheduled + 1)

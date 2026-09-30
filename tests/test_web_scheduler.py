@@ -1077,6 +1077,216 @@ class TestMissedRunCatchup(unittest.TestCase):
 
         _run_async(_scenario())
 
+    # -- execution-time re-check of the missed fire (T6, 2026-09-30) ----------
+    #
+    # _run_catchup_job fires 60s+ AFTER _schedule_catchups armed it, so the
+    # provider's own cron may have satisfied the missed fire in between (the
+    # stagger window). Without a re-check the catch-up 409s on the live run and
+    # DEFERS it — and the deferred retry later starts a DUPLICATE scan for an
+    # already-satisfied fire. These tests pin the re-check at execution time.
+
+    def test_catchup_job_skips_when_missed_fire_already_satisfied(self) -> None:
+        """Given a run started at/after the missed fire exists at EXECUTION
+        time (the provider's own cron fired during the stagger delay),
+        When the catch-up job runs,
+        Then it does NOT delegate to _run_provider_job, creates no defer- job,
+        and logs INFO 'already satisfied' (fail toward NOT running)."""
+        import web.scheduler as scheduler_mod
+        from web.scheduler import _run_catchup_job
+
+        async def _scenario() -> None:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                db_path = await self._make_db(
+                    os.path.join(tmpdir, "h.db"),
+                    schedules=[("deepseek", "0 3 * * *", 1, "cfg.yaml")],
+                    # Started NOW >= any past missed fire.
+                    run_inserts=[
+                        ("r1", "deepseek", "completed", "datetime('now')")
+                    ],
+                )
+                missed_fire = (
+                    datetime.now(timezone.utc) - timedelta(hours=1)
+                ).isoformat()
+                svc = MagicMock()
+                svc._db_path = db_path
+                old_svc = scheduler_mod._scheduler_service
+                scheduler_mod._scheduler_service = svc
+                try:
+                    with patch.object(
+                        scheduler_mod, "_run_provider_job", new=AsyncMock()
+                    ) as mock_run:
+                        with self.assertLogs("web.scheduler", level="INFO") as logs:
+                            await _run_catchup_job("deepseek", "cfg.yaml", missed_fire)
+                finally:
+                    scheduler_mod._scheduler_service = old_svc
+
+                mock_run.assert_not_awaited()
+                svc.schedule_deferred.assert_not_called()
+                messages = [r.getMessage() for r in logs.records]
+                self.assertTrue(
+                    any("already satisfied" in m for m in messages), messages
+                )
+
+        _run_async(_scenario())
+
+    def test_catchup_job_skips_when_provider_run_is_live(self) -> None:
+        """Given a live 'running' row started BEFORE the missed fire (so only
+        the live-run check can suppress the catch-up),
+        When the catch-up job runs,
+        Then it does NOT delegate — the live run covers the slot (and the
+        provider guard would 409-then-DEFER into a duplicate retry anyway)."""
+        import web.scheduler as scheduler_mod
+        from web.scheduler import _run_catchup_job
+
+        async def _scenario() -> None:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                db_path = await self._make_db(
+                    os.path.join(tmpdir, "h.db"),
+                    schedules=[("deepseek", "0 3 * * *", 1, "cfg.yaml")],
+                    run_inserts=[
+                        ("r1", "deepseek", "running", "datetime('now','-1 day')")
+                    ],
+                )
+                missed_fire = (
+                    datetime.now(timezone.utc) - timedelta(hours=1)
+                ).isoformat()
+                svc = MagicMock()
+                svc._db_path = db_path
+                old_svc = scheduler_mod._scheduler_service
+                scheduler_mod._scheduler_service = svc
+                try:
+                    with patch.object(
+                        scheduler_mod, "_run_provider_job", new=AsyncMock()
+                    ) as mock_run:
+                        with self.assertLogs("web.scheduler", level="INFO") as logs:
+                            await _run_catchup_job("deepseek", "cfg.yaml", missed_fire)
+                finally:
+                    scheduler_mod._scheduler_service = old_svc
+
+                mock_run.assert_not_awaited()
+                messages = [r.getMessage() for r in logs.records]
+                self.assertTrue(
+                    any("still live" in m for m in messages), messages
+                )
+
+        _run_async(_scenario())
+
+    def test_catchup_job_delegates_when_no_run_since_missed_fire(self) -> None:
+        """REGRESSION: Given the only run row started BEFORE the missed fire,
+        When the catch-up job runs,
+        Then it delegates to _run_provider_job exactly as before (WARNING
+        'Catch-up firing' + the provider/config pair)."""
+        import web.scheduler as scheduler_mod
+        from web.scheduler import _run_catchup_job
+
+        async def _scenario() -> None:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                db_path = await self._make_db(
+                    os.path.join(tmpdir, "h.db"),
+                    schedules=[("deepseek", "0 3 * * *", 1, "cfg.yaml")],
+                    run_inserts=[
+                        ("r1", "deepseek", "completed", "datetime('now','-1 day')")
+                    ],
+                )
+                missed_fire = (
+                    datetime.now(timezone.utc) - timedelta(hours=1)
+                ).isoformat()
+                svc = MagicMock()
+                svc._db_path = db_path
+                old_svc = scheduler_mod._scheduler_service
+                scheduler_mod._scheduler_service = svc
+                try:
+                    with patch.object(
+                        scheduler_mod, "_run_provider_job", new=AsyncMock()
+                    ) as mock_run:
+                        with self.assertLogs("web.scheduler", level="WARNING") as logs:
+                            await _run_catchup_job("deepseek", "cfg.yaml", missed_fire)
+                finally:
+                    scheduler_mod._scheduler_service = old_svc
+
+                mock_run.assert_awaited_once_with("deepseek", "cfg.yaml")
+                messages = [r.getMessage() for r in logs.records]
+                self.assertTrue(
+                    any("Catch-up firing" in m for m in messages), messages
+                )
+
+        _run_async(_scenario())
+
+    def test_catchup_job_delegates_when_recheck_query_fails(self) -> None:
+        """Given the re-check DB query raises (broken/unavailable database),
+        When the catch-up job runs,
+        Then it logs WARNING and PROCEEDS to delegate — pinned deliberately:
+        at execution time a duplicate-risk run is safer than silently losing
+        the missed firing (the runner's own guards still apply)."""
+        import web.scheduler as scheduler_mod
+        from web.scheduler import _run_catchup_job
+
+        async def _scenario() -> None:
+            missed_fire = (
+                datetime.now(timezone.utc) - timedelta(hours=1)
+            ).isoformat()
+            svc = MagicMock()
+            svc._db_path = os.path.join("nonexistent-dir", "h.db")
+            old_svc = scheduler_mod._scheduler_service
+            scheduler_mod._scheduler_service = svc
+            try:
+                with patch.object(
+                    scheduler_mod,
+                    "get_db",
+                    new=AsyncMock(side_effect=RuntimeError("db down")),
+                ):
+                    with patch.object(
+                        scheduler_mod, "_run_provider_job", new=AsyncMock()
+                    ) as mock_run:
+                        with self.assertLogs(
+                            "web.scheduler", level="WARNING"
+                        ) as logs:
+                            await _run_catchup_job(
+                                "deepseek", "cfg.yaml", missed_fire
+                            )
+            finally:
+                scheduler_mod._scheduler_service = old_svc
+
+            mock_run.assert_awaited_once_with("deepseek", "cfg.yaml")
+            messages = [r.getMessage() for r in logs.records]
+            self.assertTrue(
+                any("re-check failed" in m for m in messages), messages
+            )
+
+        _run_async(_scenario())
+
+    def test_catchup_job_delegates_when_missed_fire_unparseable(self) -> None:
+        """LEGACY ARGS: Given an empty or non-ISO missed_fire_iso (a job armed
+        by an older build, or a hand-triggered callback),
+        When the catch-up job runs,
+        Then it behaves as today — no re-check, straight delegation."""
+        import web.scheduler as scheduler_mod
+        from web.scheduler import _run_catchup_job
+
+        async def _scenario() -> None:
+            for legacy_arg in ("", "not-an-iso-timestamp"):
+                svc = MagicMock()
+                svc._db_path = os.path.join("nonexistent-dir", "h.db")
+                old_svc = scheduler_mod._scheduler_service
+                scheduler_mod._scheduler_service = svc
+                try:
+                    with patch.object(
+                        scheduler_mod, "get_db", new=AsyncMock()
+                    ) as mock_get_db:
+                        with patch.object(
+                            scheduler_mod, "_run_provider_job", new=AsyncMock()
+                        ) as mock_run:
+                            await _run_catchup_job(
+                                "deepseek", "cfg.yaml", legacy_arg
+                            )
+                    # No parseable fire → the re-check is never attempted.
+                    mock_get_db.assert_not_awaited()
+                    mock_run.assert_awaited_once_with("deepseek", "cfg.yaml")
+                finally:
+                    scheduler_mod._scheduler_service = old_svc
+
+        _run_async(_scenario())
+
     def test_init_scheduler_invokes_catchups(self) -> None:
         import types
 
