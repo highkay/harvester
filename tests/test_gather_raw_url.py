@@ -44,6 +44,7 @@ from core.models import AcquisitionTask, Service
 from search import client
 from stage.base import StageOutput, StageResources
 from stage.definition import AcquisitionStage, github_blob_to_raw
+from tools.utils import encoding_url
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -355,6 +356,42 @@ class TestExtractionInvariant(unittest.TestCase):
 def _found_keys(pattern: str, text: str) -> set[str]:
     services: list[Service] = client.collect(key_pattern=pattern, text=text)
     return {s.key for s in services}
+
+
+class TestBlobToRawToWireChain(unittest.TestCase):
+    """End-to-end pin: blob URL -> ``github_blob_to_raw`` -> ``encoding_url``.
+
+    The two false-404 mechanisms fixed on 2026-09-30 compose at gather time:
+    F2 keeps a path-embedded ``#`` as path content, and F1 (``encoding_url``)
+    percent-encodes non-ASCII instead of punycoding it. If either regresses,
+    the wire URL 404s while the file exists (prod proof: ulw-20260930 g1).
+    """
+
+    def test_cjk_blob_url_produces_fetchable_wire_url(self):
+        # Given a blob URL with a CJK directory (prod class-A shape)
+        blob = "https://github.com/o/r/blob/main/code/第四章/4.6.ipynb"
+        # When mapped and wire-encoded
+        raw = github_blob_to_raw(blob)
+        wire = encoding_url(raw)
+        # Then the path carries UTF-8 escapes, never punycode, and the chain
+        # is idempotent (encoding_url must not double-encode F2's output)
+        self.assertNotIn("xn--", wire)
+        self.assertIn("%E7%AC%AC%E5%9B%9B%E7%AB%A0", wire)
+        self.assertEqual(wire, encoding_url(wire))
+        self.assertTrue(wire.startswith("https://raw.githubusercontent.com/o/r/main/"))
+
+    def test_cjk_dir_and_hash_segment_and_anchor_compose(self):
+        # Given a blob URL with CJK + a literal '#' path segment + a line anchor
+        blob = "https://github.com/o/r/blob/main/代码/C#Code/f.cs#L5"
+        # When mapped and wire-encoded
+        wire = encoding_url(github_blob_to_raw(blob))
+        # Then '#' survives as %23 (never truncated), CJK is %-escaped,
+        # the line anchor is stripped, and nothing is double-encoded
+        self.assertEqual(
+            wire,
+            "https://raw.githubusercontent.com/o/r/main/%E4%BB%A3%E7%A0%81/C%23Code/f.cs",
+        )
+        self.assertEqual(wire, encoding_url(wire))
 
 
 if __name__ == "__main__":
