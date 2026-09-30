@@ -714,6 +714,123 @@ class TestWatchRunDeadline(unittest.TestCase):
 
         _run_async(_scenario())
 
+    def test_deadline_flip_records_validated_key_count(self) -> None:
+        """Given a stuck row and a runner whose failed-run count helper
+        reports 17 validated keys, When the watcher passes the deadline,
+        Then the ``running→failed`` flip carries ``valid_keys_found=17`` —
+        startup push recovery (``find_unpushed_terminal_runs`` gates on
+        ``COALESCE(valid_keys_found,0) > 0``) would otherwise never see the
+        stranded run's validated keys."""
+        async def _scenario() -> None:
+            fake = _FakeRunner()
+            fake.failed_run_valid_keys = 17
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                svc = _make_service_with_row(
+                    tmpdir, "deepseek", "examples/config-deepseek.yaml"
+                )
+                with patch("web.scheduler._lazy_get_runner", return_value=fake), patch(
+                    "web.scheduler._WATCH_POLL_SECONDS", 0.01
+                ), patch(
+                    "web.scheduler._RUN_WATCH_MAX_HOURS", 1e-5, create=True
+                ):
+                    await svc.trigger_manual("deepseek")
+                    released = await _released_within(svc, "deepseek", attempts=300)
+                    self.assertTrue(released)
+
+                    self.assertEqual(len(fake.update_run_calls), 1)
+                    args, kwargs = fake.update_run_calls[0]
+                    self.assertEqual(args[:2], (fake.run_id, "failed"))
+                    self.assertEqual(
+                        kwargs.get("valid_keys_found"),
+                        17,
+                        "the deadline flip must record the provider-directory "
+                        "valid-key count so push recovery can see the run",
+                    )
+                    self.assertEqual(
+                        fake.count_valid_keys_calls,
+                        [("deepseek", None)],
+                        "the count must be scoped to THIS provider (no temp "
+                        "config in the deadline path)",
+                    )
+
+                await svc.shutdown()
+
+        _run_async(_scenario())
+
+    def test_deadline_flip_proceeds_when_count_helper_raises(self) -> None:
+        """Given the failed-run count helper RAISES, When the watcher passes
+        the deadline, Then the flip still proceeds (best-effort) with
+        ``valid_keys_found`` omitted — matching the runner's own failure path,
+        which never lets the counter block a terminal write."""
+        async def _scenario() -> None:
+            fake = _FakeRunner()
+
+            def _raise(provider_name: str, temp_yaml_path: object = None) -> int:
+                raise RuntimeError("count unavailable")
+
+            fake._count_valid_keys_for_failed_run = _raise  # type: ignore[method-assign]
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                svc = _make_service_with_row(
+                    tmpdir, "deepseek", "examples/config-deepseek.yaml"
+                )
+                with patch("web.scheduler._lazy_get_runner", return_value=fake), patch(
+                    "web.scheduler._WATCH_POLL_SECONDS", 0.01
+                ), patch(
+                    "web.scheduler._RUN_WATCH_MAX_HOURS", 1e-5, create=True
+                ):
+                    await svc.trigger_manual("deepseek")
+                    released = await _released_within(svc, "deepseek", attempts=300)
+                    self.assertTrue(
+                        released,
+                        "a failing count helper must not wedge the guard",
+                    )
+
+                    self.assertEqual(len(fake.update_run_calls), 1)
+                    args, kwargs = fake.update_run_calls[0]
+                    self.assertEqual(args[:2], (fake.run_id, "failed"))
+                    self.assertIsNone(
+                        kwargs.get("valid_keys_found"),
+                        "an unavailable count must be omitted (None), never "
+                        "block the terminal flip",
+                    )
+
+                await svc.shutdown()
+
+        _run_async(_scenario())
+
+    def test_deadline_flip_proceeds_when_count_helper_returns_none(self) -> None:
+        """Given the failed-run count helper returns None, When the watcher
+        passes the deadline, Then the flip still proceeds with
+        ``valid_keys_found`` None — ``_update_run_sync`` skips a None column,
+        keeping the write compatible with rows lacking the counter."""
+        async def _scenario() -> None:
+            fake = _FakeRunner()
+            fake.failed_run_valid_keys = None
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                svc = _make_service_with_row(
+                    tmpdir, "deepseek", "examples/config-deepseek.yaml"
+                )
+                with patch("web.scheduler._lazy_get_runner", return_value=fake), patch(
+                    "web.scheduler._WATCH_POLL_SECONDS", 0.01
+                ), patch(
+                    "web.scheduler._RUN_WATCH_MAX_HOURS", 1e-5, create=True
+                ):
+                    await svc.trigger_manual("deepseek")
+                    released = await _released_within(svc, "deepseek", attempts=300)
+                    self.assertTrue(released)
+
+                    self.assertEqual(len(fake.update_run_calls), 1)
+                    args, kwargs = fake.update_run_calls[0]
+                    self.assertEqual(args[:2], (fake.run_id, "failed"))
+                    self.assertIsNone(kwargs.get("valid_keys_found"))
+
+                await svc.shutdown()
+
+        _run_async(_scenario())
+
 
 # ---------------------------------------------------------------------------
 # Test 4: next_run_time exists after add_job
@@ -1544,6 +1661,11 @@ class _FakeRunner:
     feeds the watch-deadline computation. ``_update_run_sync`` records calls
     so tests can pin the watcher's best-effort ``running→failed`` flip
     (status + ``only_if_running`` kwargs) without touching a real DB.
+    ``_count_valid_keys_for_failed_run`` mirrors the runner helper the
+    deadline flip consults so the flip can carry ``valid_keys_found``;
+    ``failed_run_valid_keys`` is the scripted return value and
+    ``count_valid_keys_calls`` records the ``(provider, temp_yaml_path)``
+    args it was called with.
     """
 
     def __init__(self, run_id: str = "run-fake-1") -> None:
@@ -1553,6 +1675,8 @@ class _FakeRunner:
         self.run_scan_calls: list[tuple[str, str | None]] = []
         self.run_scan_error: Exception | None = None
         self.update_run_calls: list[tuple[tuple, dict]] = []
+        self.failed_run_valid_keys: int | None = 0
+        self.count_valid_keys_calls: list[tuple[str, object]] = []
 
     async def run_scan(
         self, provider_name: str, config_file: str | None = None
@@ -1567,6 +1691,12 @@ class _FakeRunner:
         if self.started_at is not None:
             record["started_at"] = self.started_at
         return record
+
+    def _count_valid_keys_for_failed_run(
+        self, provider_name: str, temp_yaml_path: object = None
+    ) -> int | None:
+        self.count_valid_keys_calls.append((provider_name, temp_yaml_path))
+        return self.failed_run_valid_keys
 
     def _update_run_sync(self, *args: object, **kwargs: object) -> None:
         self.update_run_calls.append((args, kwargs))

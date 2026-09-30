@@ -683,6 +683,13 @@ class SchedulerService:
         thread managed to land in the meantime, and if the scan thread is
         somehow still alive the runner's OWN provider guard keeps blocking a
         true duplicate scan even though the scheduler-side guard is free.
+        The flip also records the provider's validated-key count (via the
+        runner's ``_count_valid_keys_for_failed_run`` — best-effort, scoped to
+        this provider with no temp config, exactly like the runner's own
+        failure path), WITHOUT which ``web.db.find_unpushed_terminal_runs``
+        (gated on ``COALESCE(valid_keys_found,0) > 0``) would never dispatch
+        startup push recovery for a deadline-flipped run that holds validated
+        keys on disk — the exact stranded-run case this bound exists for.
         Without this bound a stuck ``running`` row held the guard until
         process restart, silently blocking every future cron firing for the
         provider and inflating ``_active_run_count`` toward the concurrency
@@ -732,11 +739,32 @@ class SchedulerService:
                     f"row stuck)"
                 )
                 try:
+                    # Record the provider's validated-key count on the flip —
+                    # same helper the runner's own failure path uses, scoped to
+                    # THIS provider (no temp config survives in the watcher).
+                    # Best-effort: an unavailable count omits the column rather
+                    # than blocking the terminal write (valid_keys_found=None is
+                    # skipped by _update_run_sync). Without it the flipped row
+                    # reads valid_keys_found=0 and startup push recovery
+                    # (find_unpushed_terminal_runs gates on COALESCE(...)>0)
+                    # would never re-dispatch a run that DOES hold valid keys.
+                    valid_keys_found: int | None = None
+                    try:
+                        valid_keys_found = runner._count_valid_keys_for_failed_run(
+                            provider_name, None
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            f"Watch-deadline valid-key count unavailable for "
+                            f"{run_id_short}… ({exc}) — flipping failed without "
+                            f"a count"
+                        )
                     runner._update_run_sync(
                         run_id,
                         "failed",
                         finished_at=True,
                         duration_from_started_at=True,
+                        valid_keys_found=valid_keys_found,
                         error_message=(
                             "run watch deadline exceeded: row stayed 'running' "
                             f"past {_RUN_WATCH_MAX_HOURS:g} h — scheduler guard "
