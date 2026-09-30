@@ -100,6 +100,12 @@ _LIMIT_WAIT_DEADLINE_SECONDS = 15.0
 _LIMIT_WAIT_ROUND_FLOOR = 0.5
 _LIMIT_WAIT_MAX_ROUNDS = 64
 
+# Consecutive 401s on a GitHub API credential before it is quarantined as
+# revoked. Strikes reset on any HTTP answer that is not a 401 (see
+# ``get_with_headers`` success path); 403/429 keep their cooldown semantics
+# untouched and never count as an auth strike.
+_DEAD_401_STRIKES = 3
+
 # 403/429 answers keep the transport streak "healthy" by design (the exit
 # answered), so an exit that blocks everything would never be rotated away —
 # the measured Cloudflare-edge / per-IP "blocked due to excessive requests"
@@ -785,6 +791,28 @@ class GitHubClient:
                 logger.info("GitHub API rate limit exceeded, backing off")
                 time.sleep(GITHUB_API_RATE_LIMIT_BACKOFF)  # Wait for rate limit reset
 
+    def _record_auth_failure(self, url: str, headers: Optional[Dict]) -> None:
+        """Count a 401 strike for the request's credential; quarantine at N.
+
+        A revoked PAT answers 401 forever, so after ``_DEAD_401_STRIKES``
+        consecutive 401s the credential is marked dead and never handed out
+        again for this process lifetime (``tools.credential`` skips it). The
+        mark is process-only — a restart re-admits the token, which re-dies
+        after the same threshold. 403/429 are cooldown concerns and do NOT
+        strike here.
+        """
+        service = self._service(url)
+        credential = self._credential_from_headers(headers or {}, service)
+        if not service or not credential:
+            return
+        strikes = github_credential_state.mark_strike(service, credential)
+        if strikes >= _DEAD_401_STRIKES:
+            github_credential_state.mark_dead(service, credential)
+            logger.error(
+                f"[github] quarantining credential after {strikes} consecutive "
+                f"401s (revoked/unauthorized): {mask_credential(credential)}"
+            )
+
     def get(
         self,
         url: str,
@@ -919,6 +947,7 @@ class GitHubClient:
 
         if service and credential and success:
             github_credential_state.mark_success(service, credential)
+            github_credential_state.mark_alive(service, credential)
 
         return content, response_headers
 
@@ -1042,6 +1071,8 @@ class GitHubClient:
                     if self._is_http_rate_limited(code, reason):
                         last_error = ConnectionError(f"HTTP {code} error: {reason}")
                     else:
+                        if code == 401:
+                            self._record_auth_failure(url, headers)
                         raise NetworkError(f"Authentication failed (HTTP {code})")
                 else:
                     raise NetworkError(f"HTTP {code} error: {reason}")

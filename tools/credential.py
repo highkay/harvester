@@ -27,6 +27,11 @@ from .state import github_credential_state, mask_credential
 
 logger = get_logger("manager")
 
+# Poll interval used when every credential is quarantined as dead: there is no
+# cooldown to drain, and process-lifetime quarantine clears only on restart or
+# a new credential, so wait-then-retry rather than spin.
+_DEAD_POLL_SECONDS = 5.0
+
 
 @dataclass
 class CredentialStats:
@@ -130,16 +135,36 @@ class Credentials:
         items: List[str],
         label: str,
     ) -> Optional[str]:
-        """Get a credential that is not cooling down"""
+        """Get a credential that is not cooling down and not quarantined dead"""
         if not balancer or not items:
             return None
 
+        dead_logged = False
         while True:
             count = len(items)
             for _ in range(count):
                 credential = balancer.get()
+                if github_credential_state.is_dead(service, credential):
+                    # Revoked/unauthorized — never handed out.
+                    continue
                 if not github_credential_state.is_cooling(service, credential):
                     return credential
+
+            if github_credential_state.all_dead(service, items):
+                # Loud once per call-loop entry (not once per 0.1s spin), then
+                # behave like the all-cooling path: pause and retry.
+                if not dead_logged:
+                    masked = ", ".join(mask_credential(item) for item in items)
+                    logger.error(
+                        f"[github] ALL {label} credentials are DEAD "
+                        f"(revoked/unauthorized) — no search credential can be "
+                        f"handed out until restart or new tokens are added, "
+                        f"credentials: {masked}"
+                    )
+                    dead_logged = True
+                wait = github_credential_state.next_wait(service, items)
+                time.sleep(wait if wait > 0 else _DEAD_POLL_SECONDS)
+                continue
 
             wait = github_credential_state.next_wait(service, items)
             if wait <= 0:

@@ -52,10 +52,26 @@ class Cooldown:
 
 
 class GithubCredentialState:
-    """Thread-safe cooldown registry for GitHub credentials"""
+    """Thread-safe cooldown registry for GitHub credentials.
+
+    Two independent registries live here:
+
+    - the **cooldown** registry (``_items``) — time-based backoff for
+      403/429/quota exhaustion, unchanged;
+    - the **dead** registry (``_dead`` + ``_strikes``) — process-lifetime
+      quarantine for credentials GitHub has revoked. A revoked PAT answers
+      401 forever; without quarantine it is round-robined forever and silently
+      burns its share of every search. Detection strikes are consecutive-401
+      scoped: any success clears both the dead flag and the strike count.
+
+    Nothing here is persisted — a revoked token re-enters at process restart
+    and re-dies after the strike threshold (search/client.py).
+    """
 
     def __init__(self) -> None:
         self._items: Dict[Tuple[str, str], Cooldown] = {}
+        self._dead: set = set()
+        self._strikes: Dict[Tuple[str, str], int] = {}
         self._lock = threading.Lock()
 
     def mark_limited(self, service: str, credential: str, wait: Optional[float] = None) -> float:
@@ -91,6 +107,50 @@ class GithubCredentialState:
     def is_cooling(self, service: str, credential: str) -> bool:
         """Return whether a credential is still cooling down"""
         return self.wait_time(service, credential) > 0
+
+    # ------------------------------------------------------------------
+    # Dead-token quarantine (revoked / unauthorized credentials)
+    # ------------------------------------------------------------------
+
+    def mark_strike(self, service: str, credential: str) -> int:
+        """Count one consecutive auth failure; return the new strike total."""
+        if not service or not credential:
+            return 0
+        with self._lock:
+            key = (service, credential)
+            strikes = self._strikes.get(key, 0) + 1
+            self._strikes[key] = strikes
+            return strikes
+
+    def mark_dead(self, service: str, credential: str) -> None:
+        """Quarantine a credential: it is never handed out again."""
+        if not service or not credential:
+            return
+        with self._lock:
+            key = (service, credential)
+            self._dead.add(key)
+            self._strikes.pop(key, None)
+
+    def is_dead(self, service: str, credential: str) -> bool:
+        """Return whether a credential is quarantined as dead."""
+        if not service or not credential:
+            return False
+        with self._lock:
+            return (service, credential) in self._dead
+
+    def mark_alive(self, service: str, credential: str) -> None:
+        """Revive a credential: clears both the dead flag and its strikes."""
+        if not service or not credential:
+            return
+        with self._lock:
+            key = (service, credential)
+            self._dead.discard(key)
+            self._strikes.pop(key, None)
+
+    def all_dead(self, service: str, credentials: List[str]) -> bool:
+        """Return whether every non-empty credential is quarantined."""
+        items = [x for x in credentials if x]
+        return bool(items) and all(self.is_dead(service, item) for item in items)
 
     def wait_time(self, service: str, credential: str) -> float:
         """Return remaining cooldown seconds for a credential"""
