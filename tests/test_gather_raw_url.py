@@ -128,12 +128,34 @@ class TestGithubBlobToRaw(unittest.TestCase):
         self.assertEqual(result, "https://raw.githubusercontent.com/owner/repo/main/src/app.py")
         self.assertNotIn("#", result)
 
+    def test_column_precision_line_anchors_are_stripped(self):
+        # Given blob URLs the GitHub UI generates with column-precision anchors
+        # (#L4C1 single, #L4C1-L4C14 range) — the shape the old line-only regex
+        # missed, mapping the anchor into the path (false 404).
+        cases = {
+            "https://github.com/owner/repo/blob/main/src/app.py#L4C1": (
+                "https://raw.githubusercontent.com/owner/repo/main/src/app.py"
+            ),
+            "https://github.com/owner/repo/blob/main/src/app.py#L4C1-L4C14": (
+                "https://raw.githubusercontent.com/owner/repo/main/src/app.py"
+            ),
+        }
+        for url, expected in cases.items():
+            with self.subTest(url=url):
+                # When mapped
+                result = github_blob_to_raw(url)
+                # Then the anchor is stripped and never reaches the request
+                self.assertEqual(result, expected)
+                self.assertNotIn("#", result)
+
     def test_non_line_anchor_hashes_stay_path_content(self):
         # Given trailing '#' fragments that are NOT GitHub line anchors
         cases = {
             "https://github.com/o/r/blob/main/app.py#Lfoo": "https://raw.githubusercontent.com/o/r/main/app.py%23Lfoo",
             "https://github.com/o/r/blob/main/app.py#L12x": "https://raw.githubusercontent.com/o/r/main/app.py%23L12x",
             "https://github.com/o/r/blob/main/README.md#section": "https://raw.githubusercontent.com/o/r/main/README.md%23section",
+            "https://github.com/o/r/blob/main/app.py#L4C": "https://raw.githubusercontent.com/o/r/main/app.py%23L4C",
+            "https://github.com/o/r/blob/main/app.py#L4C1x": "https://raw.githubusercontent.com/o/r/main/app.py%23L4C1x",
         }
         for url, expected in cases.items():
             with self.subTest(url=url):

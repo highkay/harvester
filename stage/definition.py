@@ -88,7 +88,9 @@ _GITHUB_BLOB_PREFIX = "https://github.com/"
 _GITHUB_BLOB_PATH_RE = re.compile(r"^([^/]+)/([^/]+)/blob/([^/]+)/(.+)$")
 
 # The only legitimate fragment on a blob URL is a trailing line anchor.
-_BLOB_LINE_ANCHOR_RE = re.compile(r"#L\d+(?:-L\d+)?$")
+# The GitHub UI emits column-precision anchors too (#L4C1 / #L4C1-L4C14),
+# where a 'C<column>' suffix may follow each line number.
+_BLOB_LINE_ANCHOR_RE = re.compile(r"#L\d+(?:C\d+)?(?:-L\d+(?:C\d+)?)?$")
 
 # Kept literal when re-quoting the decoded path: '/' separators plus '@' and
 # ' ' (requests requotes a raw space to %20 on the wire). Everything else
