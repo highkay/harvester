@@ -17,6 +17,10 @@ from typing import Final
 
 import aiosqlite
 
+from tools.logger import get_logger
+
+logger = get_logger("web.db")
+
 _DEFAULT_WORKSPACE: Final[str] = "./data"
 _DEFAULT_DB_NAME: Final[str] = "harvester.db"
 
@@ -222,6 +226,43 @@ async def reconcile_running_runs(db_path: str | None = None) -> int:
         await db.close()
 
 
+_NEWER_RUN_CLAUSE: Final[str] = (
+    "SELECT 1 FROM run_records AS newer "
+    "WHERE newer.provider_name = run_records.provider_name "
+    "AND newer.id <> run_records.id "
+    "AND newer.started_at > run_records.started_at"
+)
+
+
+async def _select_push_recovery_candidates(
+    db: aiosqlite.Connection, window_hours: int, *, superseded: bool
+) -> list[aiosqlite.Row]:
+    """Shared push-recovery candidate query (see :func:`find_unpushed_terminal_runs`).
+
+    ``superseded=False`` returns the runs recovery dispatches (their provider
+    has NO newer run); ``superseded=True`` returns the complement — runs
+    skipped precisely because a newer run for the same provider exists (its
+    start already backed up + reset this run's result files).
+    """
+    quantifier = "EXISTS" if superseded else "NOT EXISTS"
+    cursor = await db.execute(
+        "SELECT id, provider_name, status, valid_keys_found, finished_at, "
+        "config_file FROM run_records "
+        "WHERE status IN ('completed','failed') "
+        "AND COALESCE(valid_keys_found, 0) > 0 "
+        "AND finished_at IS NOT NULL "
+        "AND finished_at >= datetime('now', ?) "
+        "AND NOT EXISTS ("
+        "SELECT 1 FROM push_logs WHERE push_logs.run_id = run_records.id "
+        "AND push_logs.status = 'success'"
+        ") "
+        f"AND {quantifier} ({_NEWER_RUN_CLAUSE}) "
+        "ORDER BY finished_at",
+        (f"-{int(window_hours)} hours",),
+    )
+    return list(await cursor.fetchall())
+
+
 async def find_unpushed_terminal_runs(
     db_path: str | None = None, window_hours: int = 24
 ) -> list[dict]:
@@ -246,7 +287,15 @@ async def find_unpushed_terminal_runs(
       partially failed stay selectable so their stranded keys are retried at
       the next startup; re-dispatch is duplicate-safe because every push
       target dedups server-side (e.g. gpt-load ``ignored_count``), and a
-      successful manual-salvage row suppresses the run the same way.
+      successful manual-salvage row suppresses the run the same way;
+    - NO newer ``run_records`` row for the SAME provider (``started_at``
+      strictly later; any status). Every shipped config sets
+      ``auto_restore: false``, so a newer run's start backed up and reset
+      ``providers/<p>/valid-keys.txt`` — that file no longer belongs to this
+      old run, and recovering it would push the newer corpus under the old
+      run_id (typically all-duplicates → status='success' → the old run is
+      suppressed forever while ITS own stranded keys sit in a backup dir).
+      The runs skipped for this reason are logged at WARNING with their ids.
 
     Oldest first. Returns a list of dicts (id, provider_name, status,
     valid_keys_found, finished_at, config_file).
@@ -254,21 +303,21 @@ async def find_unpushed_terminal_runs(
     path = db_path if db_path is not None else resolve_db_path()
     db = await get_db(path)
     try:
-        cursor = await db.execute(
-            "SELECT id, provider_name, status, valid_keys_found, finished_at, "
-            "config_file FROM run_records "
-            "WHERE status IN ('completed','failed') "
-            "AND COALESCE(valid_keys_found, 0) > 0 "
-            "AND finished_at IS NOT NULL "
-            "AND finished_at >= datetime('now', ?) "
-            "AND NOT EXISTS ("
-            "SELECT 1 FROM push_logs WHERE push_logs.run_id = run_records.id "
-            "AND push_logs.status = 'success'"
-            ") "
-            "ORDER BY finished_at",
-            (f"-{int(window_hours)} hours",),
+        rows = await _select_push_recovery_candidates(
+            db, window_hours, superseded=False
         )
-        return [dict(row) for row in await cursor.fetchall()]
+        skipped = await _select_push_recovery_candidates(
+            db, window_hours, superseded=True
+        )
+        if skipped:
+            skipped_ids = ", ".join(str(row["id"]) for row in skipped)
+            logger.warning(
+                f"Push recovery: skipped {len(skipped)} terminal run(s) whose "
+                f"provider has a newer run — their valid-keys.txt no longer "
+                f"belongs to them (pushing would retry a foreign corpus under "
+                f"the old run_id): {skipped_ids}"
+            )
+        return [dict(row) for row in rows]
     finally:
         await db.close()
 

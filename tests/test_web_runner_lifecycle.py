@@ -879,6 +879,155 @@ class TestFindUnpushedTerminalRunsPushStatusSemantics(unittest.TestCase):
         self.assertEqual(self._selected_ids(["success", "failed"]), set())
 
 
+class TestFindUnpushedTerminalRunsSupersededByNewerRun(unittest.TestCase):
+    """Given a terminal, valid (>0), unpushed run A and a NEWER run B for the
+    SAME provider (ANY status, later started_at),
+    When find_unpushed_terminal_runs runs,
+    Then A is NOT selected.
+
+    Every shipped config runs ``auto_restore: false``: B's start backed up and
+    reset ``providers/<p>/valid-keys.txt``, so recovering A would push B's
+    corpus under A's run_id — all-duplicates → status='success' — permanently
+    suppressing A while A's own stranded keys sit in a backup dir. A newer run
+    for a DIFFERENT provider, or no newer run at all, leaves A selected, and
+    the skip is logged with A's run_id."""
+
+    @staticmethod
+    def _insert(
+        db_path: str,
+        run_id: str,
+        *,
+        provider: str = "p",
+        status: str = "completed",
+        valid: int = 5,
+        when_sql: str = "datetime('now','-3 hours')",
+        push_status: str | None = None,
+    ) -> None:
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "INSERT INTO run_records (id, provider_name, config_file, "
+                "status, valid_keys_found, started_at, finished_at) "
+                f"VALUES (?, ?, 'c.yaml', ?, ?, {when_sql}, {when_sql})",
+                (run_id, provider, status, valid),
+            )
+            if push_status is not None:
+                conn.execute(
+                    "INSERT INTO push_logs (run_id, provider_name, "
+                    "gpt_load_config_id, group_id, keys_count, added_count, "
+                    "ignored_count, status) VALUES "
+                    "(?, ?, 0, 1, 5, 0, 0, ?)",
+                    (run_id, provider, push_status),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _selected(self, setup) -> set[str]:
+        from web.db import find_unpushed_terminal_runs, init_db
+
+        async def _scenario() -> set[str]:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                db_path = os.path.join(tmpdir, "h.db")
+                await init_db(db_path)
+                setup(db_path)
+                rows = await find_unpushed_terminal_runs(db_path)
+                return {r["id"] for r in rows}
+
+        return _run_async(_scenario())
+
+    def test_superseded_by_newer_run_same_provider_not_selected(self) -> None:
+        # B is 'cancelled' — NOT a recovery candidate itself — yet its later
+        # started_at still means the provider's result file belongs to B now.
+        def setup(db_path: str) -> None:
+            self._insert(db_path, "run-A")
+            self._insert(
+                db_path,
+                "run-B",
+                status="cancelled",
+                when_sql="datetime('now','-1 hours')",
+            )
+
+        self.assertEqual(self._selected(setup), set())
+
+    def test_superseded_with_failed_push_also_skipped(self) -> None:
+        # 0235c42 made failed-push runs re-selectable, but a newer run still
+        # owns valid-keys.txt — the retry would be a foreign-corpus duplicate.
+        def setup(db_path: str) -> None:
+            self._insert(db_path, "run-A", push_status="failed")
+            self._insert(
+                db_path,
+                "run-B",
+                when_sql="datetime('now','-1 hours')",
+            )
+
+        self.assertEqual(self._selected(setup), {"run-B"})
+
+    def test_newer_run_for_other_provider_still_selected(self) -> None:
+        def setup(db_path: str) -> None:
+            self._insert(db_path, "run-A")
+            self._insert(
+                db_path,
+                "run-B",
+                provider="other",
+                status="cancelled",
+                when_sql="datetime('now','-1 hours')",
+            )
+
+        self.assertEqual(self._selected(setup), {"run-A"})
+
+    def test_no_newer_run_still_selected(self) -> None:
+        # Regression: the plain single-run case is unchanged.
+        def setup(db_path: str) -> None:
+            self._insert(db_path, "run-A")
+
+        self.assertEqual(self._selected(setup), {"run-A"})
+
+    def test_failed_push_without_newer_run_still_selected(self) -> None:
+        # Regression (0235c42): a failed push with no newer run stays
+        # re-selectable so its stranded keys are retried.
+        def setup(db_path: str) -> None:
+            self._insert(db_path, "run-A", push_status="failed")
+
+        self.assertEqual(self._selected(setup), {"run-A"})
+
+    def test_superseded_run_is_logged(self) -> None:
+        import logging
+
+        from web.db import find_unpushed_terminal_runs, init_db
+
+        records: list[str] = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                records.append(record.getMessage())
+
+        handler = _Capture(level=logging.WARNING)
+        db_logger = logging.getLogger("web.db")
+        db_logger.addHandler(handler)
+        try:
+
+            async def _scenario() -> None:
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    db_path = os.path.join(tmpdir, "h.db")
+                    await init_db(db_path)
+                    self._insert(db_path, "run-A")
+                    self._insert(
+                        db_path,
+                        "run-B",
+                        status="cancelled",
+                        when_sql="datetime('now','-1 hours')",
+                    )
+                    await find_unpushed_terminal_runs(db_path)
+
+            _run_async(_scenario())
+        finally:
+            db_logger.removeHandler(handler)
+
+        combined = " ".join(records)
+        self.assertIn("run-A", combined, f"skip not logged: {records!r}")
+
+
 class TestPushRecovery(unittest.TestCase):
     """Given terminal runs whose pushes never fired (process died between the
     terminal row write and the daemon push threads),
