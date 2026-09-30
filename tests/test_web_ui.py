@@ -290,6 +290,12 @@ class TestTokensPage(WebUiPageTestBase):
         resp = self.client.get("/tokens", follow_redirects=False)
         self.assertEqual(resp.status_code, 303)
 
+    def test_tokens_page_has_expires_column(self) -> None:
+        """The token table surfaces GitHub token expiry."""
+        resp = self.client.get("/tokens", headers=_auth_headers())
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("过期时间", resp.text)
+
 
 class TestSchedulePage(WebUiPageTestBase):
     """GET /schedule — schedule config list."""

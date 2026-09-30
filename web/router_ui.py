@@ -205,7 +205,8 @@ async def tokens_page(request: Request, _user: bool = Depends(require_ui_session
     try:
         # 不 SELECT token_encrypted —— 加密原文永不离开数据库
         cur = await db.execute(
-            "SELECT id, token_type, token_hash, label, enabled, created_at "
+            "SELECT id, token_type, token_hash, label, enabled, created_at, "
+            "expires_at "
             "FROM github_tokens ORDER BY id"
         )
         rows = [dict(row) for row in await cur.fetchall()]

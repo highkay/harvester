@@ -25,7 +25,7 @@
 <h3 style="margin-top:32px;">Token 列表</h3>
 <table>
   <thead>
-    <tr><th>ID</th><th>类型</th><th>Token（脱敏）</th><th>标签</th><th>启用状态</th><th>创建时间</th><th>操作</th></tr>
+    <tr><th>ID</th><th>类型</th><th>Token（脱敏）</th><th>标签</th><th>启用状态</th><th>过期时间</th><th>创建时间</th><th>操作</th></tr>
   </thead>
   <tbody>
     {% for t in tokens %}
@@ -35,6 +35,7 @@
       <td><code>{{ t.token_masked }}</code></td>
       <td>{{ t.label or '—' }}</td>
       <td>{% if t.enabled %}<span class="tag on">启用</span>{% else %}<span class="tag off">停用</span>{% endif %}</td>
+      <td class="muted">{{ t.expires_at or '—' }}</td>
       <td class="muted">{{ t.created_at }}</td>
       <td>
         <div class="row-actions">
@@ -48,7 +49,7 @@
       </td>
     </tr>
     {% else %}
-    <tr><td colspan="7" class="muted">暂无 Token</td></tr>
+    <tr><td colspan="8" class="muted">暂无 Token</td></tr>
     {% endfor %}
   </tbody>
 </table>

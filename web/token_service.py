@@ -11,10 +11,12 @@ Module-level singleton via :func:`get_token_service` (``web/deps.py`` style).
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from typing import Final
 
 import aiosqlite
+import requests
 
 from tools.coordinator import update_credentials
 from tools.logger import get_logger
@@ -26,12 +28,67 @@ from .models import mask_token
 
 logger = get_logger("web")
 
+# Add-time GitHub /user probe timeout, and the response header that carries a
+# fine-grained/expiring PAT's UTC expiry (classic PATs omit it → expires_at NULL).
+_GH_VALIDATE_TIMEOUT: Final[float] = 15.0
+_GH_EXPIRY_HEADER: Final[str] = "github-authentication-token-expiration"
+
+
+def _gh_api_proxies() -> dict[str, str] | None:
+    """Return a requests ``proxies`` mapping from ``HARVESTER_PROXY``.
+
+    The env var is comma-separated (the runner's rotation list); token
+    validation dials the FIRST entry. Empty/unset → ``None`` (direct).
+    """
+    raw = os.environ.get("HARVESTER_PROXY", "").strip()
+    if not raw:
+        return None
+    first = raw.split(",", 1)[0].strip()
+    if not first:
+        return None
+    return {"http": first, "https": first}
+
 
 class TokenService:
     """Async CRUD service for GitHub tokens stored in SQLite."""
 
     def __init__(self, db_path: str) -> None:
         self._db_path: Final[str] = db_path
+
+    # ------------------------------------------------------------------
+    # Add-time GitHub validation
+    # ------------------------------------------------------------------
+
+    def _validate_token_gh(self, token_value: str) -> tuple[str, str | None]:
+        """Probe GitHub ``GET /user`` with *token_value* as a Bearer token.
+
+        Returns ``("valid", expires_at|None)`` on HTTP 200,
+        ``("invalid", None)`` on 401/403, and ``("unknown", None)`` on any
+        transport or unexpected-status outcome. **Never raises** — token
+        management must not break on a network blip.
+        """
+        try:
+            response = requests.get(
+                "https://api.github.com/user",
+                headers={
+                    "Authorization": f"Bearer {token_value}",
+                    "Accept": "application/vnd.github+json",
+                },
+                proxies=_gh_api_proxies(),
+                timeout=_GH_VALIDATE_TIMEOUT,
+            )
+        except requests.exceptions.RequestException:
+            return ("unknown", None)
+        except Exception:
+            # Defensive: a mock/adapter problem is still "unknown", never a
+            # management-blocking exception.
+            return ("unknown", None)
+
+        if response.status_code == 200:
+            return ("valid", response.headers.get(_GH_EXPIRY_HEADER))
+        if response.status_code in (401, 403):
+            return ("invalid", None)
+        return ("unknown", None)
 
     # ------------------------------------------------------------------
     # Public API
@@ -42,18 +99,36 @@ class TokenService:
     ) -> dict:
         """Encrypt *token_value*, store it, and hot-reload credentials.
 
-        Returns a dict with ``id`` and ``token_masked``.
-        Raises ``ValueError`` when *token_value* duplicates an existing hash.
+        API tokens are validated against GitHub first: a 401/403 rejects the
+        add with ``ValueError`` (never stored); a 200 stores the captured
+        ``expires_at``; an unknown (transport) outcome stores with NULL. Session
+        cookies are not API tokens and skip the probe.
+
+        Returns a dict with ``id``, ``token_masked`` and ``expires_at``.
+        Raises ``ValueError`` when *token_value* is rejected or duplicates an
+        existing hash.
         """
+        if token_type == "api":
+            status, token_expiry = self._validate_token_gh(token_value)
+            if status == "invalid":
+                raise ValueError(
+                    "Token rejected by GitHub (invalid or forbidden): "
+                    f"{mask_token(token_value)}"
+                )
+            expires_at = token_expiry if status == "valid" else None
+        else:
+            expires_at = None
+
         encrypted = encrypt_str(token_value)
         token_hash = _get_crypto().hash_token(token_value)
 
         db = await get_db(self._db_path)
         try:
             cursor = await db.execute(
-                "INSERT INTO github_tokens (token_type, token_encrypted, token_hash, label) "
-                "VALUES (?, ?, ?, ?)",
-                (token_type, encrypted, token_hash, label),
+                "INSERT INTO github_tokens "
+                "(token_type, token_encrypted, token_hash, label, expires_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (token_type, encrypted, token_hash, label, expires_at),
             )
             await db.commit()
             row_id = cursor.lastrowid
@@ -68,19 +143,24 @@ class TokenService:
 
         masked = mask_token(token_value)
         logger.info(f"Token added id={row_id} type={token_type} masked={masked}")
-        return {"id": row_id, "token_masked": masked}
+        return {"id": row_id, "token_masked": masked, "expires_at": expires_at}
 
     async def add_tokens_bulk(
         self, token_type: str, tokens_text: str
     ) -> dict:
         """Import tokens from a newline-separated string.
 
-        Returns ``{"added": N, "skipped_duplicates": N, "errors": [...]}``.
+        API-token lines are validated against GitHub one by one: 401/403 lines
+        are rejected into ``dead`` (masked, never stored); 200 lines store their
+        expiry; unknown outcomes store NULL. Session lines skip the probe.
+
+        Returns ``{"added", "skipped_duplicates", "errors", "dead"}``.
         Hot-reload is called once after all successful inserts.
         """
         added = 0
         skipped = 0
         errors: list[str] = []
+        dead: list[str] = []
 
         already_seen: set[str] = set()
 
@@ -95,14 +175,23 @@ class TokenService:
                     continue
                 already_seen.add(line)
 
+                if token_type == "api":
+                    status, token_expiry = self._validate_token_gh(line)
+                    if status == "invalid":
+                        dead.append(mask_token(line))
+                        continue
+                    expires_at = token_expiry if status == "valid" else None
+                else:
+                    expires_at = None
+
                 try:
                     encrypted = encrypt_str(line)
                     token_hash = _get_crypto().hash_token(line)
                     await db.execute(
                         "INSERT INTO github_tokens "
-                        "(token_type, token_encrypted, token_hash, label) "
-                        "VALUES (?, ?, ?, ?)",
-                        (token_type, encrypted, token_hash, ""),
+                        "(token_type, token_encrypted, token_hash, label, expires_at) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (token_type, encrypted, token_hash, "", expires_at),
                     )
                     added += 1
                 except sqlite3.IntegrityError:
@@ -118,9 +207,15 @@ class TokenService:
             await self._hot_reload()
 
         logger.info(
-            f"Bulk import: added={added} skipped={skipped} errors={len(errors)}"
+            f"Bulk import: added={added} skipped={skipped} "
+            f"dead={len(dead)} errors={len(errors)}"
         )
-        return {"added": added, "skipped_duplicates": skipped, "errors": errors}
+        return {
+            "added": added,
+            "skipped_duplicates": skipped,
+            "errors": errors,
+            "dead": dead,
+        }
 
     async def list_tokens(self) -> list[dict]:
         """Return all tokens with masked values — plaintext is never returned."""
@@ -128,7 +223,7 @@ class TokenService:
         try:
             cursor = await db.execute(
                 "SELECT id, token_type, token_encrypted, label, enabled, "
-                "created_at FROM github_tokens ORDER BY id"
+                "created_at, expires_at FROM github_tokens ORDER BY id"
             )
             rows = await cursor.fetchall()
         finally:
@@ -144,6 +239,7 @@ class TokenService:
                 "label": row["label"],
                 "enabled": bool(row["enabled"]),
                 "created_at": row["created_at"],
+                "expires_at": row["expires_at"],
             })
         return result
 
@@ -212,8 +308,10 @@ class TokenService:
         """Return token counts from the database.
 
         The result is ``{"total": N, "enabled": N, "api_count": N,
-        "session_count": N}``.  These values come directly from the DB and do
-        **not** depend on the runtime ``Credentials`` state.
+        "session_count": N, "with_expiry": N}``.  These values come directly
+        from the DB and do **not** depend on the runtime ``Credentials`` state.
+        ``with_expiry`` counts tokens carrying a stored ``expires_at`` (the
+        per-token values live in :meth:`list_tokens`).
         """
         db = await get_db(self._db_path)
         try:
@@ -222,7 +320,8 @@ class TokenService:
                 "COUNT(*) AS total, "
                 "SUM(enabled) AS enabled, "
                 "SUM(CASE WHEN token_type = 'api' THEN 1 ELSE 0 END) AS api_count, "
-                "SUM(CASE WHEN token_type = 'session' THEN 1 ELSE 0 END) AS session_count "
+                "SUM(CASE WHEN token_type = 'session' THEN 1 ELSE 0 END) AS session_count, "
+                "SUM(CASE WHEN expires_at IS NOT NULL THEN 1 ELSE 0 END) AS with_expiry "
                 "FROM github_tokens"
             )
         finally:
@@ -234,6 +333,7 @@ class TokenService:
             "enabled": r["enabled"] or 0,
             "api_count": r["api_count"] or 0,
             "session_count": r["session_count"] or 0,
+            "with_expiry": r["with_expiry"] or 0,
         }
 
     # ------------------------------------------------------------------

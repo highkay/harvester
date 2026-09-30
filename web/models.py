@@ -54,6 +54,7 @@ class TokenOut(BaseModel):
     label: str
     enabled: bool
     created_at: str
+    expires_at: str | None = None
 
 
 class TokenBulkImport(BaseModel):

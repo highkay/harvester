@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS github_tokens (
     token_hash TEXT NOT NULL UNIQUE,
     label TEXT DEFAULT '',
     enabled INTEGER NOT NULL DEFAULT 1,
+    expires_at TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -349,6 +350,11 @@ async def _run_migrations(db: aiosqlite.Connection) -> None:
             "run_records",
             "materials_total",
             "ALTER TABLE run_records ADD COLUMN materials_total INTEGER DEFAULT 0",
+        ),
+        (
+            "github_tokens",
+            "expires_at",
+            "ALTER TABLE github_tokens ADD COLUMN expires_at TEXT",
         ),
     )
     for table, column, ddl in migrations:

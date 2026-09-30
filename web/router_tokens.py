@@ -47,7 +47,11 @@ async def list_tokens(user: bool = Depends(get_current_user)):
 async def create_token(
     body: TokenCreate, user: bool = Depends(get_current_user)
 ):
-    """Add a single GitHub token (api or session)."""
+    """Add a single GitHub token (api or session).
+
+    API tokens are probed against GitHub first: a 401/403 is rejected as 409
+    (never stored); an unknown outcome still stores (NULL expiry).
+    """
     svc = _svc()
     try:
         result = await svc.add_token(
@@ -65,6 +69,7 @@ async def create_token(
         label=body.label,
         enabled=True,
         created_at="",
+        expires_at=result.get("expires_at"),
     )
 
 

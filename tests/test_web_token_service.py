@@ -14,12 +14,38 @@ import os
 import sqlite3
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from web.db import init_db, get_db
 from web.crypto import decrypt_str, encrypt_str
 from web.crypto import _get_crypto
 from web.models import mask_token
+
+
+# ---------------------------------------------------------------------------
+# Hermetic GitHub probe: TokenService.add_token/add_tokens_bulk now validate
+# API tokens against GET /user. These CRUD/hot-reload tests are not about that
+# probe, so the network call is stubbed to a 200 (valid) for the whole module —
+# no test assertion changes, no live network dependency.
+# ---------------------------------------------------------------------------
+
+_GH_PROBE_PATCHER = None
+
+
+def setUpModule() -> None:
+    global _GH_PROBE_PATCHER
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.headers = {}
+    resp.content = b"{}"
+    resp.text = "{}"
+    _GH_PROBE_PATCHER = patch("web.token_service.requests.get", return_value=resp)
+    _GH_PROBE_PATCHER.start()
+
+
+def tearDownModule() -> None:
+    if _GH_PROBE_PATCHER is not None:
+        _GH_PROBE_PATCHER.stop()
 
 
 def _run_async(coro):
