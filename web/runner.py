@@ -1202,6 +1202,13 @@ class PipelineRunner:
         invisible in run_records. Status stays 'completed' (the same four-value
         CHECK-constraint rationale as the zero-yield marker); the reason is
         recorded for the UI/API.
+
+        The marker fires whenever the run did no work, but only the searches
+        *failing* (all attempts died: limiter denials / transport failures and
+        none completed) sets FAILED. A genuine zero-result search — a dork
+        that simply returned an empty corpus, or a mix where some attempts
+        failed and at least one completed with nothing — is a successful run
+        and keeps its 'completed' status.
         """
         if links_total != 0 or materials_total != 0 or valid_keys:
             return None, False
@@ -1210,23 +1217,36 @@ class PipelineRunner:
             detail = " ".join(f"{k}={v}" for k, v in sorted(counters.items()))
         else:
             detail = "stage counters unavailable"
-        # Failure only when the run actually TRIED to search and produced
-        # nothing: a validate-only config (no search tasks at all) keeps its
-        # 'completed' status with the marker as a quality note.
-        search_attempts = counters.get("search_completed", 0) + counters.get(
-            "search_failed", 0
-        )
-        failed = search_attempts > 0
+        # Failure only when the run actually TRIED to search and every attempt
+        # FAILED: a validate-only config (no search tasks at all) and an empty
+        # corpus (search completed, returned nothing) keep their 'completed'
+        # status with the marker as a quality note.
+        search_completed = counters.get("search_completed", 0)
+        search_failed = counters.get("search_failed", 0)
+        failed = search_failed > 0 and search_completed == 0
+        if failed:
+            outcome = (
+                "recorded as FAILED — every search attempt died (limiter "
+                "denials / transport failures); the provider can be "
+                "re-triggered"
+            )
+        elif search_failed > 0:
+            outcome = (
+                f"{search_failed} search attempt(s) failed but "
+                f"{search_completed} completed — the searches ran, the corpus "
+                f"was empty; status kept 'completed'"
+            )
+        elif search_completed > 0:
+            outcome = (
+                "searches completed and returned no results (empty corpus); "
+                "status kept 'completed'"
+            )
+        else:
+            outcome = "status kept 'completed' (no search tasks ran)"
         message = (
             f"no-work run: provider={provider_name} run_id={run_id} "
             f"links_total=0 materials_total=0 valid_keys=0 — the search stage "
-            f"produced nothing ({detail}); "
-            + (
-                "recorded as FAILED so it is visible in the failed view; the "
-                "provider can be re-triggered"
-                if failed
-                else "status kept 'completed' (no search tasks ran)"
-            )
+            f"produced nothing ({detail}); {outcome}"
         )
         logger.error(message)
         return message, failed

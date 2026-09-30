@@ -131,6 +131,23 @@ def _boom(*_args: object, **_kwargs: object):
     raise AssertionError("scan must not start for a pre-cancelled run")
 
 
+def _search_app(completed: int, failed: int) -> SimpleNamespace:
+    """App stub whose only search stage reports the given task counters."""
+    return SimpleNamespace(
+        task_manager=SimpleNamespace(
+            pipeline=SimpleNamespace(
+                stages={
+                    "search": SimpleNamespace(
+                        get_stats=lambda: SimpleNamespace(
+                            tasks=SimpleNamespace(completed=completed, failed=failed)
+                        )
+                    )
+                }
+            )
+        )
+    )
+
+
 # ---------------------------------------------------------------------------
 # BUG 1 — failure path records duration + own-provider valid keys
 # ---------------------------------------------------------------------------
@@ -1019,6 +1036,83 @@ class TestRuntimeOrphanSweep(unittest.TestCase):
             finally:
                 if runner is not None:
                     runner._executor.shutdown(wait=False)
+
+
+# ---------------------------------------------------------------------------
+# BUG 5 — the no-work marker must only FAIL a run whose searches actually failed
+# ---------------------------------------------------------------------------
+
+
+class TestNoWorkPredicate(unittest.TestCase):
+    """Given a 'completed' run that did no work,
+    When the search stage counters are inspected,
+    Then only genuine search failures are recorded as FAILED."""
+
+    def setUp(self) -> None:
+        # No __init__ side effects: the marker only touches the logger.
+        self.runner = PipelineRunner.__new__(PipelineRunner)
+
+    def _call(self, app: object) -> tuple[str | None, bool]:
+        with self.assertLogs("web.runner", level="ERROR"):
+            return self.runner._no_work_degradation(
+                "provider-x", "run-1", 0, 0, 0, app
+            )
+
+    def test_successful_zero_result_search_is_not_a_failure(self) -> None:
+        # Zero-result dork: the task processed fine (completed=1, failed=0),
+        # the corpus was simply empty -> NOT failed.
+        message, failed = self._call(_search_app(completed=1, failed=0))
+
+        self.assertIsNotNone(message)
+        assert message is not None
+        self.assertFalse(failed)
+        self.assertNotIn("recorded as FAILED", message)
+        self.assertIn("status kept 'completed'", message)
+
+    def test_all_search_attempts_failed_is_a_failure(self) -> None:
+        # Every attempt died (limiter denials / transport failures) and none
+        # completed -> FAILED (regression: the 2026-09-26 openrouter case).
+        message, failed = self._call(_search_app(completed=0, failed=3))
+
+        self.assertTrue(failed)
+        assert message is not None
+        self.assertIn("recorded as FAILED", message)
+        self.assertIn("search_failed=3", message)
+
+    def test_mixed_counters_keep_completed_but_note_failures(self) -> None:
+        # Some attempts failed, at least one completed with nothing -> the
+        # searches ran, so this is NOT a failure; the message notes the
+        # failures so the mix stays visible.
+        message, failed = self._call(_search_app(completed=1, failed=3))
+
+        self.assertFalse(failed)
+        assert message is not None
+        self.assertNotIn("recorded as FAILED", message)
+        self.assertIn("search_failed=3", message)
+        self.assertIn("status kept 'completed'", message)
+
+    def test_unavailable_counters_keep_the_marker_only(self) -> None:
+        # Stage snapshot failed -> no proof the search leg ran -> marker only.
+        message, failed = self._call(object())
+
+        self.assertIsNotNone(message)
+        assert message is not None
+        self.assertIn("stage counters unavailable", message)
+        self.assertFalse(failed)
+
+    def test_work_or_validated_keys_suppress_the_marker(self) -> None:
+        cases = (
+            ("validated keys exist", 0, 0, 3),
+            ("materials were extracted", 0, 5, 0),
+            ("links were discovered", 1200, 0, 0),
+        )
+        for label, links, materials, valid in cases:
+            with self.subTest(label=label):
+                message, failed = self.runner._no_work_degradation(
+                    "p", "r", links, materials, valid
+                )
+                self.assertIsNone(message)
+                self.assertFalse(failed)
 
 
 if __name__ == "__main__":
