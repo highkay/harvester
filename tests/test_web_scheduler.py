@@ -9,6 +9,7 @@ import os
 import sqlite3
 import sys
 import tempfile
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -531,8 +532,18 @@ class TestGuardHeldForScanLifetime(unittest.TestCase):
 
 
 async def _released_within(svc, provider: str, attempts: int, delay: float = 0.01):
-    """Poll until the guard for *provider* is released; False on timeout."""
-    for _ in range(attempts):
+    """Poll until the guard for *provider* is released; False on timeout.
+
+    Wall-clock bounded, not attempt bounded: on some platforms (Windows /
+    Python 3.12) a tiny ``asyncio.sleep(delay)`` returns almost immediately
+    when a concurrent task is also sleeping, so a pure attempt count can
+    exhaust the budget before the watcher's (millisecond-scale) deadline has
+    had any real time to elapse. Enforce the intended wall-clock budget so the
+    watcher always gets real time to reach its deadline.
+    """
+    budget = max(attempts * delay, 2.0)
+    start = time.monotonic()
+    while time.monotonic() - start < budget:
         await asyncio.sleep(delay)
         if not svc.is_running(provider):
             return True
