@@ -2199,17 +2199,21 @@ suite 932 → **984 OK / 8 skipped**.
   expiry header. Fix designed but not implemented (feature, not a bug): live
   validate at add-time + persist expiry header + disable after N consecutive
   401s with WARN.
-- **TLS fingerprint research (user question: does the HTTP library support
-  fingerprints)**: the project runs on Python `requests` = OpenSSL ClientHello
-  + HTTP/1.1 only — no JA3/JA4/Akamai control, trivially distinguishable from
-  a browser. Nuance from evidence: z.ai/glm blocks are Aliyun-WAF
-  IP/behaviour-based (a real browser on the same IP is blocked identically —
-  fingerprint is NOT the dominant factor there), while the Cloudflare-fronted
-  providers (groq/cerebras 403 walls) are plausibly fingerprint-gated —
-  `curl_cffi` (lexiforest, actively maintained, requests-compatible Session,
-  socks5h support, streaming) is the standard drop-in and a candidate to
-  UNBLOCK those two providers. Not implemented (architecture decision);
-  research file: `.omo/evidence/ulw-20260930-rootfix/g3_node_tls_fingerprint.md`.
+- **TLS fingerprint research RESOLVED by live experiment (2026-09-30, DO NOT
+  re-litigate)**: the project runs on Python `requests` = OpenSSL ClientHello +
+  HTTP/1.1 only — no JA3/JA4 control. A same-proxy/same-source-IP A/B on fnos
+  (requests vs curl_cffi `chrome150`, provably different stacks: HTTP/1.1 vs
+  h2, JA3 `07ff1e…` vs Chrome) produced IDENTICAL verdicts on groq/cerebras/z.ai.
+  **groq's 403 is path-dependent, not fingerprint**: `socks5://` (LOCAL DNS)
+  via the trio → normal `401 invalid_api_key`; `socks5h://` (remote DNS) → bare
+  403 — 3/3 reproducible across 1080/1090/1091. **cerebras is an IP/ASN-level
+  CF wall** (block page on every egress, both clients) — only a residential
+  egress could change it. curl_cffi is NOT adopted (falsified premise);
+  decision record + probe script: `.omo/plans/curl-cffi-fingerprint-decision.md`,
+  `.omo/evidence/ulw-20260930-rootfix/g7_fingerprint_probe/`. Reopen only if a
+  provider shows a reproducible same-egress split (requests=403 /
+  browser=401). groq's real blocker remains partner auto-revocation (09-24),
+  not egress.
 
 
 
