@@ -110,8 +110,9 @@ def github_blob_to_raw(url: str) -> str:
     it and every fetch pays an ~85x bandwidth amplification.
 
     Only ``https://github.com/<owner>/<repo>/blob/<ref>/<path>`` (optionally
-    with a trailing ``#L<num>`` / ``#L<num>-L<num>`` line anchor, which is
-    stripped) is rewritten. Any OTHER '#' in the URL is path content — it is
+    with a trailing line anchor ``#L<num>`` / ``#L<num>-L<num>``, including the
+    column-precision forms ``#L4C1`` / ``#L4C1-L4C14``, which is stripped) is
+    rewritten. Any OTHER '#' in the URL is path content — it is
     percent-encoded for the wire (raw '#' and pre-encoded '%23' both end up
     as '%23', non-ASCII as UTF-8 escapes); the decoded path keeps '@' and ' '
     literal (requests requotes the space). Everything else — non-github URLs,
