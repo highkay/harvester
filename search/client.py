@@ -952,7 +952,9 @@ class GitHubClient:
                 if code == 429 or code >= 500:
                     last_error = ConnectionError(f"HTTP {code} error: {reason}")
                 elif code == 404:
-                    raise FileNotFoundError(f"File not found (HTTP {code}), url: {url}")
+                    raise FileNotFoundError(
+                        f"File not found (HTTP {code}), url: {url}, wire: {encoded_url}"
+                    )
                 elif code in (401, 403):
                     # Prefer resource quota wait over hard auth failure when headers say so
                     if self._is_http_rate_limited(code, reason):
@@ -1195,7 +1197,9 @@ def http_get(
             # Rate limit errors should be retried
             raise ConnectionError(f"Rate limit exceeded (HTTP {code})")
         elif code == 404:
-            raise FileNotFoundError(f"File not found (HTTP {code}), url: {url}")
+            raise FileNotFoundError(
+                f"File not found (HTTP {code}), url: {url}, wire: {encoded_url}"
+            )
         elif code in (401, 403):
             # Auth errors should not be retried
             raise NetworkError(f"Authentication failed (HTTP {code})")

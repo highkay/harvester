@@ -5,9 +5,11 @@ Utility functions for the search engine.
 """
 
 import functools
-import re
 import traceback
+import urllib.parse
 from typing import Any, Callable, TypeVar
+
+from requests.utils import requote_uri
 
 from constant.system import PROVIDER_SERVICE_PREFIX
 
@@ -77,20 +79,60 @@ def isblank(text: str) -> bool:
 
 
 def encoding_url(url: str) -> str:
-    """Encode Chinese characters in URL to punycode."""
+    """Normalize a URL to its ASCII wire form.
+
+    Contract:
+    - Hostname: non-ASCII labels are IDNA-encoded (``xn--…`` punycode applies
+      to hostnames ONLY); userinfo and port are preserved.
+    - Path/query/fragment: non-ASCII (e.g. CJK) and unsafe characters
+      (spaces) are percent-encoded as UTF-8; existing valid %-escapes are
+      kept as-is (never double-encoded to ``%25…``).
+    - Well-formed pure-ASCII URLs return byte-identical, and the transform
+      is idempotent: ``encoding_url(encoding_url(u)) == encoding_url(u)``.
+
+    The previous punycode-the-whole-URL behaviour mangled CJK *paths*
+    (``code/第四章`` -> ``code/xn--wbs215fqga``), making GitHub raw 404 on
+    files that exist (96.3% of prod 404s measured 2026-09-30).
+    """
     if not url:
         return ""
 
-    url = url.strip()
-    cn_chars = re.findall("[\u4e00-\u9fa5]+", url)
-    if not cn_chars:
-        return url
+    text = url.strip()
+    parts = urllib.parse.urlsplit(text)
+    try:
+        return urllib.parse.urlunsplit(
+            (
+                parts.scheme,
+                _idna_encode_netloc(parts.netloc),
+                requote_uri(parts.path),
+                requote_uri(parts.query),
+                requote_uri(parts.fragment),
+            )
+        )
+    except (ValueError, UnicodeError):
+        # Malformed host/port structure or un-IDNA-encodable label: hand the
+        # original URL to requests, which quotes non-ASCII on the wire itself.
+        return text
 
-    punycodes = list(map(lambda x: "xn--" + x.encode("punycode").decode("utf-8"), cn_chars))
-    for c, pc in zip(cn_chars, punycodes):
-        url = url[: url.find(c)] + pc + url[url.find(c) + len(c) :]
 
-    return url
+def _idna_encode_netloc(netloc: str) -> str:
+    """IDNA-encode a non-ASCII hostname label-wise; ASCII hosts pass through.
+
+    Preserves userinfo and port verbatim and never touches the host case, so
+    an ASCII netloc (including IPv6 literals) returns byte-identical.
+    """
+    if not netloc or netloc.isascii():
+        return netloc
+
+    userinfo, sep, hostinfo = netloc.rpartition("@")
+    host = hostinfo
+    port_suffix = ""
+    if ":" in hostinfo:
+        host, _, port = hostinfo.partition(":")
+        port_suffix = f":{port}"
+
+    labels = ".".join(label.encode("idna").decode("ascii") for label in host.split("."))
+    return f"{userinfo}{sep}{labels}{port_suffix}"
 
 
 def get_service_name(provider: str) -> str:
