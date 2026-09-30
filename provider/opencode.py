@@ -84,6 +84,14 @@ class OpenCodeProvider(AIBaseProvider):
         {"CreditsError", "MonthlyLimitError", "UserLimitError"}
     )
 
+    # Documented 401 error types that ARE genuine, permanent dead-key verdicts:
+    # "AuthError" (bad/expired key) and "server_error" (the no-wrapper dead-key
+    # shape measured on prod 2026-09-28: {"error":{"type":"server_error",
+    # "message":"Upstream request failed: Invalid credential"}}). Any OTHER 401
+    # body — HTML/empty/garbage, or an error.type outside these sets — is NOT
+    # proof the key is dead, so it must not permanently burn the key.
+    _INVALID_KEY_ERROR_TYPES = frozenset({"AuthError", "server_error"})
+
     def __init__(self, conditions: List[Condition], **kwargs):
         self.defaults(
             kwargs,
@@ -227,8 +235,14 @@ class OpenCodeProvider(AIBaseProvider):
                 # also returns this. Classify as BAD_REQUEST, not INVALID_KEY,
                 # so the key is not silently discarded.
                 return CheckResult.fail(ErrorReason.BAD_REQUEST)
-            # AuthError or any other 401 → invalid/expired key
-            return CheckResult.fail(ErrorReason.INVALID_KEY)
+            if error_type in self._INVALID_KEY_ERROR_TYPES:
+                # Documented dead-key shapes (AuthError / server_error
+                # "Invalid credential") → permanent discard.
+                return CheckResult.fail(ErrorReason.INVALID_KEY)
+            # An unparseable body (HTML/empty/garbage) or an unrecognised
+            # error.type is NOT proof the key is dead — do not permanently
+            # burn it on an unverified 401.
+            return CheckResult.fail(ErrorReason.UNKNOWN)
 
         if code == 403:
             return CheckResult.fail(ErrorReason.NO_ACCESS)

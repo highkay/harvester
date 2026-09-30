@@ -146,6 +146,37 @@ class TestOpenCodeProviderCheck(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertEqual(result.reason, ErrorReason.INVALID_KEY)
 
+    def test_check_401_autherror_wrapper_invalid_key(self):
+        """Documented dead key (a): the wrapped AuthError body is a genuine,
+        permanent dead-key verdict and stays INVALID_KEY."""
+        with _patch_request(FakeResponse(401, _err_body("AuthError", "Invalid API key."))):
+            result = self.provider.check(token=_TOKEN)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.reason, ErrorReason.INVALID_KEY)
+
+    def test_check_401_html_body_unknown(self):
+        """A 401 whose body is an HTML interstitial (not JSON) is NOT proof the
+        key is dead — UNKNOWN, never a permanent INVALID_KEY discard."""
+        with _patch_request(FakeResponse(401, "<html>502 Bad Gateway</html>")):
+            result = self.provider.check(token=_TOKEN)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.reason, ErrorReason.UNKNOWN)
+
+    def test_check_401_empty_body_unknown(self):
+        """An empty 401 body carries no verdict — UNKNOWN, not INVALID_KEY."""
+        with _patch_request(FakeResponse(401, "")):
+            result = self.provider.check(token=_TOKEN)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.reason, ErrorReason.UNKNOWN)
+
+    def test_check_401_unrecognised_error_type_unknown(self):
+        """A parseable 401 body with an error.type the gateway has never
+        documented is NOT proven dead — UNKNOWN, never INVALID_KEY."""
+        with _patch_request(FakeResponse(401, _err_body("SomeBrandNewError", "who knows"))):
+            result = self.provider.check(token=_TOKEN)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.reason, ErrorReason.UNKNOWN)
+
     def test_check_403_subscription_lapsed_no_access(self):
         """Routed authentic key with lapsed subscription: 403 server_error
         'An active OpenCode Go subscription ...' — auth-valid but plan-gated,
@@ -240,12 +271,13 @@ class TestOpenCodeProviderCheck(unittest.TestCase):
             result = self.provider.check(token=_TOKEN)
         self.assertEqual(result.reason, ErrorReason.BAD_REQUEST)
 
-    def test_check_401_no_error_type_defaults_invalid_key(self):
-        # A bare 401 without a parseable error.type defaults to INVALID_KEY
+    def test_check_401_non_json_garbage_unknown(self):
+        # A bare 401 whose body has no parseable error.type is NOT proof the
+        # key is dead — UNKNOWN, not a permanent INVALID_KEY discard.
         error = _http_error(401, "Forbidden")
         with mock.patch("provider.opencode.request", side_effect=error):
             result = self.provider.check(token=_TOKEN)
-        self.assertEqual(result.reason, ErrorReason.INVALID_KEY)
+        self.assertEqual(result.reason, ErrorReason.UNKNOWN)
 
     def test_check_403_no_access(self):
         error = _http_error(403, _err_body("RegionError", "geo-blocked"))
