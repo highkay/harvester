@@ -101,12 +101,16 @@ _LIMIT_WAIT_ROUND_FLOOR = 0.5
 _LIMIT_WAIT_MAX_ROUNDS = 64
 
 # 403/429 answers keep the transport streak "healthy" by design (the exit
-# answered), so an exit that blocks everything can never be rotated away — the
-# measured Cloudflare-edge / per-IP "blocked due to excessive requests"
-# flavours. Count the streak and warn once per streak instead — but only when
-# the answer carries NO upstream rate-limit headers, because api.github.com
-# advertises `x-ratelimit-*` even on 403 (see search/github/transport.py) and
-# that flavour is routine token/quota state, not exit health.
+# answered), so an exit that blocks everything would never be rotated away —
+# the measured Cloudflare-edge / per-IP "blocked due to excessive requests"
+# flavours (prod 2026-09-29 13:34-16:00: 30 degraded warnings in 2.5 h during
+# an nvidia run while the exit kept poisoning every proxied request). Count the
+# streak; at the threshold rotate to the next candidate with the SAME mechanics
+# as the transport failover (warn-only when a single candidate is configured) —
+# but only when the answer carries NO upstream rate-limit headers, because
+# api.github.com advertises `x-ratelimit-*` even on 403 (see
+# search/github/transport.py) and that flavour is routine token/quota state,
+# not exit health.
 _PROXY_DEGRADED_STATUSES = frozenset({403, 429})
 _PROXY_DEGRADED_WARN_THRESHOLD = 25
 _RATE_LIMIT_HEADER_PREFIXES = ("x-ratelimit", "retry-after")
@@ -187,6 +191,7 @@ _proxy_failures = 0
 _proxy_rotations = 0
 _proxy_degraded_streak = 0
 _proxy_degraded_warned = False
+_proxy_degraded_rotations = 0
 
 
 def _apply_proxy(proxy: str) -> None:
@@ -253,6 +258,7 @@ def get_egress_state() -> Dict[str, Any]:
             "consecutive_failures": _proxy_failures,
             "rotations": _proxy_rotations,
             "degraded_streak": _proxy_degraded_streak,
+            "degraded_rotations": _proxy_degraded_rotations,
             "direct_hosts": sorted(_DIRECT_HOSTS),
             "pool_maxsize": _POOL_MAXSIZE,
         }
@@ -276,21 +282,30 @@ def _has_rate_limit_headers(headers: Optional[Mapping[str, str]]) -> bool:
 
 
 def _note_proxy_status(status: int, headers: Optional[Mapping[str, str]] = None) -> None:
-    """Count consecutive UNEXPLAINED 403/429 answers on the proxied session.
+    """Count consecutive UNEXPLAINED 403/429 answers; rotate the exit at the threshold.
 
     Such an exit is "alive" as far as the transport failover is concerned (any
     HTTP answer resets that streak, by design — a busy exit must not be
-    abandoned), so it can never be rotated away. Measured flavours of this
-    state: Cloudflare-edge blocks and per-IP ``blocked due to excessive
-    requests`` 429s, which answer identically for good and dead keys. The
-    streak makes a search-side collapse explainable instead of mysterious;
-    ``get_egress_state()['degraded_streak']`` exposes it to probes. A 403/429
-    WITH rate-limit headers resets the streak (quota state, not exit state).
+    abandoned), so before this guard it could never be rotated away. Measured
+    flavours of this state: Cloudflare-edge blocks and per-IP ``blocked due to
+    excessive requests`` 429s, which answer identically for good and dead keys
+    (prod 2026-09-29: 30 warnings in 2.5 h while the exit poisoned every
+    proxied request). When the streak reaches ``_PROXY_DEGRADED_WARN_THRESHOLD``
+    and at least two candidates exist, rotate to the next ``HARVESTER_PROXY``
+    candidate using the SAME mechanics as :func:`_note_proxy_transport`
+    (``_apply_proxy`` under ``_proxy_lock``, masked log) and re-arm — one
+    rotation per streak, so the next exit can warn/rotate on its own streak.
+    A single candidate stays warn-only. ``get_egress_state()`` exposes
+    ``degraded_streak`` and ``degraded_rotations`` to probes. A 403/429 WITH
+    rate-limit headers resets the streak (quota state, not exit state) and can
+    therefore never rotate.
     """
-    global _proxy_degraded_streak, _proxy_degraded_warned
+    global _proxy_degraded_streak, _proxy_degraded_warned, _proxy_degraded_rotations
 
     fire = False
     streak = 0
+    rotated_from = ""
+    rotated_to: Optional[str] = None
     with _proxy_lock:
         if status in _PROXY_DEGRADED_STATUSES and not _has_rate_limit_headers(headers):
             _proxy_degraded_streak += 1
@@ -298,12 +313,34 @@ def _note_proxy_status(status: int, headers: Optional[Mapping[str, str]] = None)
             if streak >= _PROXY_DEGRADED_WARN_THRESHOLD and not _proxy_degraded_warned:
                 _proxy_degraded_warned = True
                 fire = True
+                if len(_proxy_candidates) >= 2:
+                    rotated_from = _HTTP_PROXY
+                    try:
+                        index = _proxy_candidates.index(rotated_from)
+                    except ValueError:
+                        index = -1
+                    rotated_to = _proxy_candidates[(index + 1) % len(_proxy_candidates)]
+                    _apply_proxy(rotated_to)
+                    _proxy_degraded_rotations += 1
+                    # Re-arm: never rotate more than once per streak.
+                    _proxy_degraded_streak = 0
+                    _proxy_degraded_warned = False
         else:
             _proxy_degraded_streak = 0
             _proxy_degraded_warned = False
             return
 
-    if fire:
+    if not fire:
+        return
+
+    if rotated_to is not None:
+        logger.warning(
+            f"Proxy rotation after {streak} consecutive degraded "
+            f"{sorted(_PROXY_DEGRADED_STATUSES)} answers (no rate-limit headers): "
+            f"{_mask_proxy(rotated_from)} -> {_mask_proxy(rotated_to)} "
+            f"({len(_proxy_candidates)} candidates)"
+        )
+    else:
         logger.warning(
             f"Exit answering {sorted(_PROXY_DEGRADED_STATUSES)} to everything: "
             f"{streak} consecutive degraded responses — the transport failover "

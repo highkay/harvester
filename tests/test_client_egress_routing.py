@@ -208,6 +208,144 @@ class TestProxyFailover(unittest.TestCase):
         self.assertEqual(sorted(state["candidates"]), sorted(self.PROXIES))
 
 
+class TestDegradedExitRotation(unittest.TestCase):
+    """A sustained-degraded exit (403/429 to EVERYTHING) must be rotated away.
+
+    Proven live on prod (2026-09-29 13:34-16:00): 30 degraded warnings in
+    2.5 h during an nvidia run while the exit kept poisoning every proxied
+    request — the warn-only streak (commit 691268f) made the collapse
+    explainable but never moved traffic. Rotation reuses the transport
+    failover mechanics: next HARVESTER_PROXY candidate under _proxy_lock,
+    masked log, one rotation per streak (re-armed for the next exit).
+    Quota-flavoured 403/429 (rate-limit headers) must NEVER rotate.
+    """
+
+    PROXIES = [
+        "socks5://user:pool-token@10.0.0.1:1080",
+        "socks5://user:pool-token@10.0.0.2:1080",
+        "socks5://user:pool-token@10.0.0.3:1080",
+    ]
+
+    def setUp(self) -> None:
+        os.environ["HARVESTER_PROXY"] = ",".join(self.PROXIES)
+        client.set_proxy(self.PROXIES[0])
+        # degraded_rotations is a process-lifetime diagnostic counter (like
+        # transport `rotations`) — assert per-test deltas, not absolutes.
+        self._rot0 = client.get_egress_state()["degraded_rotations"]
+
+    def tearDown(self) -> None:
+        client.set_proxy("")
+        os.environ.pop("HARVESTER_PROXY", None)
+
+    def _rotations(self) -> int:
+        return client.get_egress_state()["degraded_rotations"] - self._rot0
+
+    def _drive(self, response, count: int = 1) -> None:
+        # One patch context PER request: when a streak rotates, _apply_proxy
+        # rebinds the module-global _HTTP_SESSION inside the running context —
+        # a shared multi-request context would let later requests escape to a
+        # real session against the fake proxy.
+        for _ in range(count):
+            session = mock.MagicMock()
+            session.request.return_value = response
+            with mock.patch.object(client, "_HTTP_SESSION", session), mock.patch.object(
+                client, "_DIRECT_SESSION", mock.MagicMock()
+            ):
+                try:
+                    client.request("GET", API_URL)
+                except requests.exceptions.HTTPError:
+                    pass  # raise_for_status fires after the status was recorded
+
+    def _drive_degraded(self, count: int, status: int = 429) -> None:
+        self._drive(_FakeResponse(status_code=status), count)
+
+    def test_threshold_streak_rotates_to_next_exit_with_masked_warning(self) -> None:
+        with self.assertLogs("search", level="WARNING") as logs:
+            self._drive_degraded(client._PROXY_DEGRADED_WARN_THRESHOLD)
+
+        state = client.get_egress_state()
+        self.assertEqual(state["proxy"], self.PROXIES[1])
+        self.assertEqual(self._rotations(), 1)
+        # Re-armed: the streak resets so the NEXT exit can warn/rotate too.
+        self.assertEqual(state["degraded_streak"], 0)
+
+        warnings = [r.getMessage() for r in logs.records if r.levelno >= 30]
+        self.assertEqual(1, len(warnings))
+        self.assertNotIn("pool-token", warnings[0])
+        self.assertIn("10.0.0.1", warnings[0])
+        self.assertIn("10.0.0.2", warnings[0])
+
+    def test_never_rotates_twice_within_one_streak(self) -> None:
+        self._drive_degraded(client._PROXY_DEGRADED_WARN_THRESHOLD)
+        self.assertEqual(self._rotations(), 1)
+
+        # A fresh streak that has not completed must not rotate again.
+        self._drive_degraded(client._PROXY_DEGRADED_WARN_THRESHOLD - 1)
+        state = client.get_egress_state()
+        self.assertEqual(state["proxy"], self.PROXIES[1])
+        self.assertEqual(self._rotations(), 1)
+
+    def test_second_streak_on_new_exit_rotates_again(self) -> None:
+        self._drive_degraded(2 * client._PROXY_DEGRADED_WARN_THRESHOLD)
+
+        state = client.get_egress_state()
+        self.assertEqual(state["proxy"], self.PROXIES[2])
+        self.assertEqual(self._rotations(), 2)
+
+    def test_rate_limited_403_resets_streak_without_rotating(self) -> None:
+        # api.github.com advertises x-ratelimit-* even on 403 — quota state,
+        # not exit state: it must reset the streak and never rotate.
+        response = _FakeResponse(status_code=403)
+        response.headers = {"x-ratelimit-remaining": "0"}
+
+        self._drive_degraded(client._PROXY_DEGRADED_WARN_THRESHOLD - 1)
+        self._drive(response, count=1)
+        self._drive_degraded(client._PROXY_DEGRADED_WARN_THRESHOLD - 1)
+
+        state = client.get_egress_state()
+        self.assertEqual(state["proxy"], self.PROXIES[0])
+        self.assertEqual(self._rotations(), 0)
+        self.assertEqual(state["degraded_streak"], client._PROXY_DEGRADED_WARN_THRESHOLD - 1)
+
+    def test_retry_after_429_never_rotates(self) -> None:
+        response = _FakeResponse(status_code=429)
+        response.headers = {"retry-after": "60"}
+
+        self._drive(response, count=3 * client._PROXY_DEGRADED_WARN_THRESHOLD)
+
+        state = client.get_egress_state()
+        self.assertEqual(state["proxy"], self.PROXIES[0])
+        self.assertEqual(self._rotations(), 0)
+        self.assertEqual(state["degraded_streak"], 0)
+
+    def test_interleaved_200_resets_streak_without_rotating(self) -> None:
+        threshold = client._PROXY_DEGRADED_WARN_THRESHOLD
+        self._drive_degraded(threshold - 1)
+        self._drive(_FakeResponse(status_code=200))
+        self._drive_degraded(threshold - 1)
+
+        state = client.get_egress_state()
+        self.assertEqual(state["proxy"], self.PROXIES[0])
+        self.assertEqual(self._rotations(), 0)
+
+    def test_single_candidate_stays_warn_only(self) -> None:
+        os.environ["HARVESTER_PROXY"] = self.PROXIES[0]
+        client.set_proxy(self.PROXIES[0])
+
+        with self.assertLogs("search", level="WARNING") as logs:
+            self._drive_degraded(client._PROXY_DEGRADED_WARN_THRESHOLD + 5)
+
+        state = client.get_egress_state()
+        self.assertEqual(state["proxy"], self.PROXIES[0])
+        self.assertEqual(self._rotations(), 0)
+        self.assertEqual(state["degraded_streak"], client._PROXY_DEGRADED_WARN_THRESHOLD + 5)
+        # Today's diagnostic warning is preserved for the warn-only case.
+        self.assertEqual(
+            1,
+            sum(1 for r in logs.records if "degraded responses" in r.getMessage()),
+        )
+
+
 class _FakeLimiter:
     """Minimal RateLimiter stand-in for GitHubClient._limit.
 
