@@ -1395,7 +1395,7 @@ An Oracle audit of the end-to-end scanning path found the following, all fixed t
 - **Per-stage dedup window was smaller than its queue** (100k default vs 100-500k queues → id eviction re-gathered/re-validated the same URL/key): it now derives from the queue size (`max(2×, 1000)`).
 - **Periodic snapshots never started** (`start_periodic_snapshots` ran while the managers dict was lazily empty): they now start in `_on_start` (eagerly creating each provider's ResultManager; `_on_stop` also stops them for a stage-less run).
 - **Zero-yield observability (the recurring "healthy-looking scan, zero yield" class)**: `run_records` gains `links_total`/`materials_total` (migration included) + per-provider gather counters (`ok`/`empty`/`error_404`/`error_other` on `ResultManager`, bridged via a WeakKeyDictionary provider→manager registry). When a run gathers >1000 links and extracts 0 materials, one ERROR line fires and `run_records.error_message` records it (status stays `completed` — the UI's four-value constraint is respected). Counter bumps sit before the retryable re-raise so every attempt is counted.
-- **Deliberately left open (separate workstreams)**: per-run session transport (today one process-wide `set_proxy`/`configure_github_transport` rebinds egress for every in-flight scan — the agnes-ai 2026-09-04 mass-NETWORK_ERROR class), and link-index retention (measured 2026-09-23: `links.db` 888 MB / 1,896,671 rows with no eviction; `-wal` stays ~5 MB so no checkpoint starvation; `responses.db` was 551 MB because cached bodies were blob pages — the raw-bytes fix shrinks it ~180x).
+- **Deliberately left open (separate workstreams)**: per-run session transport (today one process-wide `set_proxy`/`configure_github_transport` rebinds egress for every in-flight scan — the agnes-ai 2026-09-04 mass-NETWORK_ERROR class), and link-index retention (measured 2026-09-23: `links.db` 888 MB / 1,896,671 rows with no eviction; `-wal` stays ~5 MB so no checkpoint starvation; `responses.db` was 551 MB because cached bodies were blob pages — the raw-bytes fix shrinks it ~180x). **2026-10-09 CORRECTION on responses.db**: the 543 MB file is NOT blob pages and did NOT shrink — it is the 1000-row / TTL-60 s hot cache of `api.github.com/search/code` JSON (each page response is legitimately ~0.5 MB with text_matches fragments). SQLite reuses freed pages in place, so the file sits at its ~543 MB high-water mark (stable 551→543 MB over 16 days, bounded ≈600 MB by the row cap; ~71 MB free pages reclaimable only via VACUUM). links.db itself: write-gated since 09-28 and verified still 36 KB on 10-09.
 
 ## Feature: gather fetches RAW file bytes (fixed 2026-09-23; was: HTML blob pages)
 
@@ -2070,9 +2070,14 @@ and deployed the same evening (rollback `rollback-20260928-182659`, md5 MATCH
   25 wait on the second; 87 invalid / 28 wait on the first) — the GitHub
   corpus carries docs/placeholders and dead-or-unsubscribed keys only. The
   push path (fnos gpt-load group 20) is verified end-to-end but has never
-  had a key to push. Schedule is now `0 22 * * 6` (Sat 22:00) via API +
-  seed; re-promote only if a weekly run ever yields. This is also a GitHub
-  search-quota saving (~90k links/day back to the shared pool).
+   had a key to push. Schedule is now `0 22 * * 6` (Sat 22:00) via API +
+   seed; re-promote only if a weekly run ever yields. This is also a GitHub
+   search-quota saving (~90k links/day back to the shared pool).
+   **2026-10-09 CORRECTION**: `0 22 * * 6` was actually firing on SUNDAY —
+   APScheduler's from_crontab reads numeric dow as 0=mon…6=sun (see the
+   footgun bullet in the 2026-10-09 section); prod + seed now use
+   `0 22 * * sat`, which IS Saturday. Every "weekly Sat" run before 10-10
+   was a Sunday run.
 - **tavily eviction loop is now durable**: fnos crontab is not writable by
   admin (`crontabs/admin: rename: Operation not permitted`) and sudo needs a
   password, so permanence lives in a **systemd USER timer** (admin has
@@ -2305,6 +2310,52 @@ cull is justified by the data.** Evidence + the two changes that came out of it:
   `docker compose logs` SOCKS-error census if run durations inflate together
   again (recipe: bucket main.log by day, count SOCKSHTTPSConnectionPool /
   Proxy failover / Read timed out).
+- **Deep review the same afternoon (4 parallel evidence agents: scheduler/
+  lifecycle, push/pools, storage/disk, code review)** — system verdict HEALTHY:
+  21 schedule rows correct with intended next_run weekdays; 0 NULL-duration
+  failed rows; 8 restart-interrupted rows since 09-28 all map to documented
+  deploy windows (ZERO organic failures); 0 push failures since 09-28 (the two
+  agnes rows are the pre-fix 09-28 WAN class); fnos pool counts match records
+  exactly (nvidia 2072 / glm 552 / zai 72 / ollama 71 / openrouter 112 /
+  modelscope 63 / opencode 0); rn agnes pool 79 ≡ push added 6; tavily proxy
+  ZERO 402/503 in the last 7d (last 402 09-28 from the deactivated key 2746);
+  evict loop alive (cyc≈1279, 0 container-unavailable) with KillMode=process
+  watchdog; harvester.db 2.3 MB quick_check ok (journal=delete, no WAL);
+  links.db write-gate holding at 36 KB; active providers' backups all ≤3;
+  today's ERRORs are 99.4% the known GitHub-429 search-budget ceiling;
+  false-404 fixes holding (~10/day vs 3484/48h pre-fix).
+- **Deep-review FIXES (this commit set)**: (1) **add-time token validation
+  misread rate-limited 403s as invalid** — GitHub answers 403 for a VALID
+  token under primary (`x-ratelimit-remaining: 0`) and secondary (`Retry-After`
+  / "secondary rate limit") limits, and the pool routinely sits at the 10
+  req/min ceiling, so adding a token during a limit window spuriously rejected
+  it (`web/token_service.py::_validate_token_gh` now routes rate-limit-marked
+  403s to "unknown" → stored with NULL expiry; 401 and genuine 403 stay
+  invalid; mirrors the runtime's marker set). (2) **`add_token`/
+  `add_tokens_bulk` blocked the event loop** — the sync `requests.get` probe
+  (15 s timeout) inside `async def` froze the whole web app per token; now via
+  `asyncio.to_thread` (bulk stays sequential on purpose — parallel probes
+  would hammer the shared budget). (3) **strike→dead race** —
+  `_record_auth_failure`'s two-call sequence (`mark_strike` then `mark_dead`,
+  separate locks) let a concurrent `mark_alive` from an in-flight success slip
+  between them and quarantine a token that had just succeeded; `mark_strike`
+  now takes `dead_threshold` and does count+quarantine in ONE lock
+  acquisition. All pinned by tests (web token health 5 new, runtime 2 new;
+  suite 1038 OK / 8 skipped).
+- **Deep-review watch items (recorded, not fixed)**: main.log coverage for
+  09-29/09-30 is GONE (the documented in-container-probe log-deletion trap;
+  4 low-volume module logs still hold ~10 MB of deleted inodes and 12 files
+  are >7d old — all self-heal at the next restart); the 6 disabled providers
+  hold 4-7 frozen backup dirs (~400 MB, prune runs only at scan start —
+  self-corrects on re-enable); serpapi pool `searches_left` fell 355k→179k
+  with 228/636 exhausted while only 4 keys were ever client-used (the proxy's
+  quota refresher is live — likely account-side consumption elsewhere; pool
+  still far above the ~486 req/7d client load); 1 runtime config orphan
+  (Oct-1 tavily, startup-only sweep gap); rollback-* dirs accumulate ~16K/
+  deploy (7 now). **Deploy note**: these fixes touch already-imported modules
+  (token_service/state/client) — cp'd to the container WITHOUT restart
+  (triggers are low-frequency: token adds / 401 storms), so they activate at
+  the next natural restart.
 
 
 
