@@ -2211,9 +2211,86 @@ suite 932 → **984 OK / 8 skipped**.
   egress could change it. curl_cffi is NOT adopted (falsified premise);
   decision record + probe script: `.omo/plans/curl-cffi-fingerprint-decision.md`,
   `.omo/evidence/ulw-20260930-rootfix/g7_fingerprint_probe/`. Reopen only if a
-  provider shows a reproducible same-egress split (requests=403 /
-  browser=401). groq's real blocker remains partner auto-revocation (09-24),
-  not egress.
+   provider shows a reproducible same-egress split (requests=403 /
+   browser=401). groq's real blocker remains partner auto-revocation (09-24),
+   not egress.
+
+## Ops: 2026-10-09 audit → frequency policy + fleet Fastly-probe fix
+
+User-directed review of prod logs/data ("大量重复 key 是否合理？qwen 等停用是否合理？").
+Verdict: **the records are self-consistent; duplicates are by design; the 09-28
+cull is justified by the data.** Evidence + the two changes that came out of it:
+
+- **Duplicate-key forensics (11 days, backup-set diffs)**: cross-run overlap is
+  98-100% for every enabled provider (modelscope literally 59→59→59 with 0 new
+  for 3 straight days; serpapi 99.3-99.8%; tavily 99.7%). push_logs since 09-28:
+  nvidia 75 added / 10,892 ignored; serpapi 10 / 7,625. Mechanism: GitHub code
+  search is a stable best-match ranking over a plateaued corpus, and
+  `auto_restore: false` re-validates the same corpus each run — push-side dedup
+  (ignored) is the designed absorption. **The duplicates are not a defect; the
+  defect would be paying daily quota for them** → frequency policy below.
+  Per-provider daily churn that JUSTIFIES staying daily: nvidia +7-15 new /
+  7-14 dead, tavily +4-11 / 15-30 dead, glm +5-6, glm-ai +1-7 (pool refill ≈
+  pool death; nvidia pool 2072 and glm pool 552 stayed flat 09-29→10-09).
+- **tavily added-spikes 10-01 (+188) / 10-02 (+451) EXPLAINED — monthly quota
+  reset, not a bug**: tavily valid jumped 878 (09-30) → 1842 (10-02) overnight
+  and stayed ~1800. Plan-exhausted keys (plan_usage 1000/1000, evicted/no-quota
+  in September) revived when the monthly plan reset on 10-01, re-validated, and
+  re-entered the pool as "added". The +188 row was the startup recovery push of
+  the restart-killed 10-01 run (`44fe43b0`) — lifecycle hardening working as
+  designed. Expect this every month turn: a burst of "added" + a ~2x valid count
+  for tavily in the first days of the month.
+- **Frequency policy applied on prod 2026-10-09 (PUT /api/schedule, hot)**:
+  modelscope `0 3 * * 3` (weekly), ollama `0 3 * * 1,4`, openrouter
+  `0 8 * * 1,4`, agnes-ai `0 10 * * 2,5`, serpapi `0 6 * * 1,3,5` (mild churn,
+  3x/week; hour 05→06 avoids the glm-ai daily 05:00 on shared days). Unchanged
+  daily: tavily 09, nvidia 11:50, glm 12, glm-ai 13. **House rule going
+  forward: a cold/saturated provider gets a WEEKLY FLOOR, never full disable**
+  (user decision 2026-10-09) — staleness law means supply can resume any week,
+  and a weekly probe is bounded-quota insurance against permanent blindness.
+  opencode stays `0 22 * * 6` under this rule (3rd consecutive 0-valid run on
+  10-04, 95,830 links — if it never yields, weekly is still the floor). The 11
+  disabled providers (qwen×2/kimi×3/mimo×2/deepseek/github/groq/cerebras) stay
+  disabled — the 09-28 evidence stands (qwen-cn 326k links → +10; qwen-intl
+  186k → +0, pool now 0 keys; deepseek 691k → +3; github 1.03M → 3). Seed list
+  in `web/scheduler.py` synced to the new crons (pinned by test_web_scheduler).
+- **10-03→10-05 global 6-9x slowdown ROOT-CAUSED: warp-go Fastly-leg
+  degradation + health-checker blindness**. Log census per day (main.log
+  rotations): SOCKS transport errors 0→490/700/452, read timeouts 0→358/405/337,
+  proxy failovers 0→130/216/152 per day across 10-03/04/05; back to 21/7 on
+  10-06 and ZERO on 10-07/08. All providers slowed simultaneously (even 16k-link
+  agnes-ai 6→54 min) = shared egress, not corpus. Harvester code behaved
+  correctly (failover/timeout-floor/retries all active; **zero yield loss** —
+  valid counts on the slow days match healthy days). Recovery correlates with
+  staged node restarts: wg13 (10-04), wg01/02/03/07/10/12 (10-05), wg08/09
+  (10-06) — `docker ps` uptimes match. The checker
+  (`/home/admin/warpgo-fleet/scripts/check_warpgo_fleet.sh`, systemd-user timer
+  every 5 min) probed ONLY `www.cloudflare.com`, so the Fastly-leg degradation
+  (the 09-24-documented blind spot) was invisible until cloudflare probes also
+  started failing days later.
+- **FIXED (fleet side, deployed+verified 2026-10-09 11:37 CST)**: the checker
+  now runs a SECONDARY probe per node — `CONNECT raw.githubusercontent.com:443`
+  → TLS → `GET /` (any HTTP status line = pass; it tests tunnel reachability,
+  404 is fine) — only when the primary cloudflare probe PASSES, with its own
+  consecutive-fail counter (`RAW_FAIL_THRESHOLD=4` ≈ 20 min at the 5-min
+  cadence, deliberately more conservative than the primary's 3) sharing
+  RESTART_GRACE / MAX_RESTARTS_PER_RUN / the global-outage flag / last-restart
+  state. Raw-path fails do NOT feed `fails_this_run` (global-outage semantics
+  stay "the node stack is down"): with the primary passing, a dead Fastly leg
+  is exactly what a node restart fixes. Backup:
+  `check_warpgo_fleet.sh.bak-20261009-113628`. Manual run + the next timer run
+  both passed 14/14 UP, 0 restarts. Report lines now distinguish `UP` /
+  `UP raw:FAIL(n/4)` / `RESTARTED(raw)`. **Do not "simplify" the two-probe
+  structure back to one target** — the single-target version is what let a
+  3-day, 6x degradation run invisible.
+- **Watch item (not fixed, environmental)**: if the whole fleet's Fastly leg
+  degrades at once (upstream WARP/IPv6 routing), per-node restarts are capped at
+  3/run and may churn without fixing it — the harvester-side mitigations
+  (failover rotation, 20 s timeout floor, retries) are the backstop, and they
+  held with zero data loss in the 10-03 incident. Re-check
+  `docker compose logs` SOCKS-error census if run durations inflate together
+  again (recipe: bucket main.log by day, count SOCKSHTTPSConnectionPool /
+  Proxy failover / Read timed out).
 
 
 
