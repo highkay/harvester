@@ -128,19 +128,25 @@ _DEFAULT_SCHEDULES: tuple[tuple[str, str, str], ...] = (
     ("qwen-cn", "45 */4 * * *", "examples/config-qwen.yaml"),
     # Medium-churn providers — every 6 hours.
     ("glm", "0 */6 * * *", "examples/config-glm.yaml"),
-    # ModelScope scans run 6-hourly → DAILY at 11:00 (off-peak, low churn).
-    ("modelscope", "0 11 * * *", "examples/config-modelscope.yaml"),
+    # 2026-10-09 frequency policy: saturated providers (measured 0-2 net-new
+    # keys/day, 98-100% cross-run overlap over 11 days) drop to weekly or
+    # 2-3x/week — a weekly floor keeps supply-resumption visibility without
+    # burning the shared GitHub search quota on re-validating the same corpus.
+    # Applied on prod the same day via PUT /api/schedule (hot reload).
+    ("modelscope", "0 3 * * 3", "examples/config-modelscope.yaml"),
     # Tavily keys survive longer (usage-audit based) — every 6 hours.
     ("tavily", "40 */6 * * *", "examples/config-tavily.yaml"),
     # GitHub token self-bootstrap — scan every 6 hours so the instance's own
     # token pool keeps growing; staggered at :50 to avoid the 0/20/40 burst.
     ("github", "50 */6 * * *", "examples/config-github.yaml"),
-    # SerpApi keys are account-based (monthly plans) — every 6 hours, at :10
-    # to stagger between the :00/:20/:40/:50 six-hour burst.
-    ("serpapi", "10 */6 * * *", "examples/config-serpapi.yaml"),
-    # Agnès AI — every 6 hours, at :35 to avoid the existing */6 cluster
-    # minutes (0/10/20/40/50) and the */4 cluster (0/15/30/45).
-    ("agnes-ai", "35 */6 * * *", "examples/config-agnes-ai.yaml"),
+    # SerpApi keys are account-based (monthly plans). 2026-10-09: daily →
+    # 3x/week (mild churn: 1-4 new / 1-7 dead per day, pool ~400); hour moved
+    # 05→06 to avoid the glm-ai daily 05:00 firing on shared days.
+    ("serpapi", "0 6 * * 1,3,5", "examples/config-serpapi.yaml"),
+    # Agnès AI. 2026-10-09: */6 → 2x/week (measured 0-1 net-new/day, pool
+    # saturated at ~40 keys; the scan is cheap — 16k links — but the quota
+    # saving goes to the high-churn providers).
+    ("agnes-ai", "0 10 * * 2,5", "examples/config-agnes-ai.yaml"),
     # Secondary regional tasks live in their own config files now (previously
     # bundled into the primary provider's config, which mixed run records,
     # push statistics and schedules together). Daily at staggered hours —
@@ -169,8 +175,13 @@ _DEFAULT_SCHEDULES: tuple[tuple[str, str, str], ...] = (
     # secret-scanning partner with push protection, so leaked gsk_ keys are
     # auto-revoked within minutes of a public push (22 completed prod runs,
     # 0 valid keys; structural, not fixable from the scanning side).
-    ("ollama", "20 3 * * *", "examples/config-ollama.yaml"),
-    ("openrouter", "40 8 * * *", "examples/config-openrouter.yaml"),
+    # 2026-10-09: ollama/openrouter daily → 2x/week (measured over 11 days:
+    # ollama 0-2 net-new/day with durable keys — no partner revocation;
+    # openrouter 0-8 net-new/day but a saturated ~110-key pool). The weekly
+    # floor stays: cold providers keep at least one scan per week so a supply
+    # resumption is never missed for good.
+    ("ollama", "0 3 * * 1,4", "examples/config-ollama.yaml"),
+    ("openrouter", "0 8 * * 1,4", "examples/config-openrouter.yaml"),
     ("nvidia", "50 11 * * *", "examples/config-nvidia.yaml"),
     # OpenCode Go subscription keys — WEEKLY (Sat 22:00), downgraded from
     # daily on 2026-09-28 after two consecutive zero-valid runs (92k links →

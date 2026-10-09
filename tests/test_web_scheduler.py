@@ -96,11 +96,13 @@ class TestSeedData(unittest.TestCase):
         "mimo-cn": "30 */4 * * *",
         "qwen-cn": "45 */4 * * *",
         "glm": "0 */6 * * *",
-        "modelscope": "0 11 * * *",
+        # 2026-10-09 frequency policy: saturated providers → weekly floor or
+        # 2-3x/week (measured 0-2 net-new/day, 98-100% cross-run overlap).
+        "modelscope": "0 3 * * 3",
         "tavily": "40 */6 * * *",
         "github": "50 */6 * * *",
-        "serpapi": "10 */6 * * *",
-        "agnes-ai": "35 */6 * * *",
+        "serpapi": "0 6 * * 1,3,5",
+        "agnes-ai": "0 10 * * 2,5",
         "glm-ai": "0 13 * * *",
         # 2026-09-24: moved off the 14:00-17:00 Beijing window — measured prod
         # token-cooldown storm concentrated at 10:00-16:00 Beijing (4529
@@ -111,8 +113,8 @@ class TestSeedData(unittest.TestCase):
         "kimi-coding": "0 19 * * *",
         "mimo-sg": "0 20 * * *",
         "qwen-intl": "0 21 * * *",
-        "ollama": "20 3 * * *",
-        "openrouter": "40 8 * * *",
+        "ollama": "0 3 * * 1,4",
+        "openrouter": "0 8 * * 1,4",
         "nvidia": "50 11 * * *",
         "opencode": "0 22 * * 6",
     }
@@ -218,9 +220,11 @@ class TestSeedListShape(unittest.TestCase):
     # (provider, cron, config_file) — the 2026-09-22 seed additions, plus the
     # github self-bootstrap entry whose cron AGENTS.md documents (already
     # seeded before the change; pinned so it cannot drift silently).
+    # 2026-10-09: ollama/openrouter moved to 2x/week (saturated pools, the
+    # weekly-floor policy for cold providers).
     _PINNED_ENTRIES = {
-        "ollama": ("20 3 * * *", "examples/config-ollama.yaml"),
-        "openrouter": ("40 8 * * *", "examples/config-openrouter.yaml"),
+        "ollama": ("0 3 * * 1,4", "examples/config-ollama.yaml"),
+        "openrouter": ("0 8 * * 1,4", "examples/config-openrouter.yaml"),
         "nvidia": ("50 11 * * *", "examples/config-nvidia.yaml"),
         "github": ("50 */6 * * *", "examples/config-github.yaml"),
     }
