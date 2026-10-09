@@ -114,6 +114,12 @@ class PipelineRunner:
         # Killed runs leave their generated runtime YAML behind (only the
         # scan thread's finally deletes it) — sweep the orphans at startup.
         self._sweep_orphan_runtime_configs()
+        # The per-provider backup prune only runs at the scan start of a
+        # RUNNING provider, so disabled/frozen providers kept growing their
+        # backup piles forever (measured 2026-10-09: the six culled providers
+        # held 4-7 backup dirs each, ~400 MB). Enforce retention across ALL
+        # provider dirs at startup.
+        self._prune_all_provider_backups()
 
     # ------------------------------------------------------------------
     # Public API (async — called from FastAPI routes)
@@ -910,6 +916,35 @@ class PipelineRunner:
             f"Runtime orphan sweep: removed {removed} stale runtime config(s) "
             f"from {runtime_dir}"
         )
+
+    def _prune_all_provider_backups(self) -> None:
+        """Enforce backup retention across ALL provider dirs (never raises).
+
+        Complements the per-run prune in ``manager/task.py`` (which only fires
+        for the provider being scanned): a provider that never runs again —
+        the disabled ones — would otherwise keep its frozen backup pile
+        forever. Delegates to :func:`storage.persistence.prune_backup_dirs`
+        so the retention count and the ``backup-YYYYmmdd-HHMMSS`` naming rule
+        stay single-sourced.
+        """
+        try:
+            from storage.persistence import prune_backup_dirs
+
+            providers_dir = Path(self._workspace) / "providers"
+            if not providers_dir.is_dir():
+                return
+            removed = 0
+            for entry in sorted(providers_dir.iterdir()):
+                if entry.is_dir():
+                    removed += prune_backup_dirs(str(entry), entry.name)
+            if removed:
+                logger.info(
+                    f"Startup backup prune: removed {removed} stale backup "
+                    f"dir(s) across {providers_dir}"
+                )
+        except Exception as exc:  # noqa: BLE001 — never-raise guard: startup
+            # hygiene must never block runner construction.
+            logger.warning(f"startup backup prune skipped: {exc}")
 
     def _generate_temp_yaml(
         self,

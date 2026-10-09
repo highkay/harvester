@@ -1250,6 +1250,87 @@ class TestRuntimeOrphanSweep(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# 2026-10-09 — startup backup prune across ALL providers (frozen included)
+# ---------------------------------------------------------------------------
+
+
+class TestStartupBackupPrune(unittest.TestCase):
+    """Given provider dirs holding more than the retention backup dirs,
+    When the runner's startup prune runs,
+    Then EVERY provider (including ones that will never scan again) is trimmed
+    to the newest _BACKUP_RETENTION, and non-backup entries are untouched."""
+
+    @staticmethod
+    def _mk_backups(provider_dir: Path, days: list[int]) -> list[Path]:
+        provider_dir.mkdir(parents=True, exist_ok=True)
+        made = []
+        for day in days:
+            d = provider_dir / f"backup-202610{day:02d}-000000"
+            d.mkdir()
+            (d / "valid-keys.txt").write_text("k\n", encoding="utf-8")
+            made.append(d)
+        return made
+
+    def test_prunes_frozen_provider_dirs(self) -> None:
+        from storage.persistence import _BACKUP_RETENTION
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workdir = Path(tmpdir)
+            frozen = workdir / "providers" / "qwen-cn"
+            made = self._mk_backups(frozen, [1, 2, 3, 4, 5])
+            attic = frozen / "_attic"
+            attic.mkdir()
+            odd = frozen / "backup-notadate"
+            odd.mkdir()
+
+            runner = _make_runner(workdir, str(workdir / "h.db"))
+            runner._prune_all_provider_backups()
+
+            remaining = sorted(
+                p.name for p in frozen.iterdir()
+                if p.name.startswith("backup-2026")
+            )
+            self.assertEqual(
+                remaining,
+                sorted(p.name for p in made[-_BACKUP_RETENTION:]),
+                "only the newest retention-worth of backups must survive",
+            )
+            self.assertTrue(attic.exists(), "_attic must be untouched")
+            self.assertTrue(
+                odd.exists(), "non-timestamp backup-* dirs must be untouched"
+            )
+
+    def test_survives_missing_providers_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workdir = Path(tmpdir)
+            runner = _make_runner(workdir, str(workdir / "h.db"))
+            runner._prune_all_provider_backups()  # must not raise
+
+    def test_constructor_prunes_at_startup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workdir = Path(tmpdir)
+            self._mk_backups(workdir / "providers" / "kimi", [1, 2, 3, 4, 5])
+
+            env = {
+                "HARVESTER_WORKSPACE": str(workdir),
+                "HARVESTER_DB_PATH": str(workdir / "h.db"),
+            }
+            runner: PipelineRunner | None = None
+            try:
+                with patch.dict(os.environ, env, clear=False):
+                    runner = PipelineRunner()
+                left = [
+                    p
+                    for p in (workdir / "providers" / "kimi").iterdir()
+                    if p.name.startswith("backup-")
+                ]
+                self.assertEqual(len(left), 3)
+            finally:
+                if runner is not None:
+                    runner._executor.shutdown(wait=False)
+
+
+# ---------------------------------------------------------------------------
 # BUG 5 — the no-work marker must only FAIL a run whose searches actually failed
 # ---------------------------------------------------------------------------
 
