@@ -133,7 +133,16 @@ _DEFAULT_SCHEDULES: tuple[tuple[str, str, str], ...] = (
     # 2-3x/week — a weekly floor keeps supply-resumption visibility without
     # burning the shared GitHub search quota on re-validating the same corpus.
     # Applied on prod the same day via PUT /api/schedule (hot reload).
-    ("modelscope", "0 3 * * 3", "examples/config-modelscope.yaml"),
+    #
+    # DAY-OF-WEEK FOOTGUN (cost a same-day re-fix on 2026-10-09): APScheduler's
+    # CronTrigger.from_crontab does NOT translate standard-crontab weekday
+    # numbers — it passes the field straight into its NATIVE day_of_week
+    # numbering, 0=mon … 5=sat, 6=sun (so "1,3,5" fires tue/thu/sat, not
+    # mon/wed/fri, and opencode's old "0 22 * * 6" had been firing on SUNDAY
+    # while every doc said Saturday). ALWAYS spell weekdays by NAME (mon,tue,…)
+    # in any cron that carries a day-of-week field; numeric weekdays are only
+    # safe in this codebase's crons if you mean APScheduler's mon=0 numbering.
+    ("modelscope", "0 3 * * wed", "examples/config-modelscope.yaml"),
     # Tavily keys survive longer (usage-audit based) — every 6 hours.
     ("tavily", "40 */6 * * *", "examples/config-tavily.yaml"),
     # GitHub token self-bootstrap — scan every 6 hours so the instance's own
@@ -142,11 +151,11 @@ _DEFAULT_SCHEDULES: tuple[tuple[str, str, str], ...] = (
     # SerpApi keys are account-based (monthly plans). 2026-10-09: daily →
     # 3x/week (mild churn: 1-4 new / 1-7 dead per day, pool ~400); hour moved
     # 05→06 to avoid the glm-ai daily 05:00 firing on shared days.
-    ("serpapi", "0 6 * * 1,3,5", "examples/config-serpapi.yaml"),
+    ("serpapi", "0 6 * * mon,wed,fri", "examples/config-serpapi.yaml"),
     # Agnès AI. 2026-10-09: */6 → 2x/week (measured 0-1 net-new/day, pool
     # saturated at ~40 keys; the scan is cheap — 16k links — but the quota
     # saving goes to the high-churn providers).
-    ("agnes-ai", "0 10 * * 2,5", "examples/config-agnes-ai.yaml"),
+    ("agnes-ai", "0 10 * * tue,fri", "examples/config-agnes-ai.yaml"),
     # Secondary regional tasks live in their own config files now (previously
     # bundled into the primary provider's config, which mixed run records,
     # push statistics and schedules together). Daily at staggered hours —
@@ -180,15 +189,17 @@ _DEFAULT_SCHEDULES: tuple[tuple[str, str, str], ...] = (
     # openrouter 0-8 net-new/day but a saturated ~110-key pool). The weekly
     # floor stays: cold providers keep at least one scan per week so a supply
     # resumption is never missed for good.
-    ("ollama", "0 3 * * 1,4", "examples/config-ollama.yaml"),
-    ("openrouter", "0 8 * * 1,4", "examples/config-openrouter.yaml"),
+    ("ollama", "0 3 * * mon,thu", "examples/config-ollama.yaml"),
+    ("openrouter", "0 8 * * mon,thu", "examples/config-openrouter.yaml"),
     ("nvidia", "50 11 * * *", "examples/config-nvidia.yaml"),
     # OpenCode Go subscription keys — WEEKLY (Sat 22:00), downgraded from
     # daily on 2026-09-28 after two consecutive zero-valid runs (92k links →
     # 265 materials → 0 valid each time): the corpus carries docs/placeholders
     # and dead/unsubscribed keys only. Weekly keeps the provider warm at ~1/7
     # of the GitHub-search budget; re-promote if a weekly run ever yields.
-    ("opencode", "0 22 * * 6", "examples/config-opencode.yaml"),
+    # 2026-10-09: "0 22 * * 6" was firing on SUNDAY (APScheduler dow footgun,
+    # see above) — corrected to the documented Saturday via the name form.
+    ("opencode", "0 22 * * sat", "examples/config-opencode.yaml"),
 )
 
 

@@ -98,11 +98,16 @@ class TestSeedData(unittest.TestCase):
         "glm": "0 */6 * * *",
         # 2026-10-09 frequency policy: saturated providers → weekly floor or
         # 2-3x/week (measured 0-2 net-new/day, 98-100% cross-run overlap).
-        "modelscope": "0 3 * * 3",
+        # Day-of-week entries are NAME-based on purpose: APScheduler's
+        # from_crontab reads numeric dow as 0=mon…6=sun (NOT standard crontab's
+        # 0=sun), which silently shifted the first numeric version of this
+        # policy by one weekday (and made opencode's old "0 22 * * 6" fire on
+        # Sunday while docs said Saturday).
+        "modelscope": "0 3 * * wed",
         "tavily": "40 */6 * * *",
         "github": "50 */6 * * *",
-        "serpapi": "0 6 * * 1,3,5",
-        "agnes-ai": "0 10 * * 2,5",
+        "serpapi": "0 6 * * mon,wed,fri",
+        "agnes-ai": "0 10 * * tue,fri",
         "glm-ai": "0 13 * * *",
         # 2026-09-24: moved off the 14:00-17:00 Beijing window — measured prod
         # token-cooldown storm concentrated at 10:00-16:00 Beijing (4529
@@ -113,10 +118,10 @@ class TestSeedData(unittest.TestCase):
         "kimi-coding": "0 19 * * *",
         "mimo-sg": "0 20 * * *",
         "qwen-intl": "0 21 * * *",
-        "ollama": "0 3 * * 1,4",
-        "openrouter": "0 8 * * 1,4",
+        "ollama": "0 3 * * mon,thu",
+        "openrouter": "0 8 * * mon,thu",
         "nvidia": "50 11 * * *",
-        "opencode": "0 22 * * 6",
+        "opencode": "0 22 * * sat",
     }
     _EXPECTED_CONFIG_FILES = {
         "deepseek": "examples/config-deepseek.yaml",
@@ -221,10 +226,11 @@ class TestSeedListShape(unittest.TestCase):
     # github self-bootstrap entry whose cron AGENTS.md documents (already
     # seeded before the change; pinned so it cannot drift silently).
     # 2026-10-09: ollama/openrouter moved to 2x/week (saturated pools, the
-    # weekly-floor policy for cold providers).
+    # weekly-floor policy for cold providers); weekdays NAME-based — see the
+    # APScheduler numeric-dow footgun note in _EXPECTED_CRONS.
     _PINNED_ENTRIES = {
-        "ollama": ("0 3 * * 1,4", "examples/config-ollama.yaml"),
-        "openrouter": ("0 8 * * 1,4", "examples/config-openrouter.yaml"),
+        "ollama": ("0 3 * * mon,thu", "examples/config-ollama.yaml"),
+        "openrouter": ("0 8 * * mon,thu", "examples/config-openrouter.yaml"),
         "nvidia": ("50 11 * * *", "examples/config-nvidia.yaml"),
         "github": ("50 */6 * * *", "examples/config-github.yaml"),
     }
@@ -258,6 +264,61 @@ class TestSeedListShape(unittest.TestCase):
             self.assertEqual(
                 entries[provider], expected, f"{provider} seed tuple drifted"
             )
+
+    def test_dow_crons_fire_on_intended_weekdays(self) -> None:
+        """APScheduler's from_crontab reads NUMERIC day-of-week with its own
+        native numbering (0=mon … 5=sat, 6=sun), NOT standard crontab (0=sun).
+        On 2026-10-09 this silently shifted the whole weekly-floor policy by
+        one weekday ("1,3,5" fired tue/thu/sat), and opencode's old
+        "0 22 * * 6" had been firing on SUNDAY while every doc said Saturday.
+        Seed crons must therefore spell weekdays BY NAME, and this test pins
+        the semantics end-to-end: every seeded dow fires only on intended days.
+        """
+        from datetime import datetime, timedelta, timezone
+
+        from apscheduler.triggers.cron import CronTrigger
+
+        from web.scheduler import _DEFAULT_SCHEDULES
+
+        # A Friday-noon vantage: a misread numeric dow surfaces within the
+        # next few fire times (weekend firings the intent never asked for).
+        # tz-aware: APScheduler converts to the trigger's timezone, and a
+        # noon-UTC vantage stays a Friday in every plausible local zone.
+        vantage = datetime(2026, 10, 9, 12, 0, tzinfo=timezone.utc)  # a Friday
+        name_to_weekday = {
+            "mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6,
+        }
+        checked = 0
+        for provider, cron, _cfg in _DEFAULT_SCHEDULES:
+            dow = cron.split()[4]
+            if dow == "*":
+                continue
+            checked += 1
+            self.assertFalse(
+                any(ch.isdigit() for ch in dow),
+                f"{provider}: numeric day-of-week {dow!r} is ambiguous under "
+                "APScheduler from_crontab (0=mon…6=sun, NOT crontab's 0=sun) "
+                "— spell weekdays by name (mon,tue,…)",
+            )
+            expected = {name_to_weekday[d.strip()] for d in dow.split(",")}
+            trigger = CronTrigger.from_crontab(cron)
+            seen: set[int] = set()
+            nxt = vantage
+            for _ in range(10):
+                fire = trigger.get_next_fire_time(None, nxt)
+                self.assertIsNotNone(fire, f"{provider}: no next fire from {nxt}")
+                assert fire is not None
+                seen.add(fire.weekday())
+                nxt = fire + timedelta(seconds=60)
+            self.assertEqual(
+                seen,
+                expected,
+                f"{provider}: cron {cron!r} fires on python-weekdays "
+                f"{sorted(seen)}, expected {sorted(expected)}",
+            )
+        self.assertGreaterEqual(
+            checked, 6, "expected at least the 6 weekday-carrying seed crons"
+        )
 
     def test_every_seed_cron_parses(self) -> None:
         from apscheduler.triggers.cron import CronTrigger

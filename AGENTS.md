@@ -2241,19 +2241,33 @@ cull is justified by the data.** Evidence + the two changes that came out of it:
   designed. Expect this every month turn: a burst of "added" + a ~2x valid count
   for tavily in the first days of the month.
 - **Frequency policy applied on prod 2026-10-09 (PUT /api/schedule, hot)**:
-  modelscope `0 3 * * 3` (weekly), ollama `0 3 * * 1,4`, openrouter
-  `0 8 * * 1,4`, agnes-ai `0 10 * * 2,5`, serpapi `0 6 * * 1,3,5` (mild churn,
-  3x/week; hour 05→06 avoids the glm-ai daily 05:00 on shared days). Unchanged
+  modelscope `0 3 * * wed` (weekly), ollama `0 3 * * mon,thu`, openrouter
+  `0 8 * * mon,thu`, agnes-ai `0 10 * * tue,fri`, serpapi
+  `0 6 * * mon,wed,fri` (mild churn, 3x/week; hour 05→06 avoids the glm-ai
+  daily 05:00 on shared days). Unchanged
   daily: tavily 09, nvidia 11:50, glm 12, glm-ai 13. **House rule going
   forward: a cold/saturated provider gets a WEEKLY FLOOR, never full disable**
   (user decision 2026-10-09) — staleness law means supply can resume any week,
   and a weekly probe is bounded-quota insurance against permanent blindness.
-  opencode stays `0 22 * * 6` under this rule (3rd consecutive 0-valid run on
+  opencode stays weekly under this rule (3rd consecutive 0-valid run on
   10-04, 95,830 links — if it never yields, weekly is still the floor). The 11
   disabled providers (qwen×2/kimi×3/mimo×2/deepseek/github/groq/cerebras) stay
   disabled — the 09-28 evidence stands (qwen-cn 326k links → +10; qwen-intl
   186k → +0, pool now 0 keys; deepseek 691k → +3; github 1.03M → 3). Seed list
   in `web/scheduler.py` synced to the new crons (pinned by test_web_scheduler).
+- **APScheduler day-of-week FOOTGUN (found in the same-day effect review, fixed
+  2026-10-09)**: `CronTrigger.from_crontab` passes the weekday field straight
+  into APScheduler's NATIVE numbering — **0=mon … 5=sat, 6=sun**, NOT standard
+  crontab's 0=sun. The first (numeric) version of the policy therefore fired
+  one weekday off (`1,3,5` = tue/thu/sat instead of mon/wed/fri; next_run_time
+  in the PUT responses exposed it: serpapi landed on Sat 10-10). Worse,
+  opencode's `0 22 * * 6` had been firing on **SUNDAY** since 09-28 while every
+  doc said Saturday (the 10-04 run was a Sunday). Fix: all weekday-carrying
+  crons use NAME form (`mon,wed,fri`) on prod + in the seed list; semantics
+  pinned by `test_dow_crons_fire_on_intended_weekdays` (rejects numeric dow in
+  seeds and asserts actual fire weekdays == intended). When auditing "why did X
+  fire on the wrong day", check this first — `run_records.started_at` weekdays
+  vs the cron's numeric dow are the tell.
 - **10-03→10-05 global 6-9x slowdown ROOT-CAUSED: warp-go Fastly-leg
   degradation + health-checker blindness**. Log census per day (main.log
   rotations): SOCKS transport errors 0→490/700/452, read timeouts 0→358/405/337,
