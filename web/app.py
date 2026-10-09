@@ -11,6 +11,8 @@ tolerance so the app starts without them.
 
 from __future__ import annotations
 
+import asyncio
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -33,14 +35,42 @@ def _cleanup_old_web_logs() -> None:
 
     ``tools.logger.cleanup_old_logs`` only ran from ``init_logging``, which
     only the CLI (main.py) calls — so web-mode logs/ had no age cleanup.
-    ``_delete_existing_logs`` (the startup wipe of CURRENT module logs) is
-    untouched by this: only files whose mtime is past the retention window
-    are removed.
+    Only files whose mtime is past the retention window are removed; with
+    LOG_CLEANUP_MODE=keep (the default since 2026-10-09) current sinks are
+    appended across restarts and this age sweep is the ONLY bounded cleanup.
     """
     try:
         Logger.cleanup_old_logs(days=_WEB_LOG_RETENTION_DAYS)
     except Exception as exc:
         logger.warning(f"log cleanup skipped: {exc}")
+
+
+# The startup-only age sweep let stale rotations accumulate over the prod
+# process's multi-week lifetime (measured 2026-10-09: 12 files older than the
+# 7-day window after 8 days uptime). Repeat the sweep daily for the life of
+# the process. Env-overridable for tests.
+_LOG_CLEANUP_INTERVAL_SECONDS = float(
+    os.environ.get("HARVESTER_LOG_CLEANUP_INTERVAL_SECONDS", "86400") or "86400"
+)
+
+
+async def _log_cleanup_loop(
+    days: int = _WEB_LOG_RETENTION_DAYS,
+    interval: float = _LOG_CLEANUP_INTERVAL_SECONDS,
+) -> None:
+    """Periodically delete aged log files until cancelled (never raises).
+
+    Runs as a lifespan-owned asyncio task; a failed sweep logs and the loop
+    continues (the next tick retries). Cancellation is the only exit.
+    """
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            Logger.cleanup_old_logs(days=days)
+            logger.info(f"Periodic log cleanup ran (retention: {days} days)")
+        except Exception as exc:  # noqa: BLE001 — never-raise guard: a failed
+            # sweep must not kill the lifespan task; the next tick retries.
+            logger.warning(f"periodic log cleanup failed: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -81,6 +111,9 @@ async def _lifespan(app: FastAPI):  # type: ignore[type-arg]
     logger.info(f"Web server starting on {settings.host}:{settings.port}")
 
     _cleanup_old_web_logs()
+    # Daily age-sweep for the process lifetime (the startup-only sweep missed
+    # everything aging in during multi-week uptimes).
+    log_cleanup_task = asyncio.create_task(_log_cleanup_loop())
 
     if init_db is not None:
         await init_db(settings.db_path)
@@ -117,6 +150,11 @@ async def _lifespan(app: FastAPI):  # type: ignore[type-arg]
 
     # --- Shutdown ---
     logger.info("Web server shutting down")
+    log_cleanup_task.cancel()
+    try:
+        await log_cleanup_task
+    except asyncio.CancelledError:
+        pass
     if init_scheduler is not None:
         from web.scheduler import shutdown_scheduler  # type: ignore[import-untyped]
         await shutdown_scheduler()
