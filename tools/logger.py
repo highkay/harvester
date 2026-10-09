@@ -31,7 +31,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from constant.system import DEFAULT_LOG_CLEANUP_DELETE
+from constant.system import LOG_CLEANUP_MODE
 from core.models import LogFileInfo, LoggingStats
 
 from .patterns import redact_api_keys_in_text
@@ -439,10 +439,12 @@ class Logger:
         if not hasattr(Logger, "_directory_initialized"):
             Logger._logs_dir.mkdir(exist_ok=True)
 
-            # Use constant to determine cleanup mode
-            if DEFAULT_LOG_CLEANUP_DELETE:
+            # Tri-state cleanup mode (see constant/system.py). Default "keep"
+            # leaves existing logs untouched — a secondary process (probe,
+            # tool) must NEVER delete or rename files a live app is writing.
+            if LOG_CLEANUP_MODE == "delete":
                 Logger._delete_existing_logs()
-            else:
+            elif LOG_CLEANUP_MODE == "archive":
                 Logger._archive_existing_logs()
 
             Logger._directory_initialized = True
@@ -530,10 +532,15 @@ class Logger:
 
     @staticmethod
     def _handle_module_log(module_name: str):
-        """Handle existing module log file based on configuration"""
-        if DEFAULT_LOG_CLEANUP_DELETE:
+        """Handle existing module log file based on the cleanup mode.
+
+        "keep" (the default) is a NO-OP: the module handler opens in append
+        mode and the existing file survives — a probe process importing this
+        module can no longer unlink a live app's sink.
+        """
+        if LOG_CLEANUP_MODE == "delete":
             Logger._delete_module_log(module_name)
-        else:
+        elif LOG_CLEANUP_MODE == "archive":
             Logger._archive_module_log(module_name)
 
     @staticmethod

@@ -7,6 +7,7 @@ This module contains system-wide limits, timeouts, default configuration values,
 and performance thresholds that define the operational boundaries and default
 behaviors of the system.
 """
+import os
 from typing import Dict, Set
 
 # Configuration files
@@ -19,8 +20,27 @@ LOG_LEVEL_INFO: str = "INFO"
 LOG_LEVEL_WARNING: str = "WARNING"
 LOG_LEVEL_ERROR: str = "ERROR"
 
-# Log cleanup configuration. True: delete logs, False: archive logs
-DEFAULT_LOG_CLEANUP_DELETE: bool = True
+# Cleanup mode for EXISTING logs at logger initialisation:
+#   "delete"  — unlink current *.log files (legacy CLI fresh-run behaviour)
+#   "archive" — rename them with a timestamp suffix
+#   "keep"    — leave them untouched (DEFAULT)
+# Until 2026-10-09 this was a compile-time bool DEFAULT_LOG_CLEANUP_DELETE=True:
+# EVERY process that initialised the logger — including one-shot `python -`
+# probes inside the live prod container — deleted the current log files from
+# under the running app (which kept writing to unlinked inodes). That caused
+# the 09-29/09-30 forensic gap and ~10 MB of invisible deleted-inode disk
+# usage. Long-running services bound log age via periodic cleanup instead
+# (web/app.py lifespan); set HARVESTER_LOG_CLEANUP_MODE=delete for the legacy
+# fresh-run semantics (CLI).
+LOG_CLEANUP_MODE: str = (
+    os.environ.get("HARVESTER_LOG_CLEANUP_MODE", "keep").strip().lower()
+)
+if LOG_CLEANUP_MODE not in ("delete", "archive", "keep"):
+    LOG_CLEANUP_MODE = "keep"
+
+# Backward-compat alias — legacy consumers read this bool (True only in
+# delete mode).
+DEFAULT_LOG_CLEANUP_DELETE: bool = LOG_CLEANUP_MODE == "delete"
 
 # Application banner
 APPLICATION_BANNER: str = """
