@@ -2342,20 +2342,62 @@ cull is justified by the data.** Evidence + the two changes that came out of it:
   now takes `dead_threshold` and does count+quarantine in ONE lock
   acquisition. All pinned by tests (web token health 5 new, runtime 2 new;
   suite 1038 OK / 8 skipped).
-- **Deep-review watch items (recorded, not fixed)**: main.log coverage for
-  09-29/09-30 is GONE (the documented in-container-probe log-deletion trap;
-  4 low-volume module logs still hold ~10 MB of deleted inodes and 12 files
-  are >7d old — all self-heal at the next restart); the 6 disabled providers
-  hold 4-7 frozen backup dirs (~400 MB, prune runs only at scan start —
-  self-corrects on re-enable); serpapi pool `searches_left` fell 355k→179k
-  with 228/636 exhausted while only 4 keys were ever client-used (the proxy's
-  quota refresher is live — likely account-side consumption elsewhere; pool
-  still far above the ~486 req/7d client load); 1 runtime config orphan
-  (Oct-1 tavily, startup-only sweep gap); rollback-* dirs accumulate ~16K/
-  deploy (7 now). **Deploy note**: these fixes touch already-imported modules
-  (token_service/state/client) — cp'd to the container WITHOUT restart
-  (triggers are low-frequency: token adds / 401 storms), so they activate at
-  the next natural restart.
+- **Deep-review watch items — ALL CLOSED the same day (user directive: no
+  deferred items, fix at the root)**:
+  * **Log-deletion trap KILLED AT THE ROOT**: `DEFAULT_LOG_CLEANUP_DELETE`
+    (compile-time True) became a tri-state `LOG_CLEANUP_MODE` env
+    (`constant/system.py`): `keep` (DEFAULT — logger init never touches
+    existing files), `delete` / `archive` (legacy CLI fresh-run behaviour,
+    opt-in). A probe process importing the logger can no longer unlink the
+    live app's sinks — the 09-29/09-30 forensic-gap class is structurally
+    impossible now. Web restarts also APPEND main.log across restarts
+    (better forensics); age is bounded by the cleanup below. CLI behaviour
+    change is documented (set HARVESTER_LOG_CLEANUP_MODE=delete for fresh
+    logs per run). Pinned by `tests/test_logger_cleanup_mode.py` (10).
+  * **>7d log accumulation FIXED without relying on restarts**: the web
+    lifespan now owns a daily `_log_cleanup_loop` asyncio task
+    (`web/app.py`, interval env `HARVESTER_LOG_CLEANUP_INTERVAL_SECONDS`,
+    default 86400) re-running `cleanup_old_logs(days=7)`; a failed sweep
+    logs and the loop survives. Pinned by `tests/test_web_log_cleanup_loop.py`
+    (2, wall-clock-bounded per the py3.12 sleep-race lesson). The existing
+    12 stale files + 4 deleted inodes (~10 MB) clear at the 10-09 safe-window
+    restart.
+  * **Frozen-provider backup piles FIXED structurally**: the per-scan prune
+    never ran for disabled providers (6 of them held 4-7 backup dirs,
+    ~400 MB). `PipelineRunner.__init__` now calls
+    `_prune_all_provider_backups()` (delegates to the single-sourced
+    `storage.persistence.prune_backup_dirs`, never raises), so EVERY restart
+    enforces retention across all 22 provider dirs. Pinned by
+    `TestStartupBackupPrune` (3) in test_web_runner_lifecycle.py; the frozen
+    piles themselves are pruned by the 10-09 safe-window restart.
+  * **serpapi `searches_left` drawdown (355k→179k) ROOT-CAUSED — external,
+    not our leak**: the deployed refresher (`serpapi_proxy/app.py
+    _refresher_loop` → `upstream.check_account`) ONLY calls
+    `serpapi.com/account.json`, which is quota-exempt (code re-verified
+    2026-10-09); client forwarding used 4 keys / ~486 req over 7d. The
+    drawdown is account-side consumption by OTHER holders of the same leaked
+    accounts (total_searches_left is account-wide). Pool remains ~370x the
+    client load; no action possible or needed beyond the recorded threshold
+    guidance (re-audit if active <100 or searches_left <10k).
+  * **responses.db 543 MB high-water**: VACUUM'd (~71 MB free pages
+    reclaimed) in the 10-09 safe-window stop phase; the ~470 MB live set is
+    the legitimate 1000-row search-JSON working cache, bounded by the row
+    cap — not a leak, no config change.
+  * **Runtime orphan (Oct-1 tavily) + rollback-dir accumulation + stray
+    empty dir**: orphan swept by the restart's startup sweep; rollback-*
+    pruned to the latest two and the stray `' '` dir removed manually
+    (logged); repo-root .bak files deliberately kept (user-created).
+- **Safe-window restart discipline (10-09 round 2)**: the restart that
+  activates the token-health fixes + the three mechanisms above was NOT taken
+  ad-hoc — a guarded host-side script waits for `run_records` running==0
+  (bounded window, 5-min polls), then `docker compose stop` → VACUUM
+  responses.db (guarded by PRAGMA quick_check, sizes logged) → `docker
+  compose start` → verifies /health, startup log lines (orphan sweep, backup
+  prune, log cleanup) and zero running rows, logging every step to
+  `/home/admin/safe_restart_20261009.log`. Rationale: an immediate restart
+  would have killed the live nvidia (~2h in) + glm-ai runs for fixes whose
+  triggers are low-frequency; the script converts "deferred" into "scheduled
+  with guards".
 
 
 
