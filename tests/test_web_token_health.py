@@ -155,6 +155,53 @@ class TestValidateTokenGh(unittest.TestCase):
         self.assertEqual(status, "invalid")
         self.assertIsNone(expires_at)
 
+    def test_403_rate_limit_remaining_zero_is_unknown(self) -> None:
+        """A1 regression: primary rate limit → transient, NOT token death.
+
+        GitHub answers 403 + x-ratelimit-remaining:0 for a VALID token whose
+        budget is spent; the old blanket 403→invalid rejected it at add-time.
+        """
+        svc = self._svc()
+        with patch(
+            "web.token_service.requests.get",
+            return_value=_resp(403, {"x-ratelimit-remaining": "0"}),
+        ):
+            status, expires_at = svc._validate_token_gh("ghp_spent_budget_ABCDEF")
+        self.assertEqual(status, "unknown")
+        self.assertIsNone(expires_at)
+
+    def test_403_retry_after_header_is_unknown(self) -> None:
+        """A1 regression: secondary rate limit (Retry-After) → unknown."""
+        svc = self._svc()
+        with patch(
+            "web.token_service.requests.get",
+            return_value=_resp(403, {"Retry-After": "60"}),
+        ):
+            status, _ = svc._validate_token_gh("ghp_secondary_RL_ABCDEF")
+        self.assertEqual(status, "unknown")
+
+    def test_403_rate_limit_body_marker_is_unknown(self) -> None:
+        """A1 regression: rate-limit message in the body (no headers) → unknown."""
+        svc = self._svc()
+        body = b'{"message": "API rate limit exceeded for user ID 12345."}'
+        with patch(
+            "web.token_service.requests.get",
+            return_value=_resp(403, {}, body),
+        ):
+            status, _ = svc._validate_token_gh("ghp_primary_RL_ABCDEF")
+        self.assertEqual(status, "unknown")
+
+    def test_403_genuine_forbidden_stays_invalid(self) -> None:
+        """A1 guard: a non-rate-limit 403 (with healthy quota headers) rejects."""
+        svc = self._svc()
+        body = b'{"message": "Resource not accessible by personal access token"}'
+        with patch(
+            "web.token_service.requests.get",
+            return_value=_resp(403, {"x-ratelimit-remaining": "4999"}, body),
+        ):
+            status, _ = svc._validate_token_gh("ghp_forbidden_real_ABCDEF")
+        self.assertEqual(status, "invalid")
+
     def test_transport_error_unknown_does_not_raise(self) -> None:
         svc = self._svc()
         with patch(
@@ -292,6 +339,60 @@ class TestAddTokenValidation(unittest.TestCase):
 
         _run_async(_scenario())
 
+    def test_add_rate_limited_403_stores_with_null_expiry(self) -> None:
+        """A1 regression at the add path: a rate-limited 403 stores, not rejects."""
+        from web.token_service import TokenService
+
+        async def _scenario() -> None:
+            from web.db import init_db
+
+            db_path = _temp_db_path()
+            await init_db(db_path)
+            svc = TokenService(db_path)
+            with patch(
+                "web.token_service.requests.get",
+                return_value=_resp(403, {"x-ratelimit-remaining": "0"}),
+            ):
+                result = await svc.add_token("api", "ghp_rl_window_ABCDEF", label="rl")
+            self.assertIsNone(result["expires_at"])
+            tokens = await svc.list_tokens()
+            self.assertEqual(len(tokens), 1)
+
+        _run_async(_scenario())
+
+    def test_probe_runs_off_event_loop_thread(self) -> None:
+        """A2 regression: the blocking probe must not run on the loop thread.
+
+        The old synchronous ``requests.get`` inside ``async add_token`` froze
+        the whole FastAPI event loop for up to 15 s per token; ``asyncio.
+        to_thread`` must carry the probe to a worker thread.
+        """
+        import threading
+
+        from web.token_service import TokenService
+
+        async def _scenario() -> None:
+            from web.db import init_db
+
+            db_path = _temp_db_path()
+            await init_db(db_path)
+            svc = TokenService(db_path)
+            loop_thread = threading.get_ident()
+            probe_threads: list[int] = []
+
+            def _fake_validate(token_value: str):
+                probe_threads.append(threading.get_ident())
+                return ("valid", None)
+
+            with patch.object(
+                svc, "_validate_token_gh", side_effect=_fake_validate
+            ):
+                await svc.add_token("api", "ghp_thread_check_ABCDEF", label="t")
+            self.assertEqual(len(probe_threads), 1)
+            self.assertNotEqual(probe_threads[0], loop_thread)
+
+        _run_async(_scenario())
+
 
 class TestBulkImportValidation(unittest.TestCase):
     """B. add_tokens_bulk rejects dead (401) tokens into ``dead``."""
@@ -324,6 +425,33 @@ class TestBulkImportValidation(unittest.TestCase):
             tokens = await svc.list_tokens()
             self.assertEqual(len(tokens), 1)
             self.assertIsNotNone(tokens[0]["expires_at"])
+
+        _run_async(_scenario())
+
+    def test_bulk_import_rate_limited_403_not_dead(self) -> None:
+        """A1 regression at the bulk path: rate-limited 403 lines are stored,
+        not rejected into ``dead`` (a rate-limit window must not burn a whole
+        import)."""
+        from web.token_service import TokenService
+
+        async def _scenario() -> None:
+            from web.db import init_db
+
+            db_path = _temp_db_path()
+            await init_db(db_path)
+            svc = TokenService(db_path)
+            with patch(
+                "web.token_service.requests.get",
+                return_value=_resp(403, {"x-ratelimit-remaining": "0"}),
+            ):
+                result = await svc.add_tokens_bulk(
+                    "api", "ghp_rl_bulk_one_ABCDEF\nghp_rl_bulk_two_ABCDEF\n"
+                )
+            self.assertEqual(result["added"], 2)
+            self.assertEqual(result["dead"], [])
+            tokens = await svc.list_tokens()
+            self.assertEqual(len(tokens), 2)
+            self.assertTrue(all(t["expires_at"] is None for t in tokens))
 
         _run_async(_scenario())
 

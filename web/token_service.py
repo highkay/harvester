@@ -11,6 +11,7 @@ Module-level singleton via :func:`get_token_service` (``web/deps.py`` style).
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sqlite3
 from typing import Final
@@ -33,6 +34,20 @@ logger = get_logger("web")
 _GH_VALIDATE_TIMEOUT: Final[float] = 15.0
 _GH_EXPIRY_HEADER: Final[str] = "github-authentication-token-expiration"
 
+# GitHub answers 403 both for genuinely forbidden tokens AND for rate limits
+# (primary: x-ratelimit-remaining=0 "API rate limit exceeded"; secondary/abuse:
+# "secondary rate limit"/"abuse detection"). The harvester routinely runs at
+# the 10 req/min code-search ceiling, so a 403 during a rate-limit window says
+# nothing about the token — treating it as invalid rejected VALID tokens at
+# add-time (deep-review finding 2026-10-09). Same marker set the runtime uses
+# (search/client.py is_rate_limited_content); 401 stays the only hard reject.
+_GH_RATE_LIMIT_MARKERS: Final[tuple[str, ...]] = (
+    "rate limit",
+    "abuse detection",
+    "please wait",
+    "try again later",
+)
+
 
 def _gh_api_proxies() -> dict[str, str] | None:
     """Return a requests ``proxies`` mapping from ``HARVESTER_PROXY``.
@@ -49,6 +64,27 @@ def _gh_api_proxies() -> dict[str, str] | None:
     return {"http": first, "https": first}
 
 
+def _is_rate_limited_403(response: requests.Response) -> bool:
+    """Whether a 403 carries rate-limit signals (→ transient, not token death).
+
+    Header signals first (``retry-after``, ``x-ratelimit-remaining: 0`` — the
+    primary-limit shape), then body markers. ``x-ratelimit-remaining`` is only
+    trusted on the exact "0" value: api.github.com advertises the header on
+    ordinary responses too. Header keys are lower-cased first (real responses
+    use a CaseInsensitiveDict; test doubles use plain dicts).
+    """
+    headers = {str(k).lower(): v for k, v in (response.headers or {}).items()}
+    if headers.get("retry-after"):
+        return True
+    if str(headers.get("x-ratelimit-remaining", "")).strip() == "0":
+        return True
+    # getattr-default instead of a blind try/except (BLE001): a real
+    # Response.text does not raise, and a test double without .text degrades
+    # to "no markers" rather than exploding.
+    text = str(getattr(response, "text", "") or "")[:2000].lower()
+    return any(marker in text for marker in _GH_RATE_LIMIT_MARKERS)
+
+
 class TokenService:
     """Async CRUD service for GitHub tokens stored in SQLite."""
 
@@ -63,9 +99,11 @@ class TokenService:
         """Probe GitHub ``GET /user`` with *token_value* as a Bearer token.
 
         Returns ``("valid", expires_at|None)`` on HTTP 200,
-        ``("invalid", None)`` on 401/403, and ``("unknown", None)`` on any
-        transport or unexpected-status outcome. **Never raises** — token
-        management must not break on a network blip.
+        ``("invalid", None)`` on 401 (and on 403 WITHOUT rate-limit signals),
+        and ``("unknown", None)`` on any transport, rate-limited-403, or
+        unexpected-status outcome. **Never raises** — token management must not
+        break on a network blip, and a rate-limited window must not reject a
+        valid token (both are transient; the runtime cooldown owns 403s).
         """
         try:
             response = requests.get(
@@ -86,7 +124,11 @@ class TokenService:
 
         if response.status_code == 200:
             return ("valid", response.headers.get(_GH_EXPIRY_HEADER))
-        if response.status_code in (401, 403):
+        if response.status_code == 401:
+            return ("invalid", None)
+        if response.status_code == 403:
+            if _is_rate_limited_403(response):
+                return ("unknown", None)
             return ("invalid", None)
         return ("unknown", None)
 
@@ -99,17 +141,21 @@ class TokenService:
     ) -> dict:
         """Encrypt *token_value*, store it, and hot-reload credentials.
 
-        API tokens are validated against GitHub first: a 401/403 rejects the
-        add with ``ValueError`` (never stored); a 200 stores the captured
-        ``expires_at``; an unknown (transport) outcome stores with NULL. Session
-        cookies are not API tokens and skip the probe.
+        API tokens are validated against GitHub first: a 401 (or a 403 without
+        rate-limit signals) rejects the add with ``ValueError`` (never stored);
+        a 200 stores the captured ``expires_at``; an unknown outcome (transport
+        blip, rate-limited 403) stores with NULL. Session cookies are not API
+        tokens and skip the probe. The blocking probe runs off the event loop
+        (``asyncio.to_thread``) so a 15 s timeout can never freeze the web app.
 
         Returns a dict with ``id``, ``token_masked`` and ``expires_at``.
         Raises ``ValueError`` when *token_value* is rejected or duplicates an
         existing hash.
         """
         if token_type == "api":
-            status, token_expiry = self._validate_token_gh(token_value)
+            status, token_expiry = await asyncio.to_thread(
+                self._validate_token_gh, token_value
+            )
             if status == "invalid":
                 raise ValueError(
                     "Token rejected by GitHub (invalid or forbidden): "
@@ -150,9 +196,12 @@ class TokenService:
     ) -> dict:
         """Import tokens from a newline-separated string.
 
-        API-token lines are validated against GitHub one by one: 401/403 lines
-        are rejected into ``dead`` (masked, never stored); 200 lines store their
-        expiry; unknown outcomes store NULL. Session lines skip the probe.
+        API-token lines are validated against GitHub one by one (each probe
+        off the event loop via ``asyncio.to_thread``; sequential on purpose —
+        parallel probes would hammer the shared rate budget): 401 lines (and
+        403s without rate-limit signals) are rejected into ``dead`` (masked,
+        never stored); 200 lines store their expiry; unknown outcomes store
+        NULL. Session lines skip the probe.
 
         Returns ``{"added", "skipped_duplicates", "errors", "dead"}``.
         Hot-reload is called once after all successful inserts.
@@ -176,7 +225,9 @@ class TokenService:
                 already_seen.add(line)
 
                 if token_type == "api":
-                    status, token_expiry = self._validate_token_gh(line)
+                    status, token_expiry = await asyncio.to_thread(
+                        self._validate_token_gh, line
+                    )
                     if status == "invalid":
                         dead.append(mask_token(line))
                         continue
