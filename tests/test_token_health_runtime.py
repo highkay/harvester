@@ -70,6 +70,37 @@ class TestCredentialStateQuarantine(unittest.TestCase):
         self.assertTrue(github_credential_state.is_dead("svc", "cred"))
         self.assertEqual(github_credential_state.mark_strike("svc", "cred"), 1)
 
+    def test_mark_strike_atomic_dead_at_threshold(self) -> None:
+        """A5 regression: dead mark happens INSIDE the strike lock acquisition.
+
+        The old two-call sequence (mark_strike → mark_dead) let a concurrent
+        mark_alive from an in-flight success slip between them and quarantine
+        a token that had just succeeded.
+        """
+        self.assertEqual(
+            github_credential_state.mark_strike("svc", "cred", dead_threshold=3), 1
+        )
+        self.assertFalse(github_credential_state.is_dead("svc", "cred"))
+        self.assertEqual(
+            github_credential_state.mark_strike("svc", "cred", dead_threshold=3), 2
+        )
+        self.assertFalse(github_credential_state.is_dead("svc", "cred"))
+        self.assertEqual(
+            github_credential_state.mark_strike("svc", "cred", dead_threshold=3), 3
+        )
+        # quarantined by the strike call itself — no separate mark_dead
+        self.assertTrue(github_credential_state.is_dead("svc", "cred"))
+        # and its strikes were cleared atomically
+        self.assertIsNone(github_credential_state._strikes.get(("svc", "cred")))
+
+    def test_mark_strike_default_threshold_never_dead(self) -> None:
+        """Backward compat: without dead_threshold, strikes only accumulate."""
+        for expected in range(1, 6):
+            self.assertEqual(
+                github_credential_state.mark_strike("svc", "cred2"), expected
+            )
+        self.assertFalse(github_credential_state.is_dead("svc", "cred2"))
+
     def test_all_dead(self) -> None:
         self.assertFalse(github_credential_state.all_dead("svc", ["a", "b"]))
         github_credential_state.mark_dead("svc", "a")

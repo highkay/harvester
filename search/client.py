@@ -797,17 +797,21 @@ class GitHubClient:
         A revoked PAT answers 401 forever, so after ``_DEAD_401_STRIKES``
         consecutive 401s the credential is marked dead and never handed out
         again for this process lifetime (``tools.credential`` skips it). The
-        mark is process-only — a restart re-admits the token, which re-dies
-        after the same threshold. 403/429 are cooldown concerns and do NOT
-        strike here.
+        strike count and the dead mark happen in ONE ``mark_strike`` lock
+        acquisition (``dead_threshold``) — the old two-call sequence let a
+        concurrent ``mark_alive`` (an in-flight success) slip between them and
+        quarantine a token that had just succeeded. The mark is process-only —
+        a restart re-admits the token, which re-dies after the same threshold.
+        403/429 are cooldown concerns and do NOT strike here.
         """
         service = self._service(url)
         credential = self._credential_from_headers(headers or {}, service)
         if not service or not credential:
             return
-        strikes = github_credential_state.mark_strike(service, credential)
+        strikes = github_credential_state.mark_strike(
+            service, credential, dead_threshold=_DEAD_401_STRIKES
+        )
         if strikes >= _DEAD_401_STRIKES:
-            github_credential_state.mark_dead(service, credential)
             logger.error(
                 f"[github] quarantining credential after {strikes} consecutive "
                 f"401s (revoked/unauthorized): {mask_credential(credential)}"

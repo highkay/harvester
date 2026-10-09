@@ -112,14 +112,28 @@ class GithubCredentialState:
     # Dead-token quarantine (revoked / unauthorized credentials)
     # ------------------------------------------------------------------
 
-    def mark_strike(self, service: str, credential: str) -> int:
-        """Count one consecutive auth failure; return the new strike total."""
+    def mark_strike(
+        self, service: str, credential: str, dead_threshold: "int | None" = None
+    ) -> int:
+        """Count one consecutive auth failure; return the new strike total.
+
+        When *dead_threshold* is given and the strike total reaches it, the
+        credential is quarantined (dead) and its strikes cleared **in the same
+        lock acquisition** — a concurrent ``mark_alive`` from an in-flight
+        success can then never slip between the strike count and the dead mark
+        (deep-review finding 2026-10-09: the two-call sequence raced, and a
+        token that had just succeeded could still be quarantined).
+        """
         if not service or not credential:
             return 0
         with self._lock:
             key = (service, credential)
             strikes = self._strikes.get(key, 0) + 1
-            self._strikes[key] = strikes
+            if dead_threshold is not None and strikes >= dead_threshold:
+                self._dead.add(key)
+                self._strikes.pop(key, None)
+            else:
+                self._strikes[key] = strikes
             return strikes
 
     def mark_dead(self, service: str, credential: str) -> None:
