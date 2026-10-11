@@ -42,7 +42,7 @@ class GrokProvider(OpenAILikeProvider):
                 "base_url": "https://api.x.ai/v1",
                 "completion_path": "/chat/completions",
                 "model_path": "/models",
-                "default_model": "grok-4",
+                "default_model": "grok-4.7",
             },
         )
 

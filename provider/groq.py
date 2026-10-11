@@ -36,7 +36,7 @@ class GroqProvider(OpenAILikeProvider):
                 "base_url": "https://api.groq.com/openai/v1",
                 "completion_path": "/chat/completions",
                 "model_path": "/models",
-                "default_model": "llama-3.3-70b-versatile",
+                "default_model": "qwen/qwen3.8-27b",
             },
         )
 

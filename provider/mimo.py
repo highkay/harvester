@@ -48,7 +48,7 @@ class MiMoProvider(OpenAILikeProvider):
                 "base_url": "https://token-plan-cn.xiaomimimo.com/v1",
                 "completion_path": "/chat/completions",
                 "model_path": "/models",
-                "default_model": "mimo-v2.5-pro",
+                "default_model": "mimo-v2.6-pro",
             },
         )
 

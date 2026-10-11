@@ -197,7 +197,7 @@ class TestDeepSeekProviderCheck(unittest.TestCase):
 
         payload = json.loads(calls[1].kwargs["data"])
         self.assertEqual(payload["max_tokens"], 1)
-        self.assertEqual(payload["model"], "deepseek-v4-flash")
+        self.assertEqual(payload["model"], "deepseek-flash")
         self.assertIn("messages", payload)
 
     def test_check_requests_bypass_proxy(self):

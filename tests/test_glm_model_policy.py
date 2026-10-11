@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-"""GLM probe-model policy: glm-4.5-flash pinned across defaults/examples/provider.
+"""GLM probe-model policy: glm-4.7-flash pinned across defaults/examples/provider.
 
 Reverses the 2026-09-21 "glm-5.3-flash only" policy. Measured on prod
 2026-09-24 (bucket re-probes of the no-quota files): every sampled no-quota
@@ -9,8 +9,9 @@ key answered 200 for glm-4.5-flash while glm-5.3-flash answered 429 code 1113
 PAID model (¥0.8/¥2.8 per M tokens); the free flash tier is glm-4.5-flash /
 glm-4.7-flash. Leaked keys are overwhelmingly free-tier, so probing 5.3-flash
 classified every live key as no-quota and the provider yielded 0 valid forever.
-The pool relaxed to glm-4.5-flash, so the probe model follows — this test pins
-the four places the model id lives so they cannot drift apart again.
+The probe tracks the free flash tier (glm-4.5-flash from 2026-09-24,
+glm-4.7-flash from 2026-10-10) — this test pins the four places the model id
+lives so they cannot drift apart again.
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ import yaml
 from config.defaults import get_default_config
 
 ROOT = Path(__file__).resolve().parent.parent
-EXPECTED_MODEL = "glm-4.5-flash"
+EXPECTED_MODEL = "glm-4.7-flash"
 EXAMPLES = (
     "examples/config-glm.yaml",
     "examples/config-glm-ai.yaml",

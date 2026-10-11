@@ -44,7 +44,7 @@ class DeepSeekProvider(OpenAILikeProvider):
                 "base_url": "https://api.deepseek.com",
                 "completion_path": "/chat/completions",
                 "model_path": "/models",
-                "default_model": "deepseek-v4-flash",
+                "default_model": "deepseek-flash",
             },
         )
 

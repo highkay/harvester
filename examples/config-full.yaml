@@ -360,7 +360,7 @@ tasks:
       base_url: https://api.groq.com/openai/v1
       completion_path: /chat/completions
       model_path: /models
-      default_model: llama-3.3-70b-versatile
+      default_model: qwen/qwen3.8-27b
       auth_key: Authorization
       extra_headers: {}
       api_version: ""
@@ -397,7 +397,7 @@ tasks:
       base_url: https://api.x.ai/v1
       completion_path: /chat/completions
       model_path: /models
-      default_model: grok-4
+      default_model: grok-4.7
       auth_key: Authorization
       extra_headers: {}
       api_version: ""
@@ -560,7 +560,7 @@ tasks:
       base_url: https://api.deepseek.com
       completion_path: /chat/completions
       model_path: /models
-      default_model: deepseek-v4-flash
+      default_model: deepseek-flash
       auth_key: Authorization
       extra_headers: {}
       api_version: ""
@@ -669,7 +669,7 @@ tasks:
       base_url: https://open.bigmodel.cn/api/paas/v4
       completion_path: /chat/completions
       model_path: ""
-      default_model: glm-4.5-flash
+      default_model: glm-4.7-flash
       auth_key: Authorization
       extra_headers: {}
       api_version: ""
