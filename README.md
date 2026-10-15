@@ -838,11 +838,10 @@ pipeline into a long-running service:
   tavily scan completes, validated keys are batch-pushed to a tavily-hikari
   style pool (`POST {base}/api/keys/batch`; requires both
   `TAVILY_PROXY_BASE_URL` and `TAVILY_PROXY_AUTH_KEY` to be set).
-- **Automatic push to SerpApi key pool** — after each serpapi scan completes,
-  validated keys are auto-pushed to a configured key-pool service (requires
-  both `SERPAPI_PROXY_BASE_URL` and `SERPAPI_PROXY_AUTH_KEY` to be set; the
-  pool endpoint is a standalone serpapi-proxy: `POST {base}/api/keys` with a
-  Bearer master key).
+- **Automatic push to SerpApi key pool (tavily-hikari)** — after each serpapi
+  scan completes, validated keys are auto-pushed to the tavily-hikari key pool
+  (`POST {base}/api/keys` with `provider: serpapi`; requires both
+  `SERPAPI_PROXY_BASE_URL` and `SERPAPI_PROXY_AUTH_KEY` to be set).
 - **Automatic push to gpt-load (Agnes AI)**: after each agnes-ai scan
   completes, validated `sk-` keys auto-push to the configured gpt-load group
   via `AGNES_LOAD_BASE_URL` / `AGNES_LOAD_GROUP_ID` / `AGNES_LOAD_AUTH_KEY`
@@ -873,8 +872,8 @@ pipeline into a long-running service:
 | `GPT_LOAD_AUTH_KEY` | empty | gpt-load management auth key |
 | `TAVILY_PROXY_BASE_URL` | empty | tavily-hikari (or compatible) key-pool address |
 | `TAVILY_PROXY_AUTH_KEY` | empty | Bearer auth value sent to that pool |
-| `SERPAPI_PROXY_BASE_URL` | empty | SerpApi key-pool service address |
-| `SERPAPI_PROXY_AUTH_KEY` | empty | Master key for that SerpApi key-pool service |
+| `SERPAPI_PROXY_BASE_URL` | empty | tavily-hikari (or compatible) key-pool address |
+| `SERPAPI_PROXY_AUTH_KEY` | empty | Bearer auth value sent to that pool |
 | `AGNES_LOAD_BASE_URL` | `http://107.172.141.203:43001` | gpt-load instance base URL for agnes-ai push |
 | `AGNES_LOAD_GROUP_ID` | `19` | gpt-load group to push agnes-ai keys into |
 | `AGNES_LOAD_AUTH_KEY` | empty | gpt-load management auth key for agnes-ai push (empty sends no `Authorization` header) |

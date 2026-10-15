@@ -825,7 +825,7 @@ sequenceDiagram
 - **定时扫描** — 每个 provider 独立的 cron 调度（默认每日 `0 3 * * *`，APScheduler 驱动）；支持页面"立即运行"；防重叠锁。
 - **自动推送到 gpt-load** — 扫描完成后，验证通过的 key 自动推送到 gpt-load 实例的对应分组（`POST /api/keys/add-multiple`，幂等去重）。每个任务的推送目标（实例地址 + 分组 + `max_size` 单批上限，默认 10000）均可在页面配置。
 - **自动推送到 Tavily key 池（tavily-hikari）** — 每次 tavily 扫描完成后，验证通过的 key 自动批量推送到 tavily-hikari 风格的 key 池（`POST {base}/api/keys/batch`；需同时设置 `TAVILY_PROXY_BASE_URL` 与 `TAVILY_PROXY_AUTH_KEY`）。
-- **自动推送到 SerpApi key 池** — 每次 serpapi 扫描完成后，验证通过的 key 自动推送到配置好的 key 池服务（需同时设置 `SERPAPI_PROXY_BASE_URL` 与 `SERPAPI_PROXY_AUTH_KEY`；池端点为独立的 serpapi-proxy 服务：`POST {base}/api/keys`，Bearer master key）。
+- **自动推送到 SerpApi key 池（tavily-hikari）** — 每次 serpapi 扫描完成后，验证通过的 key 自动推送到 tavily-hikari key 池（`POST {base}/api/keys` 带 `provider: serpapi`；需同时设置 `SERPAPI_PROXY_BASE_URL` 与 `SERPAPI_PROXY_AUTH_KEY`）。
 - **自举 Self-bootstrap** — `github` 扫描完成后，验证通过的 GitHub API token 会自动导入本实例自身的 token 存储（`label='harvester-bootstrap'`），让实例逐步扩充自己的搜索凭据池。首次扫描仍需至少一个种子 token（环境变量 `GITHUB_TOKENS` 或通过 Token API 提供）。
 - **Jinja2 管理界面** — 仪表盘、Token 管理、推送配置、调度管理、运行历史、推送日志。单一共享认证密钥（`WEB_AUTH_KEY`）：界面用会话 cookie 登录，API 用 Bearer Token。
 
@@ -840,8 +840,8 @@ sequenceDiagram
 | `GPT_LOAD_AUTH_KEY` | 空 | gpt-load 管理凭据 |
 | `TAVILY_PROXY_BASE_URL` | 空 | tavily-hikari（或兼容）key 池地址 |
 | `TAVILY_PROXY_AUTH_KEY` | 空 | 发往该池的 Bearer 认证值 |
-| `SERPAPI_PROXY_BASE_URL` | 空 | SerpApi key 池服务地址 |
-| `SERPAPI_PROXY_AUTH_KEY` | 空 | 该 SerpApi key 池服务的 Master Key |
+| `SERPAPI_PROXY_BASE_URL` | 空 | tavily-hikari（或兼容）key 池地址 |
+| `SERPAPI_PROXY_AUTH_KEY` | 空 | 发往该池的 Bearer 认证值 |
 | `HARVESTER_WORKSPACE` | `./data` | 工作目录（provider 结果） |
 | `HARVESTER_DB_PATH` | `<workspace>/harvester.db` | SQLite 数据库路径 |
 | `HARVESTER_SELF_BOOTSTRAP` | `1` | `github` 扫描后把验证通过的 GitHub token 自动导入本实例的 token 存储（自举；设为 `0` 关闭） |
