@@ -1,16 +1,23 @@
 #!/usr/bin/env python3
 
 """Tavily push service — reads tavily valid-keys.txt after a scan completes and
-pushes each validated key to a TavilyProxyManager instance via HTTP API.
+pushes each validated key into a tavily-hikari style key pool via
+``POST {base}/api/keys/batch``.
 
 Called synchronously from a background thread (``PipelineRunner._on_completed``),
 so all DB and HTTP access is synchronous (``sqlite3`` + ``requests``).
 
 Deliberately mirrors ``web.push.PushService`` (gpt-load flow) but stays a
-separate module: the TavilyProxyManager API is per-key ``POST /api/keys`` (no
-batch endpoint), auth comes from ``TAVILY_PROXY_BASE_URL`` /
-``TAVILY_PROXY_AUTH_KEY`` env vars, and results land in the shared
-``push_logs`` table with ``gpt_load_config_id=0`` / ``group_id=0``.
+separate module: the pool exposes the hikari batch endpoint (Tavily-only per
+its API reference), auth comes from ``TAVILY_PROXY_BASE_URL`` /
+``TAVILY_PROXY_AUTH_KEY`` env vars, and results land in the shared ``push_logs``
+table with ``gpt_load_config_id=0`` / ``group_id=0``.
+
+Batch accounting folds the per-item ``status`` values — ``created`` /
+``undeleted`` count as added, ``existed`` / ``duplicate_in_input`` as ignored,
+``failed`` (or an unknown status) as a failure carrying the item's ``error``
+text. Chunks of ``_BATCH_CHUNK_SIZE`` stay under the server's 1000-item limit;
+resubmitting a chunk is idempotent because the endpoint is add-or-undelete.
 
 The ~60-line duplication of the read/write helpers is intentional (plan
 mandate: do NOT extract a shared base class, do NOT touch ``web/push.py``),
@@ -42,8 +49,9 @@ _TIMEOUT_SECONDS: int = 30
 _MAX_RETRIES: int = 3
 _RETRY_BACKOFF_BASE: float = 1.0  # seconds
 _RETRY_BACKOFF_MULTIPLIER: float = 3.0
+_BATCH_CHUNK_SIZE: int = 500  # server-side API_KEYS_BATCH_LIMIT is 1000
 
-_UNAUTHORIZED_MESSAGE: str = "unauthorized (invalid master key)"
+_UNAUTHORIZED_MESSAGE: str = "unauthorized (admin auth rejected)"
 
 # ---------------------------------------------------------------------------
 # TavilyPushService
@@ -51,14 +59,14 @@ _UNAUTHORIZED_MESSAGE: str = "unauthorized (invalid master key)"
 
 
 class TavilyPushService:
-    """Service that pushes validated tavily keys to a TavilyProxyManager.
+    """Service that pushes validated tavily keys to a tavily-hikari key pool.
 
     Lifecycle:
         1. ``push_valid_keys(provider, run_id)`` — called from scan thread
         2. Skips unless provider == "tavily" and env is configured
         3. Reads valid-keys.txt from the workspace providers dir
         4. Pre-filters to ``tvly-`` prefixed keys; other lines count as ignored
-        5. POSTs each key to ``{base}/api/keys`` with retry on 429/5xx
+        5. POSTs ``api_keys`` chunks to ``{base}/api/keys/batch`` (retry 429/5xx)
         6. Writes one result row to ``push_logs``
     """
 
@@ -92,7 +100,7 @@ class TavilyPushService:
     # ------------------------------------------------------------------
 
     def push_valid_keys(self, provider_name: str, run_id: str) -> None:
-        """Read valid-keys.txt and push each tvly- key to TavilyProxyManager.
+        """Read valid-keys.txt and push tvly- keys to the configured key pool.
 
         Called by ``PipelineRunner._on_completed`` in a background thread.
         All errors are caught and logged; the method never raises.
@@ -143,28 +151,42 @@ class TavilyPushService:
                 else:
                     ignored_count += 1
 
-            url = f"{self._base_url.rstrip('/')}/api/keys"
+            url = f"{self._base_url.rstrip('/')}/api/keys/batch"
 
-            # 5. Push each key serially
             added_count = 0
             failures = 0
             errors: list[str] = []
             unauthorized = False
 
-            for key in tvly_keys:
-                outcome, error = self._push_key(url, key)
-                if outcome == "added":
-                    added_count += 1
-                elif outcome == "ignored":
-                    ignored_count += 1
-                elif outcome == "unauthorized":
+            # 5. Push keys in batch chunks (server-side limit: 1000 items)
+            for start in range(0, len(tvly_keys), _BATCH_CHUNK_SIZE):
+                chunk = tvly_keys[start : start + _BATCH_CHUNK_SIZE]
+                outcome, data, error = self._push_chunk(url, chunk)
+
+                if outcome == "unauthorized":
                     unauthorized = True
                     errors.append(error or _UNAUTHORIZED_MESSAGE)
-                    break  # fail-fast: stop pushing remaining keys
-                else:
-                    failures += 1
+                    break  # fail-fast: stop pushing remaining chunks
+
+                if outcome != "ok" or data is None:
+                    failures += len(chunk)
                     if error:
                         errors.append(error)
+                    continue
+
+                chunk_added, chunk_ignored, chunk_failed, chunk_errors = (
+                    self._tally_results(data)
+                )
+                added_count += chunk_added
+                ignored_count += chunk_ignored
+                failures += chunk_failed
+                errors.extend(chunk_errors)
+
+                accounted = chunk_added + chunk_ignored + chunk_failed
+                if accounted < len(chunk):
+                    missing = len(chunk) - accounted
+                    failures += missing
+                    errors.append(f"{missing} batch item(s) missing from response")
 
             # 6. Derive status
             if unauthorized:
@@ -248,19 +270,21 @@ class TavilyPushService:
                 keys.append(stripped)
         return keys
 
-    def _push_key(self, url: str, key: str) -> tuple[str, str | None]:
-        """POST a single key to ``{base}/api/keys`` with retry on 429/5xx.
+    def _push_chunk(
+        self, url: str, keys: list[str]
+    ) -> tuple[str, dict[str, Any] | None, str | None]:
+        """POST one ``api_keys`` chunk to ``{base}/api/keys/batch``.
 
-        Returns ``(outcome, error_message)`` where outcome is one of:
-        ``"added"`` (200), ``"ignored"`` (400 create_failed / invalid_key_format),
-        ``"unauthorized"`` (401, fail-fast), ``"failed"`` (other 4xx, retry
-        exhaustion, unexpected errors).
+        Retries on 429/5xx and transport errors. Returns
+        ``(outcome, data, error_message)`` with outcome ``"ok"`` (HTTP 200 with
+        a batch envelope), ``"unauthorized"`` (401/403, fail-fast) or
+        ``"failed"`` (everything else, including retry exhaustion).
         """
         headers = {
             "Authorization": f"Bearer {self._auth_key}",
             "Content-Type": "application/json",
         }
-        body: dict[str, str] = {"key": key, "alias": "harvester"}
+        body: dict[str, Any] = {"api_keys": keys}
 
         last_error: str | None = None
 
@@ -271,29 +295,27 @@ class TavilyPushService:
                 )
 
                 if resp.status_code == 200:
-                    return "added", None
+                    data = self._batch_payload(resp)
+                    if data is None:
+                        return (
+                            "failed",
+                            None,
+                            f"HTTP 200: unparseable batch response: "
+                            f"{resp.text[:200]}",
+                        )
+                    return "ok", data, None
 
-                if resp.status_code == 401:
-                    return "unauthorized", _UNAUTHORIZED_MESSAGE
-
-                if resp.status_code == 400:
-                    error = self._response_error(resp)
-                    if error in ("create_failed", "invalid_key_format"):
-                        return "ignored", None
-                    last_error = f"HTTP 400: {error or resp.text[:200]}"
-                    return "failed", last_error
-
-                if resp.status_code in (402, 403, 404):
-                    last_error = f"HTTP {resp.status_code}: {resp.text[:200]}"
-                    return "failed", last_error
+                if resp.status_code in (401, 403):
+                    return "unauthorized", None, _UNAUTHORIZED_MESSAGE
 
                 if resp.status_code == 429 or resp.status_code >= 500:
                     last_error = f"HTTP {resp.status_code}: {resp.text[:200]}"
                     # fall through to retry
                 else:
-                    # Other unexpected 4xx — non-retryable failure
+                    # Other unexpected 4xx (400 too_many_items, 409 conflict…) —
+                    # non-retryable failure
                     last_error = f"HTTP {resp.status_code}: {resp.text[:200]}"
-                    return "failed", last_error
+                    return "failed", None, last_error
 
             except requests.ConnectionError as exc:
                 last_error = f"ConnectionError: {exc}"
@@ -314,18 +336,39 @@ class TavilyPushService:
                 )
                 time.sleep(delay)
 
-        return "failed", last_error or "Unknown error"
+        return "failed", None, last_error or "Unknown error"
 
     @staticmethod
-    def _response_error(resp: Any) -> str | None:
-        """Extract the ``error`` field from a JSON response body, if present."""
+    def _batch_payload(resp: Any) -> dict[str, Any] | None:
+        """Return the response body when it looks like a batch envelope."""
         try:
             data = resp.json()
         except Exception:
             return None
-        if isinstance(data, dict):
-            return data.get("error")
+        if isinstance(data, dict) and isinstance(data.get("results"), list):
+            return data
         return None
+
+    @staticmethod
+    def _tally_results(data: dict[str, Any]) -> tuple[int, int, int, list[str]]:
+        """Fold per-item batch statuses into (added, ignored, failed, errors)."""
+        added = 0
+        ignored = 0
+        failures = 0
+        errors: list[str] = []
+        for item in data["results"]:
+            status = item.get("status") if isinstance(item, dict) else None
+            if status in ("created", "undeleted"):
+                added += 1
+            elif status in ("existed", "duplicate_in_input"):
+                ignored += 1
+            else:
+                failures += 1
+                message = item.get("error") if isinstance(item, dict) else None
+                errors.append(
+                    str(message) if message else f"batch item status={status!r}"
+                )
+        return added, ignored, failures, errors
 
     def _write_push_log(
         self,
