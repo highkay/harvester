@@ -601,9 +601,9 @@ class PipelineRunner:
 
         The generic ``provider_group_mapping`` gpt-load push runs for ALL
         providers; the dedicated services (tavily / github self-bootstrap /
-        serpapi / agnes-ai / modelscope / opencode) gate on their own provider
-        name internally. Each push runs in a daemon thread; import failures
-        and service errors are logged, never raised.
+        serpapi / agnes-ai / modelscope / opencode / brave) gate on their own
+        provider name internally. Each push runs in a daemon thread; import
+        failures and service errors are logged, never raised.
         """
         try:
             from web.push import get_push_service  # type: ignore[import-untyped,unused-ignore]
@@ -808,6 +808,36 @@ class PipelineRunner:
         except Exception as exc:
             logger.error(
                 f"OpenCode push hook error: provider={provider_name} "
+                f"run_id={run_id} error={exc}"
+            )
+
+        # Brave push — symmetric to the opencode block above. Only fires for
+        # brave scans; env gating lives inside BravePushService (it no-ops
+        # when BRAVE_PROXY_BASE_URL is unset; BRAVE_PROXY_AUTH_KEY is optional
+        # because the prod pool runs DEV_OPEN_ADMIN=true).
+        try:
+            from web.brave_push import get_brave_push_service  # type: ignore[import-untyped,unused-ignore]
+
+            if provider_name == "brave":
+                brave_push_service = get_brave_push_service()
+                # Run push in a new thread to avoid blocking the completion callback
+                t = threading.Thread(
+                    target=brave_push_service.push_valid_keys,
+                    args=(provider_name, run_id),
+                    daemon=True,
+                )
+                t.start()
+                logger.info(
+                    f"Brave push triggered: provider={provider_name} run_id={run_id}"
+                )
+        except ImportError:
+            logger.info(
+                f"Brave push service not available: "
+                f"provider={provider_name} run_id={run_id}"
+            )
+        except Exception as exc:
+            logger.error(
+                f"Brave push hook error: provider={provider_name} "
                 f"run_id={run_id} error={exc}"
             )
 
