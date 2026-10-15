@@ -71,6 +71,7 @@ services:
       # (429 'blocked due to excessive requests', measured 2026-09-22);
       # keep tavily on 1090/1091. Empty = inherit HARVESTER_PROXY.
       - HARVESTER_PROXY_TAVILY=${HARVESTER_PROXY_TAVILY:-}
+      - HARVESTER_PROXY_BRAVE=${HARVESTER_PROXY_BRAVE:-socks5h://192.168.1.18:1080,socks5h://192.168.1.18:1090,socks5h://192.168.1.18:1091}  # socks5h = remote DNS; direct blocked, plain socks5 DNS-poisoned (t8-egress.md)
       # --- Timezone ---
       - TZ=Asia/Shanghai
     healthcheck:
