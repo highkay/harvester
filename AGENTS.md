@@ -2401,6 +2401,48 @@ cull is justified by the data.** Evidence + the two changes that came out of it:
 
 
 
+## Feature: tavily + serpapi pushes now feed tavily-hikari (2026-10-15)
+
+User-directed migration (scope confirmed: BOTH providers): the harvester's
+tavily and serpapi pushes now target the **tavily-hikari** multi-provider pool
+on fnos (`http://192.168.1.18:8787`; container `tavily-hikari`, image
+`ghcr.io/highkay/tavily-hikari:latest`, `DEV_OPEN_ADMIN=true`). Env names are
+unchanged — all four `TAVILY_PROXY_*` / `SERPAPI_PROXY_*` vars in fnos and
+workstation `.env` point at hikari with the shared `th-…` client token (token
+only ever in gitignored `.env` / runtime env, never in git). The OLD targets
+are no longer fed: TavilyProxyManager (rq `192.168.1.11:48080`) and the
+standalone serpapi-proxy (fnos `48081`, 647-key pool still serving).
+
+- **Contracts** (from `F:\git\tavily-hikari\docs\api-reference.md`, 1394 lines,
+  source-cited to HEAD `2024b562`; the deployed build
+  `0.0.0-fork.20261014.2024b56` is that SHA):
+  * tavily: `POST {base}/api/keys/batch`, body `{"api_keys":[...]}` — batch is
+    Tavily-only; a present `items` key beats `api_keys`; limit 1000 → chunk
+    500; HTTP 200 + per-item `status` (created/undeleted → added,
+    existed/duplicate_in_input → ignored, failed → failure with `error`); a 200
+    covering fewer items than submitted counts the missing as failures.
+  * serpapi: per-key `POST {base}/api/keys` body `{"api_key":...,
+    "provider":"serpapi"}`; add-or-undelete → **201 for both new and existing**
+    (measured) → net-new via the provider-scoped total delta around the loop;
+    unreadable totals fall back to accepted-count + a note in
+    `push_logs.error_message`.
+  * Auth: the admin realm has NO Bearer channel; `DEV_OPEN_ADMIN=true` makes
+    admin calls credential-free (the `th-…` token is a client search token —
+    `GET /api/tavily/usage` 200 — and the Bearer header is ignored today). If
+    the instance switches to builtin/forward-auth admin, pushes will 403 →
+    push_logs failed until the harness sends the right credential.
+- **Deployed 2026-10-15 (`205656c`)**: recreate for env + whole-tree cp +
+  restart; md5 host↔container MATCH for `web/tavily_push.py` /
+  `web/serpapi_push.py`; `/health` ok; the live tavily run was reconciled
+  `failed: interrupted by service restart` and pushed through the NEW service
+  (startup recovery `added=20`, hikari tavily 2040→2060; idempotent manual
+  re-push `added=0`); serpapi's last run backfilled (`added=213`; hikari
+  serpapi 415→628 — the migration had left 213 keys unpooled). Evidence:
+  `.omo/evidence/ulw-hikari-push/`.
+- **Watch**: the TavilyProxyManager/tavily-proxy ops sections above describe the
+  OLD target (history — do not apply to hikari). `docker compose cp` overlay +
+  restart discipline unchanged.
+
 - Run: `python -m unittest discover -s tests`. **Measured baseline 2026-09-28
   (workstation, at `638fe74`): 932 OK / 8 skipped** — includes the
   restart-lifecycle + disk-bounds tests added that day. The 2026-09-24 baseline was
