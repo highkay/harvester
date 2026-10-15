@@ -9,6 +9,7 @@ from .anthropic import AnthropicProvider
 from .azure import AzureOpenAIProvider
 from .base import AIBaseProvider
 from .bedrock import BedrockProvider
+from .brave import BraveProvider
 from .cerebras import CerebrasProvider
 from .doubao import DoubaoProvider
 from .gemini import GeminiProvider
@@ -41,6 +42,7 @@ __all__ = [
     "AnthropicProvider",
     "AzureOpenAIProvider",
     "BedrockProvider",
+    "BraveProvider",
     "CerebrasProvider",
     "DoubaoProvider",
     "GeminiProvider",
