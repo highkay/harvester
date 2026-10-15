@@ -161,6 +161,10 @@ _DEFAULT_SCHEDULES: tuple[tuple[str, str, str], ...] = (
     # push statistics and schedules together). Daily at staggered hours —
     # region-specific keys are low churn, so once a day is sufficient.
     ("glm-ai", "0 13 * * *", "examples/config-glm-ai.yaml"),
+    # Brave Search — daily at 15:00 (no day-of-week field: the seed stays
+    # daily regardless of any supply probe; adjust the prod row, not this
+    # seed, if a probe shows saturation).
+    ("brave", "0 15 * * *", "examples/config-brave.yaml"),
     # 2026-09-24: the four below moved out of the 14:00-17:00 Beijing window.
     # Measured on prod: the GitHub token-cooldown storm concentrates at
     # 10:00-16:00 Beijing (4529 warnings on 2026-09-24) while the morning

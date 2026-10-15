@@ -29,6 +29,9 @@ services:
       # --- SerpApi push service ---
       - SERPAPI_PROXY_BASE_URL=${SERPAPI_PROXY_BASE_URL:-}
       - SERPAPI_PROXY_AUTH_KEY=${SERPAPI_PROXY_AUTH_KEY:-}
+      # --- Brave push service ---
+      - BRAVE_PROXY_BASE_URL=${BRAVE_PROXY_BASE_URL:-}
+      - BRAVE_PROXY_AUTH_KEY=${BRAVE_PROXY_AUTH_KEY:-}
       # --- Admission control (web/scheduler.py; take effect on RECREATE, not
       # restart — container env is frozen at creation). Defaults match the code:
       # 6 concurrent runs, 30 min deferral ladder, 6 retries (3 h). 0 disables

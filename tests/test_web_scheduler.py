@@ -71,6 +71,7 @@ class TestSeedData(unittest.TestCase):
             "qwen-intl",
             "glm",
             "glm-ai",
+            "brave",
             "modelscope",
             "tavily",
             "github",
@@ -109,6 +110,9 @@ class TestSeedData(unittest.TestCase):
         "serpapi": "0 6 * * mon,wed,fri",
         "agnes-ai": "0 10 * * tue,fri",
         "glm-ai": "0 13 * * *",
+        # Brave Search: daily 15:00 — NO day-of-week field on purpose (the
+        # seed stays daily; a supply probe may only adjust the prod row).
+        "brave": "0 15 * * *",
         # 2026-09-24: moved off the 14:00-17:00 Beijing window — measured prod
         # token-cooldown storm concentrated at 10:00-16:00 Beijing (4529
         # warnings on 2026-09-24), which starved these four providers' search
@@ -135,6 +139,7 @@ class TestSeedData(unittest.TestCase):
         "serpapi": "examples/config-serpapi.yaml",
         "agnes-ai": "examples/config-agnes-ai.yaml",
         "glm-ai": "examples/config-glm-ai.yaml",
+        "brave": "examples/config-brave.yaml",
         "kimi-ai": "examples/config-kimi-ai.yaml",
         "kimi-coding": "examples/config-kimi-coding.yaml",
         "mimo-sg": "examples/config-mimo-sg.yaml",
