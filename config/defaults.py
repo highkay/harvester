@@ -422,6 +422,77 @@ def get_default_config() -> Dict[str, Any]:
                 },
             },
             {
+                "name": "brave",
+                "enabled": False,
+                "provider_type": "brave",
+                "use_api": True,
+                "max_pages": 1000,
+                "stages": {
+                    "search": True,
+                    "gather": True,
+                    "check": True,
+                    "inspect": True,
+                },
+                "extras": {},
+                "api": {
+                    "base_url": "https://api.search.brave.com",
+                    "completion_path": "/res/v1/web/search",
+                    "model_path": "/res/v1/web/search",
+                    "default_model": "brave-search",
+                    "auth_key": "X-Subscription-Token",
+                    "extra_headers": {},
+                    "api_version": "",
+                    "timeout": 30,
+                    "retries": 3,
+                },
+                "patterns": {
+                    # Env-anchored extraction only: no width ceiling and no
+                    # prefix assumption (BSA prefix unverified - measured
+                    # corpus first, then align; serpapi/modelscope house rule).
+                    "key_pattern": (
+                        r'(?i)(?:brave[_-]?(?:search[_-]?)?api[_-]?key|'
+                        r'brave[_-]?(?:subscription[_-]?)?token)'
+                        r'["\'\]]{0,2}\s*[:=]\s*["\']?([A-Za-z0-9_\-]{16,})["\']?'
+                    ),
+                    "address_pattern": "",
+                    "endpoint_pattern": "",
+                    "model_pattern": "",
+                },
+                "conditions": [
+                    {"query": '"BRAVE_API_KEY"'},
+                    {"query": '"BRAVE_SEARCH_API_KEY"'},
+                    {
+                        "query": '"api.search.brave.com"',
+                        # Domain/header context: allow the token-header forms
+                        # a plain assignment anchor would miss.
+                        "patterns": {
+                            "key_pattern": (
+                                r'(?i)(?:X-Subscription-Token["\'\s:]*|Bearer\s+|'
+                                r'["\']\s*)(?!x-subscription-token)([A-Za-z0-9_\-]{20,})'
+                            )
+                        },
+                    },
+                    {
+                        "query": '"X-Subscription-Token" "brave"',
+                        "patterns": {
+                            "key_pattern": (
+                                r'(?i)(?:X-Subscription-Token["\'\s:]*|Bearer\s+|'
+                                r'["\']\s*)(?!x-subscription-token)([A-Za-z0-9_\-]{20,})'
+                            )
+                        },
+                    },
+                    {"query": '"brave" "subscription token" extension:env'},
+                ],
+                # Lockstep with the hardened providers (tavily/kimi lineage):
+                # 0.2 req/s = 1 per 5 s. Keep lockstep with
+                # examples/config-brave.yaml.
+                "rate_limit": {"base_rate": 0.2, "burst_limit": 2, "adaptive": True},
+                "storage": {
+                    "directory": "",
+                    "plan": "",
+                },
+            },
+            {
                 "name": "serpapi",
                 "enabled": False,
                 "provider_type": "serpapi",
