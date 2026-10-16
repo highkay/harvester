@@ -32,6 +32,9 @@ services:
       # --- Brave push service ---
       - BRAVE_PROXY_BASE_URL=${BRAVE_PROXY_BASE_URL:-}
       - BRAVE_PROXY_AUTH_KEY=${BRAVE_PROXY_AUTH_KEY:-}
+      # --- Exa push service ---
+      - EXA_PROXY_BASE_URL=${EXA_PROXY_BASE_URL:-}
+      - EXA_PROXY_AUTH_KEY=${EXA_PROXY_AUTH_KEY:-}
       # --- Admission control (web/scheduler.py; take effect on RECREATE, not
       # restart — container env is frozen at creation). Defaults match the code:
       # 6 concurrent runs, 30 min deferral ladder, 6 retries (3 h). 0 disables
@@ -72,6 +75,10 @@ services:
       # keep tavily on 1090/1091. Empty = inherit HARVESTER_PROXY.
       - HARVESTER_PROXY_TAVILY=${HARVESTER_PROXY_TAVILY:-}
       - HARVESTER_PROXY_BRAVE=${HARVESTER_PROXY_BRAVE:-socks5h://192.168.1.18:1080,socks5h://192.168.1.18:1090,socks5h://192.168.1.18:1091}  # socks5h = remote DNS; direct blocked, plain socks5 DNS-poisoned (t8-egress.md)
+      # Exa override — T2 measured api.exa.ai reachable on EVERY path (direct
+      # + socks5/socks5h trio; bogus key → exact 401 everywhere), so NO proxy
+      # pin is needed. Empty = inherit HARVESTER_PROXY.
+      - HARVESTER_PROXY_EXA=${HARVESTER_PROXY_EXA:-}
       # --- Timezone ---
       - TZ=Asia/Shanghai
     healthcheck:

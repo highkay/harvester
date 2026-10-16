@@ -56,7 +56,7 @@ class TestCronValidation(unittest.TestCase):
 class TestSeedData(unittest.TestCase):
     """Given an empty schedule_config table,
     When init_scheduler is called,
-    Then 18 default provider schedules are inserted.
+    Then 21 default provider schedules are inserted.
     """
 
     _EXPECTED_PROVIDERS = frozenset(
@@ -72,6 +72,7 @@ class TestSeedData(unittest.TestCase):
             "glm",
             "glm-ai",
             "brave",
+            "exa",
             "modelscope",
             "tavily",
             "github",
@@ -113,6 +114,9 @@ class TestSeedData(unittest.TestCase):
         # Brave Search: daily 15:00 — NO day-of-week field on purpose (the
         # seed stays daily; a supply probe may only adjust the prod row).
         "brave": "0 15 * * *",
+        # Exa Search: daily 16:00 — one hour behind brave's 15:00 firing;
+        # NO day-of-week field on purpose (same daily-seed policy).
+        "exa": "0 16 * * *",
         # 2026-09-24: moved off the 14:00-17:00 Beijing window — measured prod
         # token-cooldown storm concentrated at 10:00-16:00 Beijing (4529
         # warnings on 2026-09-24), which starved these four providers' search
@@ -140,6 +144,7 @@ class TestSeedData(unittest.TestCase):
         "agnes-ai": "examples/config-agnes-ai.yaml",
         "glm-ai": "examples/config-glm-ai.yaml",
         "brave": "examples/config-brave.yaml",
+        "exa": "examples/config-exa.yaml",
         "kimi-ai": "examples/config-kimi-ai.yaml",
         "kimi-coding": "examples/config-kimi-coding.yaml",
         "mimo-sg": "examples/config-mimo-sg.yaml",
@@ -173,7 +178,7 @@ class TestSeedData(unittest.TestCase):
                 settings = _make_settings(db_path)
                 svc = await init_scheduler(settings)
 
-                # -- Then: 19 default rows inserted --
+                # -- Then: 21 default rows inserted --
                 db2 = await get_db(db_path)
                 cursor2 = await db2.execute(
                     "SELECT provider_name, cron_expression, enabled, config_file "

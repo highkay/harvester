@@ -165,6 +165,11 @@ _DEFAULT_SCHEDULES: tuple[tuple[str, str, str], ...] = (
     # daily regardless of any supply probe; adjust the prod row, not this
     # seed, if a probe shows saturation).
     ("brave", "0 15 * * *", "examples/config-brave.yaml"),
+    # Exa Search — daily at 16:00, one hour behind brave's 15:00 firing so
+    # the two daily GitHub-search scans never collide on the shared token
+    # pool. No day-of-week field: the seed stays daily; adjust the prod row,
+    # not this seed, if a supply probe shows saturation.
+    ("exa", "0 16 * * *", "examples/config-exa.yaml"),
     # 2026-09-24: the four below moved out of the 14:00-17:00 Beijing window.
     # Measured on prod: the GitHub token-cooldown storm concentrates at
     # 10:00-16:00 Beijing (4529 warnings on 2026-09-24) while the morning
