@@ -493,6 +493,79 @@ def get_default_config() -> Dict[str, Any]:
                 },
             },
             {
+                "name": "exa",
+                "enabled": False,
+                "provider_type": "exa",
+                "use_api": True,
+                "max_pages": 1000,
+                "stages": {
+                    "search": True,
+                    "gather": True,
+                    "check": True,
+                    "inspect": True,
+                },
+                "extras": {},
+                "api": {
+                    "base_url": "https://api.exa.ai",
+                    "completion_path": "/contents",
+                    "model_path": "/contents",
+                    "default_model": "exa-search",
+                    "auth_key": "x-api-key",
+                    "extra_headers": {},
+                    "api_version": "",
+                    "timeout": 30,
+                    "retries": 3,
+                },
+                "patterns": {
+                    # Env-anchored extraction only: no width ceiling and no
+                    # prefix assumption (exa key format unmeasured - measured
+                    # corpus first, then align; serpapi/modelscope house rule).
+                    "key_pattern": (
+                        r'(?i)(?:exa[_-]?(?:api[_-]?)?key)'
+                        r'["\'\]]{0,2}\s*[:=]\s*["\']?([A-Za-z0-9\-]{16,})["\']?'
+                    ),
+                    "address_pattern": "",
+                    "endpoint_pattern": "",
+                    "model_pattern": "",
+                },
+                "conditions": [
+                    {"query": '"EXA_API_KEY"'},
+                    {"query": '"EXA_KEY"'},
+                    {
+                        "query": '"api.exa.ai"',
+                        # Domain/header context: allow the token-header forms
+                        # a plain assignment anchor would miss. The header
+                        # name (x-api-key, 9 chars) sits under the 20-char
+                        # capture floor, so it cannot self-match the wide
+                        # override (brave's 20-char name needed a lookahead).
+                        "patterns": {
+                            "key_pattern": (
+                                r'(?i)(?:x-api-key["\'\s:]*|Bearer\s+|'
+                                r'["\']\s*)([A-Za-z0-9\-]{20,})'
+                            )
+                        },
+                    },
+                    {
+                        "query": '"x-api-key" "exa"',
+                        "patterns": {
+                            "key_pattern": (
+                                r'(?i)(?:x-api-key["\'\s:]*|Bearer\s+|'
+                                r'["\']\s*)([A-Za-z0-9\-]{20,})'
+                            )
+                        },
+                    },
+                    {"query": '"exa" "api key" extension:env'},
+                ],
+                # Lockstep with the hardened providers (tavily/kimi lineage):
+                # 0.2 req/s = 1 per 5 s. Keep lockstep with
+                # examples/config-exa.yaml.
+                "rate_limit": {"base_rate": 0.2, "burst_limit": 2, "adaptive": True},
+                "storage": {
+                    "directory": "",
+                    "plan": "",
+                },
+            },
+            {
                 "name": "serpapi",
                 "enabled": False,
                 "provider_type": "serpapi",
