@@ -601,8 +601,8 @@ class PipelineRunner:
 
         The generic ``provider_group_mapping`` gpt-load push runs for ALL
         providers; the dedicated services (tavily / github self-bootstrap /
-        serpapi / agnes-ai / modelscope / opencode / brave) gate on their own
-        provider name internally. Each push runs in a daemon thread; import
+        serpapi / agnes-ai / modelscope / opencode / brave / exa) gate on their
+        own provider name internally. Each push runs in a daemon thread; import
         failures and service errors are logged, never raised.
         """
         try:
@@ -838,6 +838,36 @@ class PipelineRunner:
         except Exception as exc:
             logger.error(
                 f"Brave push hook error: provider={provider_name} "
+                f"run_id={run_id} error={exc}"
+            )
+
+        # Exa push — symmetric to the brave block above. Only fires for exa
+        # scans; env gating lives inside ExaPushService (it no-ops when
+        # EXA_PROXY_BASE_URL is unset; EXA_PROXY_AUTH_KEY is optional because
+        # the prod pool runs DEV_OPEN_ADMIN=true).
+        try:
+            from web.exa_push import get_exa_push_service  # type: ignore[import-untyped,unused-ignore]
+
+            if provider_name == "exa":
+                exa_push_service = get_exa_push_service()
+                # Run push in a new thread to avoid blocking the completion callback
+                t = threading.Thread(
+                    target=exa_push_service.push_valid_keys,
+                    args=(provider_name, run_id),
+                    daemon=True,
+                )
+                t.start()
+                logger.info(
+                    f"Exa push triggered: provider={provider_name} run_id={run_id}"
+                )
+        except ImportError:
+            logger.info(
+                f"Exa push service not available: "
+                f"provider={provider_name} run_id={run_id}"
+            )
+        except Exception as exc:
+            logger.error(
+                f"Exa push hook error: provider={provider_name} "
                 f"run_id={run_id} error={exc}"
             )
 
