@@ -12,6 +12,7 @@ from .bedrock import BedrockProvider
 from .brave import BraveProvider
 from .cerebras import CerebrasProvider
 from .doubao import DoubaoProvider
+from .exa import ExaProvider
 from .gemini import GeminiProvider
 from .github import GitHubTokenProvider
 from .glm import GLMProvider
@@ -45,6 +46,7 @@ __all__ = [
     "BraveProvider",
     "CerebrasProvider",
     "DoubaoProvider",
+    "ExaProvider",
     "GeminiProvider",
     "GooeyAIProvider",
     "GrokProvider",
