@@ -842,6 +842,17 @@ pipeline into a long-running service:
   scan completes, validated keys are auto-pushed to the tavily-hikari key pool
   (`POST {base}/api/keys` with `provider: serpapi`; requires both
   `SERPAPI_PROXY_BASE_URL` and `SERPAPI_PROXY_AUTH_KEY` to be set).
+- **Automatic push to the Brave key pool (tavily-hikari)** — after each brave
+  scan completes, validated keys are pushed one by one to the tavily-hikari key
+  pool (`POST {base}/api/keys` with `provider: brave`; requires
+  `BRAVE_PROXY_BASE_URL`, while `BRAVE_PROXY_AUTH_KEY` is optional — an empty
+  auth key sends no `Authorization` header).
+- **Automatic push to the Exa key pool (tavily-hikari)** — after each exa scan
+  completes, validated keys are pushed the same way (`POST {base}/api/keys` with
+  `provider: exa`; requires `EXA_PROXY_BASE_URL`, `EXA_PROXY_AUTH_KEY`
+  optional). Both brave and exa validate with a zero-cost probe — an
+  intentionally incomplete request that the provider answers only after
+  authenticating — so checking a wide corpus is never billed.
 - **Automatic push to gpt-load (Agnes AI)**: after each agnes-ai scan
   completes, validated `sk-` keys auto-push to the configured gpt-load group
   via `AGNES_LOAD_BASE_URL` / `AGNES_LOAD_GROUP_ID` / `AGNES_LOAD_AUTH_KEY`
@@ -874,6 +885,12 @@ pipeline into a long-running service:
 | `TAVILY_PROXY_AUTH_KEY` | empty | Bearer auth value sent to that pool |
 | `SERPAPI_PROXY_BASE_URL` | empty | tavily-hikari (or compatible) key-pool address |
 | `SERPAPI_PROXY_AUTH_KEY` | empty | Bearer auth value sent to that pool |
+| `BRAVE_PROXY_BASE_URL` | empty | tavily-hikari (or compatible) key-pool address for the brave push |
+| `BRAVE_PROXY_AUTH_KEY` | empty | Bearer auth value for that pool (optional; empty sends no `Authorization` header) |
+| `EXA_PROXY_BASE_URL` | empty | tavily-hikari (or compatible) key-pool address for the exa push |
+| `EXA_PROXY_AUTH_KEY` | empty | Bearer auth value for that pool (optional; empty sends no `Authorization` header) |
+| `HARVESTER_PROXY_BRAVE` | empty (compose ships a `socks5h://` exit trio) | Per-provider egress pin for brave validation; empty = inherit `HARVESTER_PROXY`. Brave needs `socks5h` (remote DNS): container-direct egress times out and plain `socks5` hits DNS poisoning |
+| `HARVESTER_PROXY_EXA` | empty | Per-provider egress pin for exa validation; empty = inherit `HARVESTER_PROXY`. `api.exa.ai` is reachable on every path from the container, so no pin is needed |
 | `AGNES_LOAD_BASE_URL` | `http://107.172.141.203:43001` | gpt-load instance base URL for agnes-ai push |
 | `AGNES_LOAD_GROUP_ID` | `19` | gpt-load group to push agnes-ai keys into |
 | `AGNES_LOAD_AUTH_KEY` | empty | gpt-load management auth key for agnes-ai push (empty sends no `Authorization` header) |

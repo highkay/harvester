@@ -826,6 +826,8 @@ sequenceDiagram
 - **自动推送到 gpt-load** — 扫描完成后，验证通过的 key 自动推送到 gpt-load 实例的对应分组（`POST /api/keys/add-multiple`，幂等去重）。每个任务的推送目标（实例地址 + 分组 + `max_size` 单批上限，默认 10000）均可在页面配置。
 - **自动推送到 Tavily key 池（tavily-hikari）** — 每次 tavily 扫描完成后，验证通过的 key 自动批量推送到 tavily-hikari 风格的 key 池（`POST {base}/api/keys/batch`；需同时设置 `TAVILY_PROXY_BASE_URL` 与 `TAVILY_PROXY_AUTH_KEY`）。
 - **自动推送到 SerpApi key 池（tavily-hikari）** — 每次 serpapi 扫描完成后，验证通过的 key 自动推送到 tavily-hikari key 池（`POST {base}/api/keys` 带 `provider: serpapi`；需同时设置 `SERPAPI_PROXY_BASE_URL` 与 `SERPAPI_PROXY_AUTH_KEY`）。
+- **自动推送到 Brave key 池（tavily-hikari）** — 每次 brave 扫描完成后，验证通过的 key 逐个推送到 tavily-hikari key 池（`POST {base}/api/keys` 带 `provider: brave`；需设置 `BRAVE_PROXY_BASE_URL`，`BRAVE_PROXY_AUTH_KEY` 可选——为空则不发送 `Authorization` 头）。
+- **自动推送到 Exa key 池（tavily-hikari）** — 每次 exa 扫描完成后，验证通过的 key 以同样形态推送（`POST {base}/api/keys` 带 `provider: exa`；需设置 `EXA_PROXY_BASE_URL`，`EXA_PROXY_AUTH_KEY` 可选）。brave 与 exa 的验证都是零成本探针（故意发送不完整的请求，服务端先鉴权、再回参数错误），因此校验宽语料不产生费用。
 - **自举 Self-bootstrap** — `github` 扫描完成后，验证通过的 GitHub API token 会自动导入本实例自身的 token 存储（`label='harvester-bootstrap'`），让实例逐步扩充自己的搜索凭据池。首次扫描仍需至少一个种子 token（环境变量 `GITHUB_TOKENS` 或通过 Token API 提供）。
 - **Jinja2 管理界面** — 仪表盘、Token 管理、推送配置、调度管理、运行历史、推送日志。单一共享认证密钥（`WEB_AUTH_KEY`）：界面用会话 cookie 登录，API 用 Bearer Token。
 
@@ -842,6 +844,12 @@ sequenceDiagram
 | `TAVILY_PROXY_AUTH_KEY` | 空 | 发往该池的 Bearer 认证值 |
 | `SERPAPI_PROXY_BASE_URL` | 空 | tavily-hikari（或兼容）key 池地址 |
 | `SERPAPI_PROXY_AUTH_KEY` | 空 | 发往该池的 Bearer 认证值 |
+| `BRAVE_PROXY_BASE_URL` | 空 | brave 推送目标：tavily-hikari（或兼容）key 池地址 |
+| `BRAVE_PROXY_AUTH_KEY` | 空 | 发往该池的 Bearer 认证值（可选；为空则不发送 `Authorization` 头） |
+| `EXA_PROXY_BASE_URL` | 空 | exa 推送目标：tavily-hikari（或兼容）key 池地址 |
+| `EXA_PROXY_AUTH_KEY` | 空 | 发往该池的 Bearer 认证值（可选；为空则不发送 `Authorization` 头） |
+| `HARVESTER_PROXY_BRAVE` | 空（compose 内置 `socks5h://` 三出口） | brave 校验的按 provider 出口钉；为空表示继承 `HARVESTER_PROXY`。brave 必须走 `socks5h`（远端 DNS）：容器直连超时，普通 `socks5` 会撞上 DNS 污染 |
+| `HARVESTER_PROXY_EXA` | 空 | exa 校验的按 provider 出口钉；为空表示继承 `HARVESTER_PROXY`。容器内到 `api.exa.ai` 全路径可达，无需钉出口 |
 | `HARVESTER_WORKSPACE` | `./data` | 工作目录（provider 结果） |
 | `HARVESTER_DB_PATH` | `<workspace>/harvester.db` | SQLite 数据库路径 |
 | `HARVESTER_SELF_BOOTSTRAP` | `1` | `github` 扫描后把验证通过的 GitHub token 自动导入本实例的 token 存储（自举；设为 `0` 关闭） |
