@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, patch
 
 import yaml
 
+from search import client
 from web.crypto import CryptoManager, decrypt_str, encrypt_str
 
 
@@ -306,6 +307,73 @@ class TestTempYamlGeneration(unittest.TestCase):
             self.assertEqual(
                 generated["global"].get("proxy"), "socks5://192.168.1.18:7890"
             )
+
+
+class TestDedicatedProxyHostPinning(unittest.TestCase):
+    """A dedicated HARVESTER_PROXY_<PROVIDER> override pins the provider's API
+    hosts in search.client, so later scans' process-wide set_proxy() rebinds
+    cannot reroute them (prod 2026-10-18: brave's socks5h pin was stolen by a
+    later plain-socks5 scan's rebind → every check NETWORK_ERROR → 2,326
+    wait-check vs 0 valid). Global-rotation scans must NOT pin — their
+    providers rely on the shared session's failover.
+    """
+
+    def setUp(self) -> None:
+        client.clear_host_proxy_pins()
+
+    def tearDown(self) -> None:
+        client.clear_host_proxy_pins()
+
+    def _generate(self, provider: str, env: dict, yaml_text: str = _SAMPLE_YAML):
+        from web.runner import PipelineRunner
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workdir = Path(tmpdir)
+            (workdir / f"config-{provider}.yaml").write_text(yaml_text, encoding="utf-8")
+            (workdir / "runtime").mkdir()
+
+            runner = PipelineRunner.__new__(PipelineRunner)
+            runner._workspace = workdir
+            runner._init_yaml_source_dir = str(workdir)
+
+            with patch.dict(os.environ, env, clear=False):
+                runner._generate_temp_yaml(provider, f"run-{provider}-pin", ["ghp_t"])
+
+    def test_dedicated_override_pins_task_api_host(self) -> None:
+        self._generate(
+            "groq",
+            {
+                "HARVESTER_PROXY": "socks5://192.168.1.18:1080",
+                "HARVESTER_PROXY_GROQ": "socks5h://192.168.1.18:7890",
+            },
+        )
+        self.assertEqual(
+            client.get_host_proxy_pins(),
+            {"api.test.com": "socks5h://192.168.1.18:7890"},
+        )
+
+    def test_global_rotation_alone_pins_nothing(self) -> None:
+        self._generate(
+            "groq", {"HARVESTER_PROXY": "socks5://192.168.1.18:1080"}
+        )
+        self.assertEqual(client.get_host_proxy_pins(), {})
+
+    def test_empty_override_falls_back_and_pins_nothing(self) -> None:
+        self._generate(
+            "groq",
+            {"HARVESTER_PROXY": "socks5://192.168.1.18:1080", "HARVESTER_PROXY_GROQ": ""},
+        )
+        self.assertEqual(client.get_host_proxy_pins(), {})
+
+    def test_task_without_api_base_url_pins_nothing_and_never_raises(self) -> None:
+        no_api = _SAMPLE_YAML.replace(
+            "    api:\n      base_url: https://api.test.com\n      timeout: 30\n      retries: 3\n", ""
+        )
+        self.assertNotIn("base_url", no_api)
+        self._generate(
+            "groq", {"HARVESTER_PROXY_GROQ": "socks5h://192.168.1.18:7890"}, no_api
+        )
+        self.assertEqual(client.get_host_proxy_pins(), {})
 
 
 class TestReEntrancyPrevention(unittest.TestCase):

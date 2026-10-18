@@ -17,6 +17,7 @@ import re
 import sqlite3
 import threading
 import time
+import urllib.parse
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -24,6 +25,7 @@ from typing import Any
 
 import yaml
 
+from search import client
 from tools.logger import get_logger
 from tools.patterns import redact_api_keys_in_text
 
@@ -1061,6 +1063,7 @@ class PipelineRunner:
         proxy = self._pick_proxy(provider_name)
         if proxy:
             global_section["proxy"] = proxy
+            self._pin_dedicated_provider_hosts(provider_name, raw, proxy)
         elif "proxy" not in global_section:
             # Absent key → loader inherits http(s)_proxy env; explicit "" would
             # disable it. Leave absent so container env proxies still work.
@@ -1092,12 +1095,7 @@ class PipelineRunner:
 
         Returns "" when nothing is configured.
         """
-        raw = ""
-        if provider_name:
-            override_var = "HARVESTER_PROXY_" + re.sub(
-                r"[^A-Za-z0-9]+", "_", provider_name
-            ).upper()
-            raw = os.environ.get(override_var, "").strip()
+        raw = self._provider_proxy_override(provider_name)
         if not raw:
             raw = os.environ.get("HARVESTER_PROXY", "").strip()
         if not raw:
@@ -1115,6 +1113,66 @@ class PipelineRunner:
             proxy = proxies[idx % len(proxies)]
             self._proxy_index = idx + 1
         return proxy
+
+    def _provider_proxy_override(self, provider_name: str) -> str:
+        """Raw ``HARVESTER_PROXY_<PROVIDER>`` override value ("" when unset/empty)."""
+        if not provider_name:
+            return ""
+        override_var = "HARVESTER_PROXY_" + re.sub(
+            r"[^A-Za-z0-9]+", "_", provider_name
+        ).upper()
+        return os.environ.get(override_var, "").strip()
+
+    def _pin_dedicated_provider_hosts(
+        self, provider_name: str, raw_config: Any, proxy: str
+    ) -> None:
+        """Pin the provider's API hosts to its dedicated proxy override.
+
+        ``client.set_proxy()`` (called by manager/pipeline.py at every scan
+        start) rebinds the process-wide session to the NEWEST scan's exit,
+        and the failover guards rotate that session through the GLOBAL
+        ``HARVESTER_PROXY`` candidates — so without a pin, a provider whose
+        override exists for a measured egress reason (brave/agnes-ai need
+        socks5h: plain socks5 relays to the DNS-poisoned local answer and
+        every check dies ConnectTimeout → NETWORK_ERROR → wait-check,
+        measured on prod 2026-10-18: 2,326 wait vs 13 invalid vs 0 valid)
+        loses it the moment another scan starts. Only dedicated overrides
+        are pinned: global-rotation providers must stay on the shared
+        session so its failover still protects them. Never raises — a
+        malformed pin must not block a scan.
+        """
+        if (
+            not provider_name
+            or not proxy
+            or not self._provider_proxy_override(provider_name)
+        ):
+            return
+        tasks = raw_config.get("tasks") if isinstance(raw_config, dict) else None
+        if not isinstance(tasks, list):
+            return
+        hosts: list[str] = []
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            api = task.get("api")
+            base_url = (
+                str(api.get("base_url") or "") if isinstance(api, dict) else ""
+            )
+            if not base_url:
+                continue
+            try:
+                host = urllib.parse.urlsplit(base_url).hostname
+            except ValueError:
+                continue
+            if host and host.lower() not in hosts:
+                hosts.append(host.lower())
+        for host in hosts:
+            try:
+                client.pin_host_proxy(host, proxy)
+            except ValueError as exc:
+                logger.warning(
+                    f"Skipping host pin for {provider_name} ({host}): {exc}"
+                )
 
     def _get_enabled_api_tokens(self) -> list[str]:
         """Read enabled API tokens from the github_tokens table (synchronous).
