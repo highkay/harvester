@@ -588,5 +588,148 @@ class TestDegradedExitVisibility(unittest.TestCase):
         self.assertEqual(0, client.get_egress_state()["degraded_streak"])
 
 
+PINNED_URL = "https://api.pinned-example.com/v1/chat/completions"
+PINNED_PROXY = "socks5h://10.9.9.1:1080"
+OTHER_PROXY = "socks5://10.0.0.1:1080"
+
+
+class TestHostProxyPins(unittest.TestCase):
+    """Host pins survive the process-wide set_proxy() rebind (2026-10-18).
+
+    Production root cause pinned here: set_proxy() rebinds the SHARED session
+    at every scan start, so a provider whose dedicated HARVESTER_PROXY_<P>
+    override exists for a measured egress reason (brave/agnes-ai need socks5h;
+    plain socks5 relays to the DNS-poisoned local answer and every check died
+    ConnectTimeout → NETWORK_ERROR → wait-check — 2,326 wait vs 13 invalid vs
+    0 valid at probe time) lost its override to the next scan's plain-socks5
+    rebind. A pin binds the provider's API host to its override proxy for the
+    process lifetime; global-rotation providers keep following the shared
+    session so its failover still protects them.
+    """
+
+    def tearDown(self) -> None:
+        client.clear_host_proxy_pins()
+        client.set_proxy("")
+        os.environ.pop("HARVESTER_PROXY", None)
+
+    def _drive(self, url: str, shared: mock.MagicMock, **kwargs) -> None:
+        with mock.patch.object(client, "_HTTP_SESSION", shared), mock.patch.object(
+            client, "_DIRECT_SESSION", mock.MagicMock()
+        ):
+            try:
+                client.request("GET", url, **kwargs)
+            except Exception:
+                pass
+
+    def test_pinned_host_immune_to_set_proxy_rebind(self) -> None:
+        """The 2026-10-18 regression: pin registered, then a later scan's
+        set_proxy(plain-socks5) must NOT reroute the pinned host's traffic."""
+        pinned_session = mock.MagicMock()
+        pinned_session.request.return_value = _FakeResponse()
+        shared = mock.MagicMock()
+
+        with mock.patch.object(client, "_new_session", return_value=pinned_session):
+            client.pin_host_proxy("api.pinned-example.com", PINNED_PROXY)
+            client.set_proxy(OTHER_PROXY)  # the later scan's rebind
+            self._drive(PINNED_URL, shared)
+
+        pinned_session.request.assert_called_once()
+        shared.request.assert_not_called()
+
+    def test_unpinned_host_follows_the_shared_session(self) -> None:
+        # Global-rotation providers must keep following the shared session so
+        # its failover still protects them — pins are opt-in per host.
+        client.pin_host_proxy("api.pinned-example.com", PINNED_PROXY)
+        shared = mock.MagicMock()
+        shared.request.return_value = _FakeResponse()
+
+        self._drive(API_URL, shared)
+
+        shared.request.assert_called_once()
+
+    def test_pinned_traffic_feeds_neither_exit_health_streak(self) -> None:
+        # The streaks guard the SHARED session's exit; rotating it cannot
+        # unbreak a pinned host, so pinned outcomes must not feed them.
+        pinned_session = mock.MagicMock()
+        pinned_session.request.side_effect = requests.exceptions.ConnectionError(
+            "poisoned"
+        )
+        # _new_session stays patched for the DRIVES too: pinned sessions are
+        # created lazily on first use, so an unpatched window would dial the
+        # (unroutable) test address for real.
+        with mock.patch.object(client, "_new_session", return_value=pinned_session):
+            client.pin_host_proxy("api.pinned-example.com", PINNED_PROXY)
+            client.set_proxy(OTHER_PROXY)
+
+            for _ in range(client._PROXY_FAILOVER_THRESHOLD + 2):
+                self._drive(PINNED_URL, mock.MagicMock())
+
+            state = client.get_egress_state()
+            self.assertEqual(state["consecutive_failures"], 0)
+            self.assertEqual(state["proxy"], OTHER_PROXY)
+
+            pinned_session.request.side_effect = None
+            pinned_session.request.return_value = _FakeResponse(status_code=403)
+            for _ in range(client._PROXY_DEGRADED_WARN_THRESHOLD + 2):
+                self._drive(PINNED_URL, mock.MagicMock())
+            self.assertEqual(client.get_egress_state()["degraded_streak"], 0)
+
+    def test_use_proxy_false_bypasses_the_pin(self) -> None:
+        # A provider's explicit direct choice (domestic endpoints) wins.
+        pinned_session = mock.MagicMock()
+        with mock.patch.object(client, "_new_session", return_value=pinned_session):
+            client.pin_host_proxy("api.pinned-example.com", PINNED_PROXY)
+        direct = mock.MagicMock()
+        direct.request.return_value = _FakeResponse()
+        with mock.patch.object(client, "_HTTP_SESSION", mock.MagicMock()), mock.patch.object(
+            client, "_DIRECT_SESSION", direct
+        ):
+            client.request("GET", PINNED_URL, use_proxy=False)
+
+        direct.request.assert_called_once()
+        pinned_session.request.assert_not_called()
+
+    def test_direct_host_stays_direct_even_when_pinned(self) -> None:
+        # _DIRECT_HOSTS routing is evaluated first; pinning raw would be a
+        # config error, and it must still bypass every proxy.
+        pinned_session = mock.MagicMock()
+        with mock.patch.object(client, "_new_session", return_value=pinned_session):
+            client.pin_host_proxy("raw.githubusercontent.com", PINNED_PROXY)
+        direct = mock.MagicMock()
+        direct.request.return_value = _FakeResponse()
+        with mock.patch.object(client, "_HTTP_SESSION", mock.MagicMock()), mock.patch.object(
+            client, "_DIRECT_SESSION", direct
+        ):
+            client.request("GET", RAW_URL)
+
+        direct.request.assert_called_once()
+        pinned_session.request.assert_not_called()
+
+    def test_pin_validation(self) -> None:
+        with self.assertRaises(ValueError):
+            client.pin_host_proxy("", PINNED_PROXY)
+        with self.assertRaises(ValueError):
+            client.pin_host_proxy("api.pinned-example.com", "")
+        with self.assertRaises(ValueError):
+            client.pin_host_proxy("api.pinned-example.com", "ftp://10.0.0.1:21")
+        self.assertEqual(client.get_host_proxy_pins(), {})
+
+    def test_repin_replaces_and_set_proxy_never_clears(self) -> None:
+        client.pin_host_proxy("api.pinned-example.com", PINNED_PROXY)
+        client.pin_host_proxy("api.pinned-example.com", OTHER_PROXY)
+        client.set_proxy(OTHER_PROXY)
+        client.set_proxy("")
+        self.assertEqual(
+            client.get_host_proxy_pins(), {"api.pinned-example.com": OTHER_PROXY}
+        )
+
+    def test_egress_state_exposes_pins(self) -> None:
+        client.pin_host_proxy("api.pinned-example.com", PINNED_PROXY)
+        self.assertEqual(
+            client.get_egress_state()["host_pins"],
+            {"api.pinned-example.com": PINNED_PROXY},
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -279,6 +279,7 @@ def get_egress_state() -> Dict[str, Any]:
             "degraded_streak": _proxy_degraded_streak,
             "degraded_rotations": _proxy_degraded_rotations,
             "direct_hosts": sorted(_DIRECT_HOSTS),
+            "host_pins": dict(_HOST_PROXY_PINS),
             "pool_maxsize": _POOL_MAXSIZE,
         }
 
@@ -432,6 +433,21 @@ def http_error_message(error: requests.exceptions.HTTPError) -> str:
     return message or response.reason or str(error)
 
 
+def _validate_proxy_value(proxy: str) -> None:
+    """Scheme/host/port validation shared by set_proxy() and pin_host_proxy()."""
+    parsed = urllib.parse.urlparse(proxy)
+    scheme = parsed.scheme.lower()
+    if scheme not in {"http", "https", "socks5", "socks5h"}:
+        raise ValueError("proxy scheme must be one of: http, https, socks5, socks5h")
+    if not parsed.hostname:
+        raise ValueError("proxy must include a host")
+
+    try:
+        parsed.port
+    except ValueError as e:
+        raise ValueError(f"invalid proxy port: {e}") from e
+
+
 def set_proxy(proxy: Optional[str]) -> None:
     """Configure the process-wide requests session used by search HTTP requests.
 
@@ -440,23 +456,16 @@ def set_proxy(proxy: Optional[str]) -> None:
     dead exit is rotated away from within ``_PROXY_FAILOVER_THRESHOLD``
     requests instead of poisoning every concurrent scan until the next scan
     starts (the pre-2026-09-24 behaviour).
+
+    Host pins (``pin_host_proxy``) are deliberately NOT touched here — their
+    whole purpose is surviving this rebind.
     """
     global _proxy_candidates, _proxy_failures, _proxy_degraded_streak, _proxy_degraded_warned
 
     proxy = trim(proxy or "")
 
     if proxy:
-        parsed = urllib.parse.urlparse(proxy)
-        scheme = parsed.scheme.lower()
-        if scheme not in {"http", "https", "socks5", "socks5h"}:
-            raise ValueError("proxy scheme must be one of: http, https, socks5, socks5h")
-        if not parsed.hostname:
-            raise ValueError("proxy must include a host")
-
-        try:
-            parsed.port
-        except ValueError as e:
-            raise ValueError(f"invalid proxy port: {e}") from e
+        _validate_proxy_value(proxy)
 
     with _proxy_lock:
         _apply_proxy(proxy)
@@ -475,6 +484,94 @@ def set_proxy(proxy: Optional[str]) -> None:
         return
 
     logger.info(f"HTTP proxy enabled: {_mask_proxy(proxy)}")
+
+
+# Per-host proxy pins (measured on prod 2026-10-18). set_proxy() is
+# process-wide: every new scan rebinds _HTTP_SESSION to ITS picked exit, so a
+# provider whose dedicated override (HARVESTER_PROXY_<PROVIDER>) was chosen for
+# a measured egress reason loses it the moment another scan starts. Measured:
+# brave only works via socks5h (remote DNS — plain socks5 relays to the
+# DNS-poisoned local answer and never connects; direct times out); its run
+# pinned socks5h at 13:51, the 13:00 glm-ai scan (global plain-socks5 trio)
+# rebound the process session, and from then on EVERY brave check died
+# ConnectTimeout → NETWORK_ERROR → wait-check (2,326 wait vs 13 invalid vs 0
+# valid at probe time; the 13 invalid all date from the run's own first hour).
+# web/runner.py registers a pin for the provider's API host(s) at scan start
+# when — and only when — a dedicated override exists; global-rotation
+# providers keep following the shared session so its failover still protects
+# them. Pinned traffic does not feed the transport/degraded streaks: those
+# guard the SHARED session's exit, and rotating it would not unbreak a pinned
+# host anyway. Failover is also deliberately absent INSIDE a pin: the rotation
+# candidates are exactly the plain-socks5 exits the pin exists to avoid, so a
+# dead pinned exit surfaces as retryable wait-check verdicts until the next
+# run re-pins. Pins persist for the process lifetime; re-pinning replaces.
+_HOST_PROXY_PINS: Dict[str, str] = {}
+_PINNED_SESSIONS: Dict[str, requests.Session] = {}
+
+
+def pin_host_proxy(host: str, proxy: str) -> None:
+    """Pin *host* to the dedicated *proxy*, immune to later set_proxy() rebinds.
+
+    See the block above for the measured rationale. Raises ValueError on an
+    empty host or an invalid proxy (same rules as set_proxy).
+    """
+    host = trim(host).lower()
+    if not host:
+        raise ValueError("pin host cannot be empty")
+    proxy = trim(proxy)
+    if not proxy:
+        raise ValueError("pin proxy cannot be empty")
+    _validate_proxy_value(proxy)
+
+    with _proxy_lock:
+        if _HOST_PROXY_PINS.get(host) == proxy:
+            return
+        _HOST_PROXY_PINS[host] = proxy
+
+    logger.info(
+        f"Pinned host {host} to proxy {_mask_proxy(proxy)} — later set_proxy() "
+        "rebinds will not reroute it"
+    )
+
+
+def unpin_host_proxy(host: str) -> None:
+    """Remove the pin for *host* (no-op when not pinned)."""
+    with _proxy_lock:
+        _HOST_PROXY_PINS.pop(trim(host).lower(), None)
+
+
+def clear_host_proxy_pins() -> None:
+    """Drop every pin and pinned session.
+
+    Pins otherwise live for the process lifetime by design (a provider's
+    measured egress requirement does not change between scans) — this exists
+    for test teardown.
+    """
+    with _proxy_lock:
+        _HOST_PROXY_PINS.clear()
+        _PINNED_SESSIONS.clear()
+
+
+def get_host_proxy_pins() -> Dict[str, str]:
+    """Snapshot of the current host → proxy pins (diagnostics/tests)."""
+    with _proxy_lock:
+        return dict(_HOST_PROXY_PINS)
+
+
+def _pinned_session_for(url: str) -> Optional[requests.Session]:
+    """The pinned session for *url*'s host, or None when the host is not pinned."""
+    host = _url_host(url)
+    if not host:
+        return None
+    with _proxy_lock:
+        proxy = _HOST_PROXY_PINS.get(host)
+        if not proxy:
+            return None
+        session = _PINNED_SESSIONS.get(proxy)
+        if session is None:
+            session = _new_session(proxy)
+            _PINNED_SESSIONS[proxy] = session
+        return session
 
 
 def configure_github_transport(
@@ -609,13 +706,22 @@ def request(method: str, url: str, timeout: float = 10, use_proxy: bool = True, 
     """Send a request through the session that fits *url*'s egress route.
 
     ``_DIRECT_HOSTS`` (raw.githubusercontent.com) always use the never-proxied
-    session and get ``_DIRECT_TIMEOUT_FLOOR``; everything else uses the shared
-    proxied session. Transport outcomes on the proxied session feed the
-    consecutive-failure failover in :func:`_note_proxy_transport` — an HTTP
-    response of any status counts as "the exit works".
+    session and get ``_DIRECT_TIMEOUT_FLOOR``; a pinned host
+    (``pin_host_proxy``) uses its own dedicated session, immune to set_proxy()
+    rebinds; everything else uses the shared proxied session. Transport
+    outcomes on the SHARED proxied session feed the consecutive-failure
+    failover in :func:`_note_proxy_transport` — an HTTP response of any status
+    counts as "the exit works". Pinned sessions feed neither streak: those
+    guard the shared session's exit, and rotating it cannot unbreak a pin.
     """
     proxied = effective_use_proxy(url, use_proxy)
     session = _HTTP_SESSION if proxied else _DIRECT_SESSION
+    pinned = False
+    if proxied:
+        pinned_session = _pinned_session_for(url)
+        if pinned_session is not None:
+            session = pinned_session
+            pinned = True
     effective = max(1.0, effective_timeout(url, timeout))
 
     try:
@@ -623,11 +729,11 @@ def request(method: str, url: str, timeout: float = 10, use_proxy: bool = True, 
             method=method, url=url, timeout=effective, **kwargs
         )
     except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
-        if proxied:
+        if proxied and not pinned:
             _note_proxy_transport(False)
         raise
 
-    if proxied:
+    if proxied and not pinned:
         _note_proxy_transport(True)
         _note_proxy_status(response.status_code, response.headers, host=_url_host(url))
     response.raise_for_status()
