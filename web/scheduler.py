@@ -126,8 +126,12 @@ _DEFAULT_SCHEDULES: tuple[tuple[str, str, str], ...] = (
     ("kimi", "15 */4 * * *", "examples/config-kimi.yaml"),
     ("mimo-cn", "30 */4 * * *", "examples/config-mimo.yaml"),
     ("qwen-cn", "45 */4 * * *", "examples/config-qwen.yaml"),
-    # Medium-churn providers — every 6 hours.
-    ("glm", "0 */6 * * *", "examples/config-glm.yaml"),
+    # Medium-churn providers. 2026-10-18 frequency policy (measured over the
+    # prior 12 days of run_records×push_logs): glm re-validated the same
+    # plateau corpus daily — 5,933 pushed keys produced 9 net-new — so daily
+    # burned the shared GitHub search budget for <1 new key/day. 3x/week
+    # keeps pool refill ahead of the measured decay while freeing the quota.
+    ("glm", "0 12 * * mon,wed,fri", "examples/config-glm.yaml"),
     # 2026-10-09 frequency policy: saturated providers (measured 0-2 net-new
     # keys/day, 98-100% cross-run overlap over 11 days) drop to weekly or
     # 2-3x/week — a weekly floor keeps supply-resumption visibility without
@@ -154,13 +158,18 @@ _DEFAULT_SCHEDULES: tuple[tuple[str, str, str], ...] = (
     ("serpapi", "0 6 * * mon,wed,fri", "examples/config-serpapi.yaml"),
     # Agnès AI. 2026-10-09: */6 → 2x/week (measured 0-1 net-new/day, pool
     # saturated at ~40 keys; the scan is cheap — 16k links — but the quota
-    # saving goes to the high-churn providers).
-    ("agnes-ai", "0 10 * * tue,fri", "examples/config-agnes-ai.yaml"),
+    # saving goes to the high-churn providers). 2026-10-18: 2x/week → weekly
+    # (2 net-new keys in 12 days, 43,902 gathered links per added key).
+    ("agnes-ai", "0 10 * * fri", "examples/config-agnes-ai.yaml"),
     # Secondary regional tasks live in their own config files now (previously
     # bundled into the primary provider's config, which mixed run records,
     # push statistics and schedules together). Daily at staggered hours —
     # region-specific keys are low churn, so once a day is sufficient.
-    ("glm-ai", "0 13 * * *", "examples/config-glm-ai.yaml"),
+    # glm-ai. 2026-10-18: daily → weekly — the single most saturated
+    # provider (1 net-new key in 12 days; 1.28M gathered links per added
+    # key; yield trend 61→28 and still decaying). Weekly floor per house
+    # rule.
+    ("glm-ai", "0 13 * * wed", "examples/config-glm-ai.yaml"),
     # Brave Search — daily at 15:00 (no day-of-week field: the seed stays
     # daily regardless of any supply probe; adjust the prod row, not this
     # seed, if a probe shows saturation).
@@ -198,8 +207,12 @@ _DEFAULT_SCHEDULES: tuple[tuple[str, str, str], ...] = (
     # openrouter 0-8 net-new/day but a saturated ~110-key pool). The weekly
     # floor stays: cold providers keep at least one scan per week so a supply
     # resumption is never missed for good.
-    ("ollama", "0 3 * * mon,thu", "examples/config-ollama.yaml"),
-    ("openrouter", "0 8 * * mon,thu", "examples/config-openrouter.yaml"),
+    # 2026-10-18: 2x/week → weekly — ollama 4 net-new and openrouter 1
+    # net-new in 12 days (51,658 / 145,520 gathered links per added key);
+    # pools saturated, daily-plus re-validation was paying search quota for
+    # duplicates. Weekly floor per house rule.
+    ("ollama", "0 3 * * mon", "examples/config-ollama.yaml"),
+    ("openrouter", "0 8 * * thu", "examples/config-openrouter.yaml"),
     ("nvidia", "50 11 * * *", "examples/config-nvidia.yaml"),
     # OpenCode Go subscription keys — WEEKLY (Sat 22:00), downgraded from
     # daily on 2026-09-28 after two consecutive zero-valid runs (92k links →

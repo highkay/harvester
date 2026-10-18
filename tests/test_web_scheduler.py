@@ -97,7 +97,7 @@ class TestSeedData(unittest.TestCase):
         "kimi": "15 */4 * * *",
         "mimo-cn": "30 */4 * * *",
         "qwen-cn": "45 */4 * * *",
-        "glm": "0 */6 * * *",
+        "glm": "0 12 * * mon,wed,fri",
         # 2026-10-09 frequency policy: saturated providers → weekly floor or
         # 2-3x/week (measured 0-2 net-new/day, 98-100% cross-run overlap).
         # Day-of-week entries are NAME-based on purpose: APScheduler's
@@ -109,8 +109,8 @@ class TestSeedData(unittest.TestCase):
         "tavily": "40 */6 * * *",
         "github": "50 */6 * * *",
         "serpapi": "0 6 * * mon,wed,fri",
-        "agnes-ai": "0 10 * * tue,fri",
-        "glm-ai": "0 13 * * *",
+        "agnes-ai": "0 10 * * fri",
+        "glm-ai": "0 13 * * wed",
         # Brave Search: daily 15:00 — NO day-of-week field on purpose (the
         # seed stays daily; a supply probe may only adjust the prod row).
         "brave": "0 15 * * *",
@@ -126,8 +126,8 @@ class TestSeedData(unittest.TestCase):
         "kimi-coding": "0 19 * * *",
         "mimo-sg": "0 20 * * *",
         "qwen-intl": "0 21 * * *",
-        "ollama": "0 3 * * mon,thu",
-        "openrouter": "0 8 * * mon,thu",
+        "ollama": "0 3 * * mon",
+        "openrouter": "0 8 * * thu",
         "nvidia": "50 11 * * *",
         "opencode": "0 22 * * sat",
     }
