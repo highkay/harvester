@@ -2899,7 +2899,73 @@ wave (`provider/brave.py` → `provider/exa.py`, `web/brave_push.py` →
   `_seen_run_ids` grows for the process lifetime (shared with the sibling push
   services).
 
-- Run: `python -m unittest discover -s tests`. **Measured baseline 2026-09-28
+## Ops: 2026-10-18 yield/frequency audit → egress pins + watchdog salvage + weekly floors
+
+Deployed `eb23241` (five atomic commits, full suite 1324 OK / 8 skipped).
+Evidence: `.omo/evidence/eval-20261018/`.
+
+- **The audit trigger**: brave/exa/nvidia catch-up runs sat 32h+ in `running`
+  (check-drain bound; box idle at load 0.89 with a 36.8 MB shared check
+  queue), heading for the 36h watch deadline. Root causes found and fixed:
+- **Per-host proxy pins (the big one)** — `search/client.py`
+  `pin_host_proxy(host, proxy)` + `_pinned_session_for()` routing in
+  `request()`: a pin binds a host to a dedicated session that later
+  `set_proxy()` rebinds cannot reroute. Registered by
+  `web/runner.py::_pin_dedicated_provider_hosts` at scan start (in
+  `_generate_temp_yaml`) ONLY when a dedicated `HARVESTER_PROXY_<PROVIDER>`
+  override exists (hosts read from each task's `api.base_url`). Measured root
+  cause: brave needs socks5h (plain socks5 relays to the DNS-poisoned local
+  answer → ConnectTimeout; direct times out), its 13:51 run pinned socks5h,
+  the 13:00 glm-ai scan's plain-socks5 rebind stole the process session, and
+  every brave check died NETWORK_ERROR → wait-check (2,326 wait vs 13 invalid
+  vs 0 valid; the 13 invalid all date from the run's own first hour).
+  Global-rotation providers are deliberately NOT pinned (they must follow the
+  shared session's failover); pinned traffic feeds neither exit-health streak;
+  `use_proxy: false` and `_DIRECT_HOSTS` still win over pins; no failover
+  inside a pin (its plain-socks5 siblings are exactly what the pin avoids — a
+  dead pinned exit surfaces as retryable wait-check until the next run
+  re-pins). Live proof 2026-10-18 23:33:30: the brave catch-up run logged
+  `Pinned host api.search.brave.com to proxy socks5h://…1080`; exa/nvidia
+  catch-ups (no override) logged no pin. Supersedes the "scheme-consistent
+  candidate list" note in the brave section — candidates alone could never
+  fix the rebind direction.
+- **Watch-deadline salvage push** — `web/scheduler.py::_watch_run`: after the
+  36h deadline flip, when `valid_keys_found > 0` the watcher now dispatches
+  `_dispatch_provider_pushes` (the same idempotent path the completion hook
+  uses; a race with a late terminal write is absorbed by per-run dedup).
+  Before this, a deadline-flipped run's keys were stranded until the next
+  restart's startup recovery — and each provider's next clean-start run
+  (`auto_restore: false`) resets `valid-keys.txt` first.
+- **exa dork4 removed** — `"x-api-key" "exa"` was 88.5% of measured supply
+  and 99.95% noise on prod (129,416 materials → 25 valid in the stuck run):
+  "exa" matches example/examination pages, so the anchor is broken at the
+  QUERY level and the wide override harvested every hex-ish string; at ≈26
+  verdicts/min the check stage can never drain it. Removed from
+  `examples/config-exa.yaml` + `config/defaults.py`; remaining supply ≈95k ≥
+  10k keeps the daily tier. Re-add only with a corpus-measured pattern.
+- **Frequency round 2** (house rule stands: weekly floor, never full
+  disable): applied on prod via PUT /api/schedule (hot, verified
+  next_run_time) + seed list synced. glm `0 12 * * mon,wed,fri` (9 net-new /
+  5,933 pushed in 12d), glm-ai `0 13 * * wed` (1 net-new; 1.28M links/added
+  — the most saturated), ollama `0 3 * * mon`, openrouter `0 8 * * thu`,
+  agnes-ai `0 10 * * fri` (2-4 net-new/12d each). Unchanged daily:
+  tavily 09, nvidia 11:50, glm 12 (on its days), brave 15, exa 16. APScheduler
+  dow footgun from 2026-10-09 still applies: NAME the weekdays.
+- **Salvage executed before the deploy restart**: exa run `ba2cdaad` 25 keys
+  → +16 (id 671), nvidia run `2dd5d87a` 131 keys → +1 (id 672); brave's run
+  had 0 valid (wait-flooded) so nothing to salvage. The restart then
+  reconciled the trio and armed catch-ups (brave +60s / exa +120s / nvidia
+  +180s) — the exa catch-up is the first run on the dork4-less config.
+- **Baseline table for the frequency round** (12d, links→valid→net-new):
+  nvidia 2.0万 links/added (keep daily), tavily 2.6万 (keep), serpapi ~7.4万
+  real (213 of 227 added were the hikari migration backfill), agnes-ai 4.4万,
+  ollama 5.2万, modelscope 14.7万, openrouter 14.6万, glm 21万, glm-ai
+  128万. Yield trends 10-07→10-18: tavily 1816→1127, glm 519→343, glm-ai
+  61→28, nvidia 1028→904, serpapi flat ~600.
+
+- Run: `python -m unittest discover -s tests`. **Measured baseline 2026-10-18
+  (workstation, at `eb23241`): 1324 OK / 8 skipped** — includes the 15 tests
+  from the egress-pin/watchdog/frequency wave. **Measured baseline 2026-09-28
   (workstation, at `638fe74`): 932 OK / 8 skipped** — includes the
   restart-lifecycle + disk-bounds tests added that day. The 2026-09-24 baseline was
   846 OK / 8 skipped (dirty worktree on `main`). The 2026-09-23 baseline was
@@ -2907,7 +2973,10 @@ wave (`provider/brave.py` → `provider/exa.py`, `web/brave_push.py` →
   2026-09-22" note below was written before the same-day hardening landed; the
   old "490 tests" and "35 failures in test_web_ui / test_web_push_logs"
   baselines are stale).
-- **Test-env gotchas (learned 2026-09-30, workstation)**: (1) the web API tests
+- **Test-env gotchas (learned 2026-09-30, workstation)**: (0) spawning the
+  venv python.exe from a subprocess with inherited stdin can HANG — pass
+  `stdin=subprocess.DEVNULL` (cost a cancelled 300s test cell on 2026-10-18).
+  (1) the web API tests
   (`test_web_middleware` / `test_web_auth` / `test_web_ui` /
   `test_web_push_logs`) fail with "starlette.testclient requires the httpx2
   package" if the env lacks it — `httpx2` is a TEST-only dep (starlette
