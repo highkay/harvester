@@ -121,10 +121,13 @@ tasks:
         patterns:
           key_pattern: >-
             (?i)(?:x-api-key["'\s:]*|Bearer\s+|["']\s*)([A-Za-z0-9\-]{20,})
-      - query: '"x-api-key" "exa"'
-        patterns:
-          key_pattern: >-
-            (?i)(?:x-api-key["'\s:]*|Bearer\s+|["']\s*)([A-Za-z0-9\-]{20,})
+      # The '"x-api-key" "exa"' dork was REMOVED 2026-10-18: it was 88.5% of
+      # the measured supply and 99.95% noise on prod (129,416 materials -> 25
+      # valid) — "exa" matches example/examination pages, breaking the anchor
+      # at the query level; the wide override then harvested every hex-ish
+      # string and the check stage (≈26 verdicts/min) could never drain the
+      # queue before the 36h watch deadline. Remaining supply ≈95k >= 10k
+      # keeps the daily tier. Re-add only with a corpus-measured pattern.
       - query: '"exa" "api key" extension:env'
     rate_limit:
       # Same measured pace as ratelimits.exa above: 0.2 req/s = 5 s/key.

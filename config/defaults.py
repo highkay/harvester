@@ -545,15 +545,16 @@ def get_default_config() -> Dict[str, Any]:
                             )
                         },
                     },
-                    {
-                        "query": '"x-api-key" "exa"',
-                        "patterns": {
-                            "key_pattern": (
-                                r'(?i)(?:x-api-key["\'\s:]*|Bearer\s+|'
-                                r'["\']\s*)([A-Za-z0-9\-]{20,})'
-                            )
-                        },
-                    },
+                    # The `"x-api-key" "exa"` dork was REMOVED 2026-10-18:
+                    # 729,088 of 823,880 total supply (88.5%) and measured on
+                    # prod as 99.95% noise (129,416 materials → 25 valid) —
+                    # "exa" matches example/examination pages, so the anchor
+                    # is broken at the QUERY level and the wide override then
+                    # harvested every hex-ish string; the check stage (≈26
+                    # verdicts/min) can never drain it and the run hits the
+                    # 36 h watch deadline. Remaining supply ≈95k ≥ 10k keeps
+                    # the daily tier. Re-add only with a corpus-measured
+                    # pattern, per the serpapi fixed-32 lesson.
                     {"query": '"exa" "api key" extension:env'},
                 ],
                 # Lockstep with the hardened providers (tavily/kimi lineage):
