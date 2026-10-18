@@ -239,8 +239,8 @@ class TestSeedListShape(unittest.TestCase):
     # weekly-floor policy for cold providers); weekdays NAME-based — see the
     # APScheduler numeric-dow footgun note in _EXPECTED_CRONS.
     _PINNED_ENTRIES = {
-        "ollama": ("0 3 * * mon,thu", "examples/config-ollama.yaml"),
-        "openrouter": ("0 8 * * mon,thu", "examples/config-openrouter.yaml"),
+        "ollama": ("0 3 * * mon", "examples/config-ollama.yaml"),
+        "openrouter": ("0 8 * * thu", "examples/config-openrouter.yaml"),
         "nvidia": ("50 11 * * *", "examples/config-nvidia.yaml"),
         "github": ("50 */6 * * *", "examples/config-github.yaml"),
     }
@@ -1751,7 +1751,10 @@ class _FakeRunner:
     deadline flip consults so the flip can carry ``valid_keys_found``;
     ``failed_run_valid_keys`` is the scripted return value and
     ``count_valid_keys_calls`` records the ``(provider, temp_yaml_path)``
-    args it was called with.
+    args it was called with. ``_dispatch_provider_pushes`` records the
+    watch-deadline salvage dispatch (2026-10-18: the flip used to strand
+    validated keys on disk until a restart); ``dispatch_error`` scripts a
+    raise to prove the watcher swallows it.
     """
 
     def __init__(self, run_id: str = "run-fake-1") -> None:
@@ -1763,6 +1766,13 @@ class _FakeRunner:
         self.update_run_calls: list[tuple[tuple, dict]] = []
         self.failed_run_valid_keys: int | None = 0
         self.count_valid_keys_calls: list[tuple[str, object]] = []
+        self.dispatch_calls: list[tuple[str, str]] = []
+        self.dispatch_error: Exception | None = None
+
+    def _dispatch_provider_pushes(self, provider_name: str, run_id: str) -> None:
+        self.dispatch_calls.append((provider_name, run_id))
+        if self.dispatch_error is not None:
+            raise self.dispatch_error
 
     async def run_scan(
         self, provider_name: str, config_file: str | None = None
@@ -1786,6 +1796,78 @@ class _FakeRunner:
 
     def _update_run_sync(self, *args: object, **kwargs: object) -> None:
         self.update_run_calls.append((args, kwargs))
+
+
+class TestWatchDeadlineSalvagePush(unittest.TestCase):
+    """The 2026-10-18 stranded-keys gap: a watch-deadline flip must ALSO
+    dispatch the provider pushes when validated keys sit on disk — the
+    startup-only recovery (``recover_unpushed_runs``) never fires without a
+    restart, and each provider's next clean-start run resets
+    ``valid-keys.txt``. Measured on prod: brave/exa/nvidia were flipped at
+    the 36 h deadline holding 155 validated keys with no push.
+    """
+
+    def _run_watch(self, fake: "_FakeRunner") -> None:
+        async def _scenario() -> None:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                svc = _make_service_with_row(
+                    tmpdir, "deepseek", "examples/config-deepseek.yaml"
+                )
+                with patch("web.scheduler._lazy_get_runner", return_value=fake), patch(
+                    "web.scheduler._WATCH_POLL_SECONDS", 0.01
+                ), patch(
+                    "web.scheduler._RUN_WATCH_MAX_HOURS", 1e-5, create=True
+                ):
+                    await svc.trigger_manual("deepseek")
+                    self.assertTrue(svc.is_running("deepseek"))
+                    released = await _released_within(svc, "deepseek", attempts=300)
+                    self.assertTrue(released, "watch must still release at deadline")
+                await svc.shutdown()
+
+        _run_async(_scenario())
+
+    def test_flip_with_validated_keys_dispatches_salvage_push(self) -> None:
+        fake = _FakeRunner()
+        fake.failed_run_valid_keys = 17
+
+        self._run_watch(fake)
+
+        self.assertEqual(len(fake.update_run_calls), 1)
+        self.assertEqual(
+            fake.dispatch_calls,
+            [("deepseek", fake.run_id)],
+            "a deadline flip holding validated keys must dispatch the pushes "
+            "through the same idempotent path the completion hook uses",
+        )
+
+    def test_flip_without_keys_skips_dispatch(self) -> None:
+        fake = _FakeRunner()
+        fake.failed_run_valid_keys = 0
+
+        self._run_watch(fake)
+
+        self.assertEqual(len(fake.update_run_calls), 1)
+        self.assertEqual(
+            fake.dispatch_calls,
+            [],
+            "zero validated keys must not fire a pointless dispatch",
+        )
+
+    def test_dispatch_error_is_swallowed_and_flip_still_lands(self) -> None:
+        fake = _FakeRunner()
+        fake.failed_run_valid_keys = 5
+        fake.dispatch_error = RuntimeError("push layer down")
+
+        self._run_watch(fake)
+
+        self.assertEqual(len(fake.update_run_calls), 1)
+        args, kwargs = fake.update_run_calls[0]
+        self.assertEqual(args[:2], (fake.run_id, "failed"))
+        self.assertEqual(
+            fake.dispatch_calls,
+            [("deepseek", fake.run_id)],
+            "the dispatch was attempted before it raised",
+        )
 
 
 def _make_service_with_row(tmpdir: str, provider: str, config_file: str):

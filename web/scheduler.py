@@ -726,6 +726,16 @@ class SchedulerService:
         provider and inflating ``_active_run_count`` toward the concurrency
         cap. (Startup ``web.db.reconcile_running_runs`` remains the backstop
         for rows stranded across a restart.)
+
+        The flip also dispatches the provider pushes itself when the count is
+        >0 (measured gap 2026-10-18: three check-bound runs — brave/exa/nvidia
+        — were flipped at the 36 h deadline holding 155 validated keys, and
+        with no restart planned the startup-only recovery would never have
+        pushed them before each provider's next clean-start run reset
+        ``valid-keys.txt``). The dispatch is the same idempotent
+        ``_dispatch_provider_pushes`` the completion hook uses, so a race with
+        a late terminal write (the flip is conditional on the row still being
+        'running') is absorbed by the push services' per-run dedup.
         """
         consecutive_poll_failures = 0
         watch_started_utc = datetime.now(timezone.utc)
@@ -803,6 +813,23 @@ class SchedulerService:
                         ),
                         only_if_running=True,
                     )
+                    if valid_keys_found:
+                        try:
+                            runner._dispatch_provider_pushes(
+                                provider_name, run_id
+                            )
+                            logger.info(
+                                f"Watch-deadline salvage push dispatched for "
+                                f"{provider_name} ({run_id_short}…, "
+                                f"{valid_keys_found} validated keys on disk)"
+                            )
+                        except Exception as exc:
+                            logger.warning(
+                                f"Watch-deadline salvage push for "
+                                f"{provider_name} ({run_id_short}…) raised "
+                                f"{exc} — startup push recovery remains the "
+                                f"backstop"
+                            )
                 except Exception as exc:
                     logger.warning(
                         f"Best-effort failed-flip for stuck run {run_id_short}… "
