@@ -3035,7 +3035,37 @@ Deployed `b5c20b7` + `e5a71a7` (config cp only, no restart; full suite **1340 OK
   time carried the OLD config; their pushes land on completion (exa already
   did: +14). The `HARVESTER_MAX_DEFERRALS` on prod is 6, not the documented 8.
 
+- **Pipeline code fixes from the same audit (deployed `524e316`, full suite
+  1353 OK / 8 skipped)**: (P1) the `max_links_per_run` cap now counts UNIQUE
+  links per run (a seen-set in SearchStage) — it used to charge raw
+  discoveries (2.5-4.2× duplicate factor), so the 120k cap bound at ~40k
+  unique and silently dropped 7-19% of pagination; (P7) per-repo fetch cap
+  (25 links/repo/run, `_github_repo_key`) — benchmark/dataset repos flooded
+  every provider's corpus (one repo = 1,587 links across 4 providers);
+  capped links stay in links.txt but are never fetched; (P3) refine axis
+  routing: file-class-qualified dorks (`extension:`/`filename:`/`path:`)
+  skip the `language:` axis (27/27 such partitions returned 0 results — 270
+  wasted requests/day measured) and go straight to `size:`; (P8) the gather
+  worker skips URLs carrying literal control characters (\n/\r/\t) — 4 in
+  1.09M corpus lines were `<blob-url>\n<path-fragment>` strings whose
+  urlsplit-based encoding silently concatenated the parts into a guaranteed
+  404 (legitimate space-carrying paths like `Chopping _tracker /main.go` are
+  NOT affected — a space is not a control character). Tests:
+  `tests/test_search_link_cap.py` (dedup + repo cap), `test_gather_raw_url.py`
+  (guard + legit-space case), `test_refine_axis_routing.py` (new).
+- **hikari forward-proxy repair (2026-10-19)**: brave served 502 through the
+  pool because 2 of 3 exit nodes were marked unavailable (`1080`
+  handshake_timeout — transient, and `7890` the dead mihomo). One
+  `POST /api/settings/forward-proxy/revalidate` re-probed both back to
+  available and brave went 200 via the pool (32s). If brave 502s again, check
+  `/api/stats/forward-proxy` first — the repair is one POST away.
+- **Restart-salvage cycle now fully automatic**: the 2026-10-19 deploy killed
+  3 live runs; startup reconciliation + `recover_unpushed_runs` re-pushed
+  brave's 36 valid keys (+26 net-new to hikari) with zero manual steps.
+
 - Run: `python -m unittest discover -s tests`. **Measured baseline 2026-10-19
+  (workstation, at `524e316`): 1353 OK / 8 skipped** — includes the P1/P3/P7/P8
+  pipeline-fix tests. **Measured baseline 2026-10-19
   (workstation, at `e5a71a7`): 1340 OK / 8 skipped** — includes the
   tightening/lockstep tests from the audit wave. **Measured baseline
   2026-10-18 (workstation, at `eb23241`): 1324 OK / 8 skipped** — includes the
