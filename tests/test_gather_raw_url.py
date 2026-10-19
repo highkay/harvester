@@ -329,6 +329,34 @@ class TestAcquisitionWorkerFetchTarget(unittest.TestCase):
         # Then it is keyed on the original blob URL so link-index dedup is stable
         self.assertEqual(stage._generate_id(task), f"gather:deepseek:{task.url}")
 
+    def test_control_character_link_is_skipped_before_any_fetch(self):
+        # Given a task whose URL carries a literal newline (2026-10-19 prod:
+        # 4 in 1,093,771 links — "<blob-url>\n<path-fragment>" — urlsplit
+        # strips \n and silently concatenates into a guaranteed-404 wire URL)
+        stage = _make_stage()
+        task = AcquisitionTask(
+            provider="deepseek",
+            url="https://github.com/owner/repo/blob/main/app.env\napp.env",
+            key_pattern="sk-x",
+        )
+        with mock.patch.object(client, "collect", return_value=[]) as collect_mock:
+            output = stage._acquisition_worker(task)
+        # Then the worker skips it and never fetches
+        self.assertIsNone(output)
+        collect_mock.assert_not_called()
+
+    def test_legitimate_space_carrying_path_is_still_fetched(self):
+        # Given a real prod shape: a directory whose name ends with a space
+        blob = "https://github.com/owner/repo/blob/main/Chopping _tracker /main.go"
+        # When the acquisition worker runs
+        output, kwargs = self._run(blob)
+        # Then it is fetched (a space is NOT a control character) at the raw URL
+        self.assertIsNotNone(output)
+        self.assertEqual(
+            kwargs["url"],
+            "https://raw.githubusercontent.com/owner/repo/main/Chopping _tracker /main.go",
+        )
+
 
 def _load_task_pattern(config_relpath: str) -> str:
     with open(REPO_ROOT / config_relpath, encoding="utf-8") as f:

@@ -67,13 +67,20 @@ def _task(page: int = 2) -> SearchTask:
 class TestSearchLinkCap(unittest.TestCase):
     def _sheet(self, links_per_call: int = 3):
         # page != 1 -> the worker calls client.search_code(query, session, page, ...)
-        # which returns (links, content).
-        return mock.MagicMock(
-            return_value=(
-                [f"https://github.com/o/r/blob/main/f{i}.env" for i in range(links_per_call)],
+        # which returns (links, content). Distinct URLs per call: the 2026-10-19
+        # dedup fix counts each URL once per run, so a same-URL-every-call mock
+        # no longer advances the cap.
+        counter = {"n": 0}
+
+        def _next(*_a: Any, **_kw: Any):
+            base = counter["n"] * links_per_call
+            counter["n"] += 1
+            return (
+                [f"https://github.com/o/r/blob/main/f{base + i}.env" for i in range(links_per_call)],
                 "",
             )
-        )
+
+        return mock.MagicMock(side_effect=_next)
 
     def test_cap_stops_further_search_and_logs_once(self):
         stage = SearchStage(_resources(max_links=5), handler=lambda _o: None)
@@ -95,6 +102,28 @@ class TestSearchLinkCap(unittest.TestCase):
         self.assertEqual(2, search_mock.call_count, "no network work past the cap")
         cap_lines = [r for r in logs.records if "per-run link cap reached" in r.getMessage()]
         self.assertEqual(1, len(cap_lines), "the cap logs exactly once per run")
+
+    def test_duplicate_links_count_once_per_run(self):
+        # 2026-10-19 audit measurement: the same URL is rediscovered 2.5-4.2x
+        # within a run (overlapping dorks + refine partitions), and charging
+        # the cap per rediscovery bound the 120k cap at ~40k unique links —
+        # nvidia/glm/tavily silently dropped 7-19% of pagination. The cap must
+        # count UNIQUE links.
+        stage = SearchStage(_resources(max_links=0), handler=lambda _o: None)
+        dupes = ["https://github.com/o/r/blob/main/dup.env"] * 3
+        search_mock = mock.MagicMock(return_value=(list(dupes), ""))
+
+        with mock.patch.object(client, "search_code", search_mock), mock.patch.object(
+            client, "get_link_index", return_value=None
+        ):
+            for _ in range(4):
+                self.assertIsNotNone(stage.process_task(_task()))
+
+        self.assertEqual(
+            3,
+            stage._gather_links_queued,
+            "4 tasks x the same 3 URLs must charge the cap for 3 unique links, not 12",
+        )
 
     def test_zero_cap_means_unlimited(self):
         stage = SearchStage(_resources(max_links=0), handler=lambda _o: None)
@@ -134,7 +163,15 @@ class TestCapStopsFanOut(unittest.TestCase):
 
         stage = SearchStage(_resources(max_links=2), handler=lambda _o: None)
         search_mock = mock.MagicMock(
-            return_value=(["https://github.com/o/r/blob/main/a.env"] * 3, "", 500)
+            return_value=(
+                [
+                    "https://github.com/o/r/blob/main/a.env",
+                    "https://github.com/o/r/blob/main/b.env",
+                    "https://github.com/o/r/blob/main/c.env",
+                ],
+                "",
+                500,
+            )
         )
 
         with mock.patch.object(client, "search_code", search_mock), mock.patch.object(
@@ -197,6 +234,47 @@ class TestCapQuiescence(unittest.TestCase):
         self.assertTrue(settled, "worker/pipeline never quiesced after the cap drop")
         self.assertEqual(1, search_mock.call_count, "only the first task may hit the network")
         self.assertEqual(2, stage._gather_links_queued)
+
+
+class TestRepoLinkCap(unittest.TestCase):
+    """Per-repo fetch cap (2026-10-19 audit, E/P7).
+
+    Benchmark/dataset repos flood every provider's corpus (one benchmark repo
+    contributed 1,587 links across 4 providers; agnes-ai's top-100 repos were
+    35% of its corpus). The cap is 25 links per repo per run; over-cap links
+    stay in links.txt (discovery record) but are not queued for fetch.
+    """
+
+    def test_repo_cap_queues_at_most_25_per_repo(self) -> None:
+        links = [f"https://github.com/o/big-repo/blob/main/f{i}.env" for i in range(30)]
+        links.append("https://github.com/other/small-repo/blob/main/app.env")
+        stage = SearchStage(_resources(max_links=0), handler=lambda _o: None)
+        search_mock = mock.MagicMock(return_value=(links, ""))
+
+        with mock.patch.object(client, "search_code", search_mock), mock.patch.object(
+            client, "get_link_index", return_value=None
+        ):
+            output = stage.process_task(_task())
+
+        self.assertIsNotNone(output)
+        assert output is not None
+        queued = [t for t, _ in output.new_tasks]
+        self.assertEqual(26, len(queued), "25 from the big repo + 1 from the small repo")
+        self.assertEqual(31, stage._gather_links_queued, "the cap counter still counts every unique link")
+
+    def test_non_github_links_are_uncapped(self) -> None:
+        links = [f"https://huggingface.co/datasets/o/r/resolve/main/f{i}.txt" for i in range(30)]
+        stage = SearchStage(_resources(max_links=0), handler=lambda _o: None)
+        search_mock = mock.MagicMock(return_value=(links, ""))
+
+        with mock.patch.object(client, "search_code", search_mock), mock.patch.object(
+            client, "get_link_index", return_value=None
+        ):
+            output = stage.process_task(_task())
+
+        self.assertIsNotNone(output)
+        assert output is not None
+        self.assertEqual(30, len(output.new_tasks))
 
 
 class TestCapConfigContract(unittest.TestCase):

@@ -258,7 +258,18 @@ class RefineEngine:
             return [query]
 
     def _divide_with_language(self, query: str) -> List[str]:
-        """Generate refined queries with adaptive refinement language level."""
+        """Generate refined queries with adaptive refinement language level.
+
+        Axis routing (measured on prod 2026-10-19): a dork qualified by a
+        file-class qualifier (``extension:`` / ``filename:`` / ``path:``) has
+        NO satisfiable ``language:`` partition — GitHub's language index does
+        not index .env/yaml/json by programming language, and 27/27 refined
+        language: children of extension:-qualified dorks returned 0 results
+        (270 wasted search requests on a day all five affected providers run).
+        File-class dorks therefore go straight to the ``size:`` axis (0%
+        zero-result measured), which is also the only axis measured to surface
+        NEW files run-over-run.
+        """
         base = query.strip() if query else ""
         if not base:
             logger.debug("No query provided for language refinement")
@@ -266,9 +277,22 @@ class RefineEngine:
 
         has_language = re.search(r"(?:^|\s)language:[^\s]+(?:\s|$)", base, flags=re.I)
         has_size = re.search(r"(?:^|\s)size:[^\s]+(?:\s|$)", base, flags=re.I)
+        has_file_class = re.search(
+            r"(?:^|\s)(?:extension|filename|path):[^\s]+(?:\s|$)", base, flags=re.I
+        )
 
         queries = set()
-        if not has_language:
+        if has_file_class:
+            if has_size:
+                logger.debug(
+                    "Cannot refine further: file-class-qualified query already carries a size axis"
+                )
+                queries.add(base)
+            else:
+                # Size-based refinement (the only working axis for file classes)
+                for size in SIZE_RANGES:
+                    queries.add(f"{base} {size}")
+        elif not has_language:
             # Language-based refinement
             for lang in POPULAR_LANGUAGES:
                 queries.add(f"{base} language:{lang}")

@@ -100,6 +100,27 @@ _BLOB_LINE_ANCHOR_RE = re.compile(r"#L\d+(?:C\d+)?(?:-L\d+(?:C\d+)?)?$")
 _BLOB_PATH_SAFE = "/@ "
 
 
+_REPO_LINK_CAP = 25
+
+
+def _github_repo_key(url: str) -> str:
+    """``owner/repo`` (lowercased) for a github.com URL, else "".
+
+    The cap unit for the per-run repo link cap (2026-10-19 audit, E/P7:
+    benchmark/dataset repos flood every provider's corpus — one benchmark
+    repo alone contributed 1,587 links across 4 providers). Non-github links
+    (hf resolve URLs, …) return "" and stay uncapped.
+    """
+    marker = "github.com/"
+    i = url.find(marker)
+    if i < 0:
+        return ""
+    parts = url[i + len(marker):].split("/")
+    if len(parts) < 2 or not parts[0] or not parts[1]:
+        return ""
+    return f"{parts[0]}/{parts[1]}".lower()
+
+
 def github_blob_to_raw(url: str) -> str:
     """Map a GitHub blob page URL to its raw.githubusercontent.com file URL.
 
@@ -161,6 +182,18 @@ class SearchStage(BasePipelineStage):
         # run_records.links_total.
         self._gather_links_queued = 0
         self._link_cap_logged = False
+        # 2026-10-19 (measured by the six-agent audit): the same URL is
+        # rediscovered by 2.5-4.2x across overlapping dorks/refinements WITHIN
+        # a run, and the cap used to charge every rediscovery — nvidia/glm/
+        # tavily hit the 120k cap after only ~40k unique links and silently
+        # dropped 7-19% of their pagination, with which dorks lost the tail
+        # decided by queue hash order. The seen-set makes the cap count
+        # UNIQUE links (bounded by the cap itself).
+        self._gather_links_seen: set[str] = set()
+        # Per-repo fetch cap (same audit, E/P7): benchmark/dataset repos flood
+        # every provider's corpus. owner/repo -> links queued this run.
+        self._repo_link_counts: dict[str, int] = {}
+        self._repo_cap_logged: set[str] = set()
 
     def _link_cap(self) -> int:
         """Per-run link cap from global.max_links_per_run (0 = unlimited).
@@ -295,6 +328,21 @@ class SearchStage(BasePipelineStage):
                             )
 
                 for link in gather_links:
+                    # Per-repo fetch cap: over-cap links stay in links.txt
+                    # (discovery record, via add_links below) but are neither
+                    # queued nor fetched this run. Logged once per repo per run.
+                    repo = _github_repo_key(link)
+                    if repo:
+                        repo_n = self._repo_link_counts.get(repo, 0)
+                        if repo_n >= _REPO_LINK_CAP:
+                            if repo not in self._repo_cap_logged:
+                                self._repo_cap_logged.add(repo)
+                                logger.info(
+                                    f"[{self.name}] repo link cap ({_REPO_LINK_CAP}/run) reached "
+                                    f"for {repo} — its further links stay recorded but unfetched"
+                                )
+                            continue
+                        self._repo_link_counts[repo] = repo_n + 1
                     acquisition_task = TaskFactory.create_acquisition_task(task.provider, link, patterns)
                     output.add_task(acquisition_task, PipelineStage.GATHER.value)
 
@@ -302,12 +350,16 @@ class SearchStage(BasePipelineStage):
                 output.add_links(task.provider, results)
                 # Count what actually drives runtime: the URLs queued for
                 # FETCH, after the link index filtered already-known links
-                # (`skip_known_links`). Counting raw discoveries would let a
-                # mature provider burn the budget on URLs it will never fetch
-                # again, and would disagree with run_records.links_total
-                # (persisted links, which include the index-skipped ones) — so
-                # the WARNING names the bounded quantity explicitly.
-                self._gather_links_queued += len(gather_links)
+                # (`skip_known_links`), deduplicated WITHIN this run (the
+                # 2026-10-19 measurement above). Counting raw discoveries
+                # would let a mature provider burn the budget on URLs it will
+                # never fetch again, and would disagree with
+                # run_records.links_total (persisted links, which include the
+                # index-skipped ones) — so the WARNING names the bounded
+                # quantity explicitly.
+                fresh = [link for link in gather_links if link not in self._gather_links_seen]
+                self._gather_links_seen.update(fresh)
+                self._gather_links_queued += len(fresh)
 
             # Handle first page results for pagination/refinement.
             # Reaching this gate with total == 0 now means the fetch SUCCEEDED
@@ -606,6 +658,20 @@ class AcquisitionStage(BasePipelineStage):
 
     def _acquisition_worker(self, task: AcquisitionTask) -> Optional[StageOutput]:
         """Pure functional acquisition worker implementation"""
+        # Boundary guard (2026-10-19): a task.url carrying literal control
+        # characters (\n \r \t) is malformed regardless of origin — the four
+        # observed "<blob-url>\n<path-fragment>" cases (4 in 1,093,771 corpus
+        # lines) get silently concatenated by urlsplit (it strips \n) into a
+        # duplicated-path URL that 404s, polluting the 404 channel used to
+        # spot genuinely dead links. Legitimate space-carrying paths (a
+        # directory named "Chopping _tracker ") are NOT affected — a space is
+        # not a control character and requotes fine.
+        if any(c in task.url for c in ("\n", "\r", "\t")):
+            logger.warning(
+                f"[{self.name}] skipping malformed link with control characters "
+                f"for {task.provider}: {task.url[:120]!r}"
+            )
+            return None
         try:
             # Fetch the RAW file body for GitHub blob pages (see
             # github_blob_to_raw): the HTML blob page is ~85x larger and its
