@@ -2963,10 +2963,81 @@ Evidence: `.omo/evidence/eval-20261018/`.
   128万. Yield trends 10-07→10-18: tavily 1816→1127, glm 519→343, glm-ai
   61→28, nvidia 1028→904, serpapi flat ~600.
 
-- Run: `python -m unittest discover -s tests`. **Measured baseline 2026-10-18
-  (workstation, at `eb23241`): 1324 OK / 8 skipped** — includes the 15 tests
-  from the egress-pin/watchdog/frequency wave. **Measured baseline 2026-09-28
-  (workstation, at `638fe74`): 932 OK / 8 skipped** — includes the
+## Ops: 2026-10-19 six-agent audit wave → extraction tightening + schedule hours + wait salvage
+
+Six parallel evidence agents (A yield / B logs / C schedule / D pools / E search
+/ F validation) audited prod read-only; reports: `.omo/evidence/eval-20261019/agent-{a..f}-*.md`.
+Deployed `b5c20b7` + `e5a71a7` (config cp only, no restart; full suite **1340 OK
+/ 8 skipped**). The wave's findings and what was done with them:
+
+- **Validation judges are trustworthy (F)**: 233 invalid-bucket re-probes, 0.0%
+  misclassification. The wait buckets, though, are full of recoverable keys —
+  nvidia 91/94, glm 173/183, glm-ai 25/31 re-validated as VALID — because they
+  park keys that hit transient 429/1305 congestion and nothing re-checks them.
+  Salvage ran 2026-10-19 (script `.omo/evidence/eval-20261019/wait_recovery_20261019.py`,
+  container /tmp/waitcopy/): nvidia +1 / glm +1 / glm-ai +0 net-new (the pools
+  already held most of them — the hygiene value is the fresh alive signal).
+- **Extraction tightened to measured key shapes (E's P6)** — whole-corpus
+  measured, 100% of current valid keys retained in every provider: brave wide
+  override now captures only `BSA`-prefixed (case-SENSITIVE prefix via scoped
+  `(?-i:...)`) — cuts materials -99.6%; exa UUID shape -90.5%; ollama
+  `<32hex>.<16+>` -84.7%; modelscope `ms-` floor 36 -51.3%; openrouter `sk-or-v1-`
+  floor 64 -30.9%; tavily floor 32 -26.3%; nvidia `nvapi-` floor 64 -24.7%;
+  agnes-ai `sk-` floor 48 + `or|kimi` vendor exclusions -6.6%. Pinned by
+  `tests/test_pattern_tightening_20261019.py` (defaults↔examples lockstep
+  included) + updated brave/exa/modelscope pattern tests. Tripwire: if a run's
+  candidate volume collapses to near-zero, re-widen that provider's floor.
+- **glm/glm-ai body charset widened** `[A-Za-z0-9]` → `[A-Za-z0-9_-]`
+  (extraction + `tools/patterns.py` redaction — the redaction half only takes
+  effect on the next restart): 52% of measured valid keys on the SHARED
+  `<32hex>.<body>` shape (ollama corpus) carry `_`/`-`, so glm-format keys with
+  such bodies were neither extractable nor redactable. glm's own corpus is
+  all-alnum today — re-measure after one run; if candidate count collapses,
+  revert.
+- **Dork composition (E's P2/P4/P5)**: `size:` triplets added for the capped
+  rich classes (tavily env+json, nvidia env+json, serpapi env, ollama env) —
+  these classes sit at the 1,000-result window and their `language:` refine
+  partitions are 27/27 zero-result (extension:-qualified dorks cannot be
+  language-partitioned); openrouter gained its first class-qualified dorks
+  (env/yaml); brave's zero-result `extension:env` dork swapped to
+  `filename:.env` + two `BRAVE_SEARCH_API_KEY` class dorks; opencode's three
+  broad domain dorks removed (0 page-1 keys in 3 runs, 0 valid ever).
+- **Schedule hours** (C's collision-minimal proposal, applied hot via PUT +
+  seed list synced): glm `0 14 * * mon,wed,fri`, glm-ai `0 16 * * wed`, brave
+  `0 20 * * *`, exa `0 22 * * *`, opencode `0 18 * * sat`, agnes-ai
+  `30 17 * * fri`, openrouter `30 7 * * thu`. Rationale measured: search-phase
+  overlap is the only real quota cost (cooldown events concentrate in the
+  2-3-way overlap windows; solo searches produce zero at any hour); the
+  10:00-16:00 storm note is STALE — the real burst is tavily's own 09:00
+  search phase (~29 req/min against the per-token ceiling, 09:00-11:30).
+- **openrouter gpt-load group 9** had `validation_endpoint: ""` → gpt-load
+  validated against OpenRouter's PUBLIC `/v1/models` (the documented
+  false-positive trap, live: 951 cumulative failures, 0 marked invalid).
+  Fixed to `/v1/key` via `PUT /api/groups/9` (hot, verified).
+- **E's deep findings (next rounds, NOT done)**: (P1) `max_links_per_run`
+  counts UN-deduplicated discoveries (2.5-4.2× dup factor) so the 120k cap
+  binds at ~40k unique links and silently drops 7-19% of pagination —
+  `links_total` overstates corpora by the same factor; (P3) the refine axis
+  should partition by `size:` FIRST (0% zero-result vs language's 37.4%, and
+  100% for extension:-qualified dorks) and skip refining partitions that stay
+  >1,000; (P7) per-repo caps (one benchmark repo = 1,587 links across 4
+  providers); (P8) 4 malformed link lines (spaces in paths split them →
+  guaranteed false 404s, same family as the 09-30 fix).
+- **D's pool-side findings (out of harvester scope — for the hikari repo /
+  gpt-load config)**: hikari's forward-proxy is down to 1 of 3 exit nodes
+  (brave 502s through the pool; the 11 harvested keys are fine); 530
+  quota-exhausted tavily keys have no `quota_renews_at` and can never
+  reactivate (~530k credits parked); gpt-load tracks failure_count but never
+  evicts. **Watch item**: brave/exa catch-up runs still in flight at deploy
+  time carried the OLD config; their pushes land on completion (exa already
+  did: +14). The `HARVESTER_MAX_DEFERRALS` on prod is 6, not the documented 8.
+
+- Run: `python -m unittest discover -s tests`. **Measured baseline 2026-10-19
+  (workstation, at `e5a71a7`): 1340 OK / 8 skipped** — includes the
+  tightening/lockstep tests from the audit wave. **Measured baseline
+  2026-10-18 (workstation, at `eb23241`): 1324 OK / 8 skipped** — includes the
+  15 tests from the egress-pin/watchdog/frequency wave. **Measured baseline
+  2026-09-28 (workstation, at `638fe74`): 932 OK / 8 skipped** — includes the
   restart-lifecycle + disk-bounds tests added that day. The 2026-09-24 baseline was
   846 OK / 8 skipped (dirty worktree on `main`). The 2026-09-23 baseline was
   726 OK / 8 skipped in a clean checkout of `0e3b8fc` (the "572 OK as of
