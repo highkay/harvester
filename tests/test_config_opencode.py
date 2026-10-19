@@ -72,7 +72,7 @@ class TestConfigOpenCodePresetLoads(unittest.TestCase):
         pattern = self.config.tasks[0].patterns.key_pattern
         self.assertTrue(pattern, "key_pattern must not be empty")
         rx = re.compile(pattern)
-        key = "sk-" + ("A9gx" * 6)  # sk- + 24 alnum chars
+        key = "sk-" + ("A9gx" * 13)  # sk- + 52 alnum chars (48+ floor measured 2026-10-19)
         self.assertTrue(rx.search(f"OPENCODE_API_KEY={key}"), "must match env assignment")
         anthropic = "sk-ant-api03-" + ("A9gx" * 6)
         self.assertIsNone(
@@ -80,23 +80,19 @@ class TestConfigOpenCodePresetLoads(unittest.TestCase):
             "must not match sk-ant- anthropic keys",
         )
 
-    def test_domain_condition_matches_bearer_keys(self) -> None:
-        conditions = self.config.tasks[0].conditions
-        domain = [
-            condition
-            for condition in conditions
-            if condition.query == '"opencode.ai/zen"'
-        ]
-        self.assertTrue(domain, "preset needs the domain-anchored condition")
-        pattern = domain[0].patterns.key_pattern
-        self.assertTrue(pattern, "domain condition key_pattern must not be empty")
-        rx = re.compile(pattern)
-        key = "sk-" + ("A9gx" * 6)
-        self.assertTrue(rx.search(f"Bearer {key}"), "must match Bearer sk- keys")
-        self.assertIsNone(
-            rx.search(f"Bearer sk-proj-{('A9gx' * 6)[4:]}"),
-            "must not match sk-proj- project keys",
-        )
+    def test_broad_domain_dorks_removed(self) -> None:
+        # 2026-10-19: the three broad domain dorks measured 0 page-1 keys in 3
+        # prod runs with 0 valid keys ever (the corpus is docs/placeholders) —
+        # removed; the env/yaml pair stays as the weekly-floor probe.
+        queries = [str(condition.query) for condition in self.config.tasks[0].conditions]
+        for dropped in (
+            '"opencode.ai/zen"',
+            '"opencode.ai" "Authorization"',
+            '"opencode.ai" "api_key"',
+        ):
+            self.assertNotIn(dropped, queries)
+        self.assertIn('"OPENCODE_API_KEY" extension:env', queries)
+        self.assertIn('"OPENCODE_API_KEY" extension:yaml', queries)
 
     def test_conditions_non_empty_queries(self) -> None:
         conditions = self.config.tasks[0].conditions

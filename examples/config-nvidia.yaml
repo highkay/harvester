@@ -79,7 +79,9 @@ tasks:
       timeout: 30
       retries: 3
     patterns:
-      key_pattern: "nvapi-[0-9A-Za-z_-]{20,}"
+      # Width floor 64 measured on the full corpus (2026-10-19: 858/858 valid
+      # keys >= 64 body chars; materials -24.7%). Floor, no ceiling.
+      key_pattern: "nvapi-[0-9A-Za-z_-]{64,}"
       address_pattern: ""
       endpoint_pattern: ""
       model_pattern: ""
@@ -104,11 +106,18 @@ tasks:
       - query: '"nvapi-" language:Java'
       - query: '"nvapi-" language:Shell'
       - query: '"nvapi-" extension:env'
+      # Size triplets for the two capped rich classes (env: 500 results @ 56
+      # keys/100 — the densest dork measured fleet-wide; json: 2,144 @ 11/100).
+      - query: '"nvapi-" extension:env size:1..1000'
+      - query: '"nvapi-" extension:env size:1000..10000'
+      - query: '"nvapi-" extension:env size:>10000'
+      - query: '"nvapi-" extension:json size:1..1000'
+      - query: '"nvapi-" extension:json size:1000..10000'
+      - query: '"nvapi-" extension:json size:>10000'
       - query: '"nvapi-" extension:json'
       - query: '"nvapi-" extension:yaml'
       - query: '"nvapi-" extension:yml'
       - query: '"nvapi-" extension:toml'
-      - query: '"nvapi-" extension:md'
     rate_limit:
       base_rate: 0.1
       burst_limit: 1

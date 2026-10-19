@@ -1,15 +1,19 @@
 """Behavioral tests for the Brave key patterns.
 
-Pins the 2026-10-15 self-match fix: the wide domain-anchored override pattern's
-bare-quote branch used to capture the literal header name from curl-style
-lines (``-H "x-subscription-token: <token>"`` — the name is exactly 20
-charset-legal chars). A ``(?i)``-scoped negative lookahead after the opening
-alternation now skips it, while the explicit ``X-Subscription-Token`` branch
-still consumes name+separator and captures the token.
+Pins the 2026-10-15 self-match fix (superseded 2026-10-19 by the BSA anchor,
+see below) and the 2026-10-19 measured tightening: the wide domain-anchored
+override now captures ONLY BSA-prefixed tokens — measured on the full prod
+corpus: the BSA prefix kept 26/26 valid keys while cutting materials -99.6%
+(the prefix-less capture flooded the check stage with word-like prose at a
+0.14% valid rate). The capture scope ``(?-i:...)`` keeps the prefix
+CASE-SENSITIVE while the header context stays case-insensitive; the header
+name cannot self-match because it does not start with BSA (the old lookahead
+is gone — dead weight).
 
 Invariants:
   - the curl -H line above captures the TOKEN, never the header name;
   - Bearer and quoted-token forms still capture the token;
+  - non-BSA strings of the same length/charset do NOT match the wide override;
   - exactly ONE capture group everywhere (``findall`` returns the key string);
   - the config/defaults.py brave preset stays in lockstep with
     examples/config-brave.yaml (task pattern + wide override, parsed values);
@@ -34,7 +38,8 @@ _PRESET = "brave"
 
 
 def _real_key() -> str:
-    return "".join(("aB3d", "E5fG", "7hI9", "jK1l", "M3nO", "5pQ7", "rS9t", "U1vW", "3xY5", "zA7b"))
+    # Measured shape: BSA prefix + 28-char mixed body (31 total).
+    return "".join(("BSA", "aB3d", "E5fG", "7hI9", "jK1l", "M3nO", "5pQ7", "rS9t", "U1vW"))
 
 
 def _example_task() -> dict:
@@ -140,6 +145,17 @@ class TestBraveKeyPattern(unittest.TestCase):
                     self.wide_regexes["preset"].findall(probe),
                     f"{name} wide {probe}",
                 )
+
+    def test_wide_pattern_rejects_non_bsa_strings(self) -> None:
+        # The 2026-10-19 tightening: the wide override must NOT capture
+        # prefix-less tokens (the prose flood it caused measured 99.86%
+        # junk). Same length/charset, no BSA prefix -> no match.
+        junk = "".join(("aB3d", "E5fG", "7hI9", "jK1l", "M3nO", "5pQ7", "rS9t", "U1vW"))
+        for name, rx in self.wide_regexes.items():
+            self.assertEqual(rx.findall('"' + junk + '"'), [], name)
+            self.assertEqual(rx.findall("Bearer " + junk), [], name)
+            # lowercase prefix: the key prefix is case-sensitive
+            self.assertEqual(rx.findall('"bsa' + junk + '"'), [], name)
 
     def test_task_pattern_env_anchored(self) -> None:
         key = _real_key()

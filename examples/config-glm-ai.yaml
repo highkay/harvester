@@ -101,7 +101,9 @@ tasks:
       retries: 3
       use_proxy: false  # z.ai is directly reachable post host-networking (see egress note above)
     patterns:
-      key_pattern: "[0-9a-f]{32}\\.[A-Za-z0-9]{16,}"
+      # Body charset widened [A-Za-z0-9] -> [A-Za-z0-9_-] (see config-glm.yaml
+      # for the 2026-10-19 measurement).
+      key_pattern: "[0-9a-f]{32}\\.[A-Za-z0-9_-]{16,}"
       address_pattern: ""
       endpoint_pattern: ""
       model_pattern: ""

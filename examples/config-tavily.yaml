@@ -108,7 +108,10 @@ tasks:
       timeout: 30
       retries: 3
     patterns:
-      key_pattern: "(?:tvly|tavily)-[0-9A-Za-z_-]{20,}"
+      # Width floor 32 measured on the full corpus (2026-10-19: 1,043/1,043 valid
+      # keys >= 32 body chars; materials -26.3%, dropping the tvly-rec/slug
+      # prose class). Floor, no ceiling.
+      key_pattern: "(?:tvly|tavily)-[0-9A-Za-z_-]{32,}"
       address_pattern: ""
       endpoint_pattern: ""
       model_pattern: ""
@@ -135,11 +138,19 @@ tasks:
       - query: '"tvly-" language:Go'
       - query: '"tvly-" language:Shell'
       - query: '"tvly-" extension:env'
+      # Size triplets: the env class sits at the 1,000-result cap (1,004-1,094
+      # results, 51 keys/100) and its language: refinements are 27/27
+      # zero-result — size: partitions walk the whole class (measured 2026-10-19).
+      - query: '"tvly-" extension:env size:1..1000'
+      - query: '"tvly-" extension:env size:1000..10000'
+      - query: '"tvly-" extension:env size:>10000'
       - query: '"tvly-" extension:json'
+      - query: '"tvly-" extension:json size:1..1000'
+      - query: '"tvly-" extension:json size:1000..10000'
+      - query: '"tvly-" extension:json size:>10000'
       - query: '"tvly-" extension:yaml'
       - query: '"tvly-" extension:yml'
       - query: '"tvly-" extension:toml'
-      - query: '"tvly-" extension:md'
       - query: '"tavily-" language:Python'
       - query: '"tavily-" extension:env'
     rate_limit:

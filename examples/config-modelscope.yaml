@@ -85,11 +85,14 @@ tasks:
     patterns:
       # ms- SDK/user tokens are extracted only from MODELSCOPE_* env-name
       # assignments; there is no bare [0-9A-Za-z_-]{20,} branch, so raw
-      # alnum runs in matched blobs do not flood the check stage.
+      # alnum runs in matched blobs do not flood the check stage. The 36-char
+      # floor is measured (2026-10-19 whole-corpus: 58/58 valid keys >= 36;
+      # materials -51.3%). Re-widen if a future run shows near-zero
+      # candidates. Floor, no ceiling.
       # Domain-anchored conditions below widen to Bearer/quoted or oauth2
       # URL extraction.
       key_pattern: >-
-        (?i)(?:MODELSCOPE_API_TOKEN|MODELSCOPE_SDK_TOKEN|MODELSCOPE_ACCESS_TOKEN|MODELSCOPE_API_KEY)[\"'\]]{0,2}\s*[:=]\s*[\"']?(ms-[A-Za-z0-9_-]{8,})[\"']?
+        (?i)(?:MODELSCOPE_API_TOKEN|MODELSCOPE_SDK_TOKEN|MODELSCOPE_ACCESS_TOKEN|MODELSCOPE_API_KEY)[\"'\]]{0,2}\s*[:=]\s*[\"']?(ms-[A-Za-z0-9_-]{36,})[\"']?
       address_pattern: ""
       endpoint_pattern: ""
       model_pattern: ""
@@ -115,20 +118,20 @@ tasks:
       - query: '"modelscope.cn" "Authorization"'
         patterns:
           key_pattern: >-
-            (?i)(?:Bearer\s+|[\"']\s*)?(ms-[A-Za-z0-9_-]{8,})
+            (?i)(?:Bearer\s+|[\"']\s*)?(ms-[A-Za-z0-9_-]{36,})
       # Git URL oauth2 form: https://oauth2:ms-XXX@modelscope.cn/...
       - query: '"oauth2:" "modelscope.cn"'
         patterns:
           key_pattern: >-
-            oauth2:(ms-[A-Za-z0-9_-]{8,})@
+            oauth2:(ms-[A-Za-z0-9_-]{36,})@
       - query: '"api-inference.modelscope.cn"'
         patterns:
           key_pattern: >-
-            (?i)(?:Bearer\s+|[\"']\s*)?(ms-[A-Za-z0-9_-]{8,})
+            (?i)(?:Bearer\s+|[\"']\s*)?(ms-[A-Za-z0-9_-]{36,})
       - query: '"api-inference.modelscope.cn" "Authorization"'
         patterns:
           key_pattern: >-
-            (?i)(?:Bearer\s+|[\"']\s*)?(ms-[A-Za-z0-9_-]{8,})
+            (?i)(?:Bearer\s+|[\"']\s*)?(ms-[A-Za-z0-9_-]{36,})
     rate_limit:
       base_rate: 0.2
       burst_limit: 2

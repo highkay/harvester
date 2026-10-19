@@ -1,11 +1,9 @@
 """Behavioral tests for the Exa key patterns.
 
-Pins the header-name self-match property for the exa wide override: unlike
-brave's ``X-Subscription-Token`` (exactly 20 charset-legal chars, which the
-bare-quote branch once captured from curl-style ``-H`` lines and now needs a
-negative lookahead), the exa header name ``x-api-key`` is 9 chars — under the
-wide override's 20-char capture floor — so it can never self-match. That
-property is pinned here numerically in addition to the behavioral battery.
+Pins the header-name self-match property for the exa wide override: the exa
+header name ``x-api-key`` is 9 chars and not UUID-shaped, so it can never
+self-match. 2026-10-19: the capture tightened to the measured key shape
+(UUID) — whole-corpus measured: 38/38 valid keys kept, materials -90.5%.
 
 Invariants:
   - the curl -H line above captures the TOKEN, never the header name;
@@ -35,7 +33,8 @@ _PRESET = "exa"
 
 
 def _real_key() -> str:
-    return "".join(("aB3dE5fG-", "7hI9jK1l-", "M3nO5pQ7-", "rS9tU1vW-", "3xY5zA7b"))
+    # Measured shape: UUID (8-4-4-4-12 lowercase hex).
+    return "".join(("a1b2c3d4", "-", "e5f6", "-", "7890", "-", "abcd", "-", "ef123456", "7890"))
 
 
 def _example_task() -> dict:
@@ -87,13 +86,20 @@ class TestExaKeyPattern(unittest.TestCase):
             self.assertNotIn("x-api-key", captures, name)
 
     def test_header_name_below_wide_capture_floor(self) -> None:
-        # x-api-key is 9 chars, under the wide override's 20-char capture
-        # floor — the property that makes the self-match impossible in the
-        # first place (brave's 20-char name needed an explicit lookahead).
+        # x-api-key is 9 chars and not UUID-shaped — the property that makes
+        # self-match impossible (brave's 20-char name needed an explicit
+        # lookahead before its BSA anchor).
         self.assertLess(len("x-api-key"), 20)
         for name, pattern in self.wide_patterns.items():
             self.assertEqual(re.compile(pattern).groups, 1, name)
             self.assertIsNone(re.compile(pattern).match("x-api-key"), name)
+
+    def test_wide_pattern_rejects_non_uuid_strings(self) -> None:
+        # The 2026-10-19 tightening: non-UUID 20+-char strings must not match.
+        junk = "".join(("aB3dE5fG", "7hI9jK1l", "M3nO5pQ7", "rS9tU1vW"))
+        for name, rx in self.wide_regexes.items():
+            self.assertEqual(rx.findall('"' + junk + '"'), [], name)
+            self.assertEqual(rx.findall("Bearer " + junk), [], name)
 
     def test_header_name_branch_still_captures_token(self) -> None:
         key = _real_key()

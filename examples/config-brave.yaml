@@ -115,17 +115,25 @@ tasks:
       # Each GitHub API search query has its own 1000-result window.
       - query: '"BRAVE_API_KEY"'
       - query: '"BRAVE_SEARCH_API_KEY"'
-      # Domain/header-anchored blobs: allow the token-header forms a plain
-      # assignment anchor would miss.
+      # Domain/header-anchored blobs: the capture is BSA-anchored (measured
+      # 2026-10-19 on the full corpus: BSA prefix kept 26/26 valid keys while
+      # cutting materials -99.6%; the previous prefix-less capture flooded the
+      # check stage with word-like prose at a 0.14% valid rate). The (?-i:...)
+      # scope keeps the prefix case-SENSITIVE while the header context stays
+      # case-insensitive.
       - query: '"api.search.brave.com"'
         patterns:
           key_pattern: >-
-            (?i)(?:X-Subscription-Token["'\s:]*|Bearer\s+|["']\s*)(?!x-subscription-token)([A-Za-z0-9_\-]{20,})
+            (?i)(?:X-Subscription-Token["'\s:]*|Bearer\s+|["']\s*)(?-i:(BSA[A-Za-z0-9_-]{20,}))
       - query: '"X-Subscription-Token" "brave"'
         patterns:
           key_pattern: >-
-            (?i)(?:X-Subscription-Token["'\s:]*|Bearer\s+|["']\s*)(?!x-subscription-token)([A-Za-z0-9_\-]{20,})
-      - query: '"brave" "subscription token" extension:env'
+            (?i)(?:X-Subscription-Token["'\s:]*|Bearer\s+|["']\s*)(?-i:(BSA[A-Za-z0-9_-]{20,}))
+      # extension:env measured 0 results in two prod runs (2026-10-15/18) —
+      # GitHub's file-class index treats .env by filename, not extension.
+      - query: '"brave" "subscription token" filename:.env'
+      - query: '"BRAVE_SEARCH_API_KEY" extension:env'
+      - query: '"BRAVE_SEARCH_API_KEY" extension:yaml'
     rate_limit:
       # Same measured pace as ratelimits.brave above: 0.2 req/s = 5 s/key.
       base_rate: 0.2

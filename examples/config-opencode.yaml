@@ -110,7 +110,7 @@ tasks:
       # with a wider Bearer/quoted variadic below. The lookahead skips
       # Anthropic/OpenAI project and service-account keys.
       key_pattern: >-
-        (?i)(?:OPENCODE_API_KEY|OPENCODE_KEY|opencode[_-]?api[_-]?key)["'\]]{0,2}\s*[:=]\s*["']?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,64})["']?
+        (?i)(?:OPENCODE_API_KEY|OPENCODE_KEY|opencode[_-]?api[_-]?key)["'\]]{0,2}\s*[:=]\s*["']?(sk-(?!(?:ant|proj|svcacct|or|kimi)-)[A-Za-z0-9]{48,})["']?
       address_pattern: ""
       endpoint_pattern: ""
       model_pattern: ""
@@ -122,19 +122,11 @@ tasks:
       - query: '"OPENCODE_API_KEY" language:Python'
       - query: '"OPENCODE_API_KEY" extension:env'
       - query: '"OPENCODE_API_KEY" extension:yaml'
-      # Domain-anchored blobs: allow Bearer/quoted sk- keys without the env name.
-      - query: '"opencode.ai/zen"'
-        patterns:
-          key_pattern: >-
-            (?i)(?:Bearer\s+|["']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,64})
-      - query: '"opencode.ai" "Authorization"'
-        patterns:
-          key_pattern: >-
-            (?i)(?:Bearer\s+|["']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,64})
-      - query: '"opencode.ai" "api_key"'
-        patterns:
-          key_pattern: >-
-            (?i)(?:Bearer\s+|["']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,64})
+      # The three broad domain dorks ("opencode.ai/zen", "opencode.ai"
+      # "Authorization"/"api_key") were REMOVED 2026-10-19: measured 0 page-1
+      # keys across 3 runs, 0 valid keys ever, ~48k family links/run for 23
+      # junk candidates - the corpus carries docs/placeholders only. The
+      # env/yaml pair above stays as the weekly-floor probe.
     rate_limit:
       base_rate: 1.0
       burst_limit: 5

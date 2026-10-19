@@ -103,14 +103,16 @@ tasks:
       timeout: 30
       retries: 3
     patterns:
-      # Agnes keys are sk- Bearer keys. Default extraction only captures
+      # Agnes keys are sk- Bearer keys. The 48+ alnum floor and the or|kimi
+      # vendor exclusions are measured (2026-10-19 whole-corpus: 41/41 valid
+      # kept, materials -6.6%). Default extraction only captures
       # assignments anchored to Agnes env names, so raw sk- runs (checksums,
       # unrelated providers) in matched blobs do not flood the check stage.
       # Domain-anchored conditions override with a wider Bearer/quoted
       # variadic below. The lookahead skips Anthropic/OpenAI project and
       # service-account keys.
       key_pattern: >-
-        (?i)(?:AGNES_API_KEY|AGNES_AI_API_KEY|AGNES_KEY|agnes[_-]?(?:ai[_-]?)?api[_-]?key)["'\]]{0,2}\s*[:=]\s*["']?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,64})["']?
+        (?i)(?:AGNES_API_KEY|AGNES_AI_API_KEY|AGNES_KEY|agnes[_-]?(?:ai[_-]?)?api[_-]?key)["'\]]{0,2}\s*[:=]\s*["']?(sk-(?!(?:ant|proj|svcacct|or|kimi)-)[A-Za-z0-9]{48,})["']?
       address_pattern: ""
       endpoint_pattern: ""
       model_pattern: ""
@@ -126,15 +128,15 @@ tasks:
       - query: '"apihub.agnes-ai.com"'
         patterns:
           key_pattern: >-
-            (?i)(?:Bearer\s+|["']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,64})
+            (?i)(?:Bearer\s+|["']\s*)?(sk-(?!(?:ant|proj|svcacct|or|kimi)-)[A-Za-z0-9]{48,})
       - query: '"apihub.agnes-ai.com" "Authorization"'
         patterns:
           key_pattern: >-
-            (?i)(?:Bearer\s+|["']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,64})
+            (?i)(?:Bearer\s+|["']\s*)?(sk-(?!(?:ant|proj|svcacct|or|kimi)-)[A-Za-z0-9]{48,})
       - query: '"agnes-ai.com" "api_key"'
         patterns:
           key_pattern: >-
-            (?i)(?:Bearer\s+|["']\s*)?(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,64})
+            (?i)(?:Bearer\s+|["']\s*)?(sk-(?!(?:ant|proj|svcacct|or|kimi)-)[A-Za-z0-9]{48,})
     rate_limit:
       base_rate: 1.0
       burst_limit: 5

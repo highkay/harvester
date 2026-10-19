@@ -103,11 +103,12 @@ tasks:
       timeout: 30
       retries: 3
     patterns:
-      # Env-anchored extraction only: no width ceiling and no prefix
-      # assumption (exa key format unmeasured - measured corpus first, then
-      # align). Domain/header dorks override with a wider pattern below.
+      # Env-anchored extraction; the capture is the measured exa key shape
+      # (UUID — measured 2026-10-19 on the full corpus: 38/38 valid keys,
+      # materials -90.5%). No ceiling beyond the UUID form; re-measure if exa
+      # ever rotates the format.
       key_pattern: >-
-        (?i)(?:exa[_-]?(?:api[_-]?)?key)["'\]]{0,2}\s*[:=]\s*["']?([A-Za-z0-9\-]{16,})["']?
+        (?i)(?:exa[_-]?(?:api[_-]?)?key)["'\]]{0,2}\s*[:=]\s*["']?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})["']?
       address_pattern: ""
       endpoint_pattern: ""
       model_pattern: ""
@@ -120,7 +121,7 @@ tasks:
       - query: '"api.exa.ai"'
         patterns:
           key_pattern: >-
-            (?i)(?:x-api-key["'\s:]*|Bearer\s+|["']\s*)([A-Za-z0-9\-]{20,})
+            (?i)(?:x-api-key["'\s:]*|Bearer\s+|["']\s*)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})
       # The '"x-api-key" "exa"' dork was REMOVED 2026-10-18: it was 88.5% of
       # the measured supply and 99.95% noise on prod (129,416 materials -> 25
       # valid) — "exa" matches example/examination pages, breaking the anchor

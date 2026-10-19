@@ -72,7 +72,7 @@ class TestConfigAgnesAIPresetLoads(unittest.TestCase):
         pattern = self.config.tasks[0].patterns.key_pattern
         self.assertTrue(pattern, "key_pattern must not be empty")
         rx = re.compile(pattern)
-        key = "sk-" + ("A9gx" * 6)  # sk- + 24 alnum chars
+        key = "sk-" + ("A9gx" * 13)  # sk- + 52 alnum chars (48+ floor measured 2026-10-19)
         self.assertTrue(rx.search(f"AGNES_API_KEY={key}"), "must match env assignment")
         anthropic = "sk-ant-api03-" + ("A9gx" * 6)
         self.assertIsNone(
@@ -91,7 +91,7 @@ class TestConfigAgnesAIPresetLoads(unittest.TestCase):
         pattern = domain[0].patterns.key_pattern
         self.assertTrue(pattern, "domain condition key_pattern must not be empty")
         rx = re.compile(pattern)
-        key = "sk-" + ("A9gx" * 6)
+        key = "sk-" + ("A9gx" * 13)
         self.assertTrue(rx.search(f"Bearer {key}"), "must match Bearer sk- keys")
         self.assertIsNone(
             rx.search(f"Bearer sk-proj-{('A9gx' * 6)[4:]}"),

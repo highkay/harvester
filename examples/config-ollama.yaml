@@ -74,7 +74,10 @@ tasks:
       timeout: 30
       retries: 3
     patterns:
-      key_pattern: "(?i)(?:OLLAMA_API_KEY|ollama[_-]?key)\\s*[:=]\\s*[\"']?([0-9A-Za-z._~+/=-]{20,})[\"']?"
+      # Capture tightened to the measured key shape <32 lowercase hex>.<16+
+      # body incl. _/- (2026-10-19, whole-corpus: 54/54 valid kept, materials
+      # -84.7%). Floor-only: no ceiling, per the serpapi fixed-width lesson.
+      key_pattern: "(?i)(?:OLLAMA_API_KEY|ollama[_-]?key)\\s*[:=]\\s*[\"']?([0-9a-f]{32}\\.[A-Za-z0-9_-]{16,})[\"']?"
       address_pattern: ""
       endpoint_pattern: ""
       model_pattern: ""
@@ -88,6 +91,12 @@ tasks:
       # form below targets the files that actually assign a key and stays under the
       # 1000-result cap, so pages 2..5 walk the whole class.
       - query: '"OLLAMA_API_KEY" extension:env'
+      # Size triplets fully walk this dense class (455-500 results, 26/100
+      # keys) whose language: refine partitions are 100% zero-result
+      # (extension:-qualified dorks cannot be language-partitioned).
+      - query: '"OLLAMA_API_KEY" extension:env size:1..1000'
+      - query: '"OLLAMA_API_KEY" extension:env size:1000..10000'
+      - query: '"OLLAMA_API_KEY" extension:env size:>10000'
     rate_limit:
       base_rate: 2.0
       burst_limit: 10

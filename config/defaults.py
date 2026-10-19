@@ -183,12 +183,12 @@ def get_default_config() -> Dict[str, Any]:
                     "retries": 3,
                 },
                 "patterns": {
-                    "key_pattern": "sk-or-v1-[0-9A-Za-z_-]{20,}",
+                    "key_pattern": "sk-or-v1-[0-9A-Za-z_-]{64,}",
                     "address_pattern": "",
                     "endpoint_pattern": "",
                     "model_pattern": "",
                 },
-                "conditions": [{"query": '"sk-or-v1"'}],
+                "conditions": [{"query": '"sk-or-v1"'}, {"query": '"sk-or-v1" extension:env'}, {"query": '"sk-or-v1" extension:yaml'}, {"query": '"OPENROUTER_API_KEY" extension:env'}],
                 "rate_limit": {"base_rate": 2.0, "burst_limit": 10, "adaptive": True},
                 "storage": {
                     "directory": "",
@@ -375,7 +375,7 @@ def get_default_config() -> Dict[str, Any]:
                     "retries": 3,
                 },
                 "patterns": {
-                    "key_pattern": "(?:tvly|tavily)-[0-9A-Za-z_-]{20,}",
+                    "key_pattern": "(?:tvly|tavily)-[0-9A-Za-z_-]{32,}",
                     "address_pattern": "",
                     "endpoint_pattern": "",
                     "model_pattern": "",
@@ -402,11 +402,16 @@ def get_default_config() -> Dict[str, Any]:
                     {"query": '"tvly-" language:Go'},
                     {"query": '"tvly-" language:Shell'},
                     {"query": '"tvly-" extension:env'},
+                    {"query": '"tvly-" extension:env size:1..1000'},
+                    {"query": '"tvly-" extension:env size:1000..10000'},
+                    {"query": '"tvly-" extension:env size:>10000'},
                     {"query": '"tvly-" extension:json'},
+                    {"query": '"tvly-" extension:json size:1..1000'},
+                    {"query": '"tvly-" extension:json size:1000..10000'},
+                    {"query": '"tvly-" extension:json size:>10000'},
                     {"query": '"tvly-" extension:yaml'},
                     {"query": '"tvly-" extension:yml'},
                     {"query": '"tvly-" extension:toml'},
-                    {"query": '"tvly-" extension:md'},
                     {"query": '"tavily-" language:Python'},
                     {"query": '"tavily-" extension:env'},
                 ],
@@ -468,7 +473,7 @@ def get_default_config() -> Dict[str, Any]:
                         "patterns": {
                             "key_pattern": (
                                 r'(?i)(?:X-Subscription-Token["\'\s:]*|Bearer\s+|'
-                                r'["\']\s*)(?!x-subscription-token)([A-Za-z0-9_\-]{20,})'
+                                r'["\']\s*)(?-i:(BSA[A-Za-z0-9_-]{20,}))'
                             )
                         },
                     },
@@ -477,11 +482,13 @@ def get_default_config() -> Dict[str, Any]:
                         "patterns": {
                             "key_pattern": (
                                 r'(?i)(?:X-Subscription-Token["\'\s:]*|Bearer\s+|'
-                                r'["\']\s*)(?!x-subscription-token)([A-Za-z0-9_\-]{20,})'
+                                r'["\']\s*)(?-i:(BSA[A-Za-z0-9_-]{20,}))'
                             )
                         },
                     },
-                    {"query": '"brave" "subscription token" extension:env'},
+                    {"query": '"brave" "subscription token" filename:.env'},
+                    {"query": '"BRAVE_SEARCH_API_KEY" extension:env'},
+                    {"query": '"BRAVE_SEARCH_API_KEY" extension:yaml'},
                 ],
                 # Lockstep with the hardened providers (tavily/kimi lineage):
                 # 0.2 req/s = 1 per 5 s. Keep lockstep with
@@ -522,7 +529,7 @@ def get_default_config() -> Dict[str, Any]:
                     # corpus first, then align; serpapi/modelscope house rule).
                     "key_pattern": (
                         r'(?i)(?:exa[_-]?(?:api[_-]?)?key)'
-                        r'["\'\]]{0,2}\s*[:=]\s*["\']?([A-Za-z0-9\-]{16,})["\']?'
+                        r'["\'\]]{0,2}\s*[:=]\s*["\']?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})["\']?'
                     ),
                     "address_pattern": "",
                     "endpoint_pattern": "",
@@ -541,7 +548,7 @@ def get_default_config() -> Dict[str, Any]:
                         "patterns": {
                             "key_pattern": (
                                 r'(?i)(?:x-api-key["\'\s:]*|Bearer\s+|'
-                                r'["\']\s*)([A-Za-z0-9\-]{20,})'
+                                r'["\']\s*)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})'
                             )
                         },
                     },
@@ -614,6 +621,9 @@ def get_default_config() -> Dict[str, Any]:
                     {"query": '"SERPAPI_API_KEY" language:TypeScript'},
                     {"query": '"SERPAPI_API_KEY" language:Go'},
                     {"query": '"SERPAPI_API_KEY" extension:env'},
+                    {"query": '"SERPAPI_API_KEY" extension:env size:1..1000'},
+                    {"query": '"SERPAPI_API_KEY" extension:env size:1000..10000'},
+                    {"query": '"SERPAPI_API_KEY" extension:env size:>10000'},
                     {"query": '"SERPAPI_API_KEY" extension:json'},
                     {"query": '"SERPAPI_API_KEY" extension:yaml'},
                     {"query": '"SERPAPI_API_KEY" extension:yml'},
@@ -737,7 +747,7 @@ def get_default_config() -> Dict[str, Any]:
                         r"(?i)(?:AGNES_API_KEY|AGNES_AI_API_KEY|AGNES_KEY|"
                         r"agnes[_-]?(?:ai[_-]?)?api[_-]?key)"
                         r"[\"'\]]{0,2}\s*[:=]\s*[\"']?"
-                        r"(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,64})"
+                        r"(sk-(?!(?:ant|proj|svcacct|or|kimi)-)[A-Za-z0-9]{48,})"
                         r"[\"']?"
                     ),
                     "address_pattern": "",
@@ -756,7 +766,7 @@ def get_default_config() -> Dict[str, Any]:
                         "patterns": {
                             "key_pattern": (
                                 r"(?i)(?:Bearer\s+|[\"']\s*)?"
-                                r"(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,64})"
+                                r"(sk-(?!(?:ant|proj|svcacct|or|kimi)-)[A-Za-z0-9]{48,})"
                             ),
                         },
                     },
@@ -765,7 +775,7 @@ def get_default_config() -> Dict[str, Any]:
                         "patterns": {
                             "key_pattern": (
                                 r"(?i)(?:Bearer\s+|[\"']\s*)?"
-                                r"(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,64})"
+                                r"(sk-(?!(?:ant|proj|svcacct|or|kimi)-)[A-Za-z0-9]{48,})"
                             ),
                         },
                     },
@@ -774,7 +784,7 @@ def get_default_config() -> Dict[str, Any]:
                         "patterns": {
                             "key_pattern": (
                                 r"(?i)(?:Bearer\s+|[\"']\s*)?"
-                                r"(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,64})"
+                                r"(sk-(?!(?:ant|proj|svcacct|or|kimi)-)[A-Za-z0-9]{48,})"
                             ),
                         },
                     },
@@ -817,7 +827,7 @@ def get_default_config() -> Dict[str, Any]:
                         r"(?i)(?:OPENCODE_API_KEY|OPENCODE_KEY|"
                         r"opencode[_-]?api[_-]?key)"
                         r"[\"'\]]{0,2}\s*[:=]\s*[\"']?"
-                        r"(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,64})"
+                        r"(sk-(?!(?:ant|proj|svcacct|or|kimi)-)[A-Za-z0-9]{48,})"
                         r"[\"']?"
                     ),
                     "address_pattern": "",
@@ -831,33 +841,6 @@ def get_default_config() -> Dict[str, Any]:
                     {"query": '"OPENCODE_API_KEY" language:Python'},
                     {"query": '"OPENCODE_API_KEY" extension:env'},
                     {"query": '"OPENCODE_API_KEY" extension:yaml'},
-                    {
-                        "query": '"opencode.ai/zen"',
-                        "patterns": {
-                            "key_pattern": (
-                                r"(?i)(?:Bearer\s+|[\"']\s*)?"
-                                r"(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,64})"
-                            ),
-                        },
-                    },
-                    {
-                        "query": '"opencode.ai" "Authorization"',
-                        "patterns": {
-                            "key_pattern": (
-                                r"(?i)(?:Bearer\s+|[\"']\s*)?"
-                                r"(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,64})"
-                            ),
-                        },
-                    },
-                    {
-                        "query": '"opencode.ai" "api_key"',
-                        "patterns": {
-                            "key_pattern": (
-                                r"(?i)(?:Bearer\s+|[\"']\s*)?"
-                                r"(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,64})"
-                            ),
-                        },
-                    },
                 ],
                 "rate_limit": {"base_rate": 1.0, "burst_limit": 5, "adaptive": True},
                 "storage": {
@@ -1006,7 +989,7 @@ def get_default_config() -> Dict[str, Any]:
                     "retries": 3,
                 },
                 "patterns": {
-                    "key_pattern": "[0-9a-f]{32}\\.[A-Za-z0-9]{16,}",
+                    "key_pattern": "[0-9a-f]{32}\\.[A-Za-z0-9_-]{16,}",
                     "address_pattern": "",
                     "endpoint_pattern": "",
                     "model_pattern": "",
@@ -1207,7 +1190,7 @@ def get_default_config() -> Dict[str, Any]:
                         r"(?i)(?:MODELSCOPE_API_TOKEN|MODELSCOPE_SDK_TOKEN|"
                         r"MODELSCOPE_ACCESS_TOKEN|MODELSCOPE_API_KEY)"
                         r"[\"'\]]{0,2}\s*[:=]\s*[\"']?"
-                        r"(ms-[A-Za-z0-9_-]{8,})"
+                        r"(ms-[A-Za-z0-9_-]{36,})"
                         r"[\"']?"
                     ),
                     "address_pattern": "",
@@ -1236,14 +1219,14 @@ def get_default_config() -> Dict[str, Any]:
                         "patterns": {
                             "key_pattern": (
                                 r"(?i)(?:Bearer\s+|[\"']\s*)?"
-                                r"(ms-[A-Za-z0-9_-]{8,})"
+                                r"(ms-[A-Za-z0-9_-]{36,})"
                             ),
                         },
                     },
                     {
                         "query": '"oauth2:" "modelscope.cn"',
                         "patterns": {
-                            "key_pattern": r"oauth2:(ms-[A-Za-z0-9_-]{8,})@",
+                            "key_pattern": r"oauth2:(ms-[A-Za-z0-9_-]{36,})@",
                         },
                     },
                     {
@@ -1251,7 +1234,7 @@ def get_default_config() -> Dict[str, Any]:
                         "patterns": {
                             "key_pattern": (
                                 r"(?i)(?:Bearer\s+|[\"']\s*)?"
-                                r"(ms-[A-Za-z0-9_-]{8,})"
+                                r"(ms-[A-Za-z0-9_-]{36,})"
                             ),
                         },
                     },
@@ -1260,7 +1243,7 @@ def get_default_config() -> Dict[str, Any]:
                         "patterns": {
                             "key_pattern": (
                                 r"(?i)(?:Bearer\s+|[\"']\s*)?"
-                                r"(ms-[A-Za-z0-9_-]{8,})"
+                                r"(ms-[A-Za-z0-9_-]{36,})"
                             ),
                         },
                     },

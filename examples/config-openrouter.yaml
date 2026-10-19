@@ -75,12 +75,19 @@ tasks:
       timeout: 30
       retries: 3
     patterns:
-      key_pattern: "sk-or-v1-[0-9A-Za-z_-]{20,}"
+      # Width floor 64 measured on the full corpus (2026-10-19: 56/56 valid
+      # keys >= 64 body chars; materials -30.9%). Floor, no ceiling.
+      key_pattern: "sk-or-v1-[0-9A-Za-z_-]{64,}"
       address_pattern: ""
       endpoint_pattern: ""
       model_pattern: ""
     conditions:
       - query: '"sk-or-v1"'
+      # Class-qualified dorks: openrouter's corpus is 97.3% code-class and the
+      # .env class was under-probed (52 links, 0.43%) - measured gap 2026-10-19.
+      - query: '"sk-or-v1" extension:env'
+      - query: '"sk-or-v1" extension:yaml'
+      - query: '"OPENROUTER_API_KEY" extension:env'
     rate_limit:
       base_rate: 1.0
       burst_limit: 5

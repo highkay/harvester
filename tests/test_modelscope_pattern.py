@@ -4,8 +4,10 @@ Pins the invariants of the 2026-09 rework from the naked
 ``[0-9A-Za-z_-]{20,}`` pattern to context-anchored ``ms-`` extraction:
 
   - the task-level pattern only fires on MODELSCOPE_* env-name assignments;
-  - extracted values MUST carry the ``ms-`` prefix (length-independent,
-    floor ``ms-`` + 8 — no measured real-key corpus yet, keep it broad);
+  - extracted values MUST carry the ``ms-`` prefix AND a 36+ char body
+    (floor measured 2026-10-19 on the whole prod corpus: 58/58 valid keys
+    are >= 36 body chars; the floor cuts materials -51.3%. Re-widen if a
+    future run shows near-zero candidates — the pre-measure floor was 8);
   - exactly ONE capture group: ``re.findall`` returns the key string, never
     a tuple, and no bare long-alnum branch can match without an anchor;
   - domain-anchored conditions widen to Bearer/quoted and oauth2 URL forms;
@@ -73,7 +75,8 @@ class TestModelScopeKeyPattern(unittest.TestCase):
         self.re = re.compile(self.pattern)
 
     def test_matches_ms_prefixed_env_assignment(self) -> None:
-        key = "ms-" + "Ab3xYz9" + "pQ"
+        key = "ms-" + "Ab3xYz9" + "pQ" + "K7mN2" + "xR4tV6" + "bN8wQ1" + "cZ5eS7" + "yU2iO9" + "aL0"
+        self.assertGreaterEqual(len(key) - 3, 36)
         quoted = f'MODELSCOPE_API_KEY="{key}"'
         found = self.re.findall(quoted)
         self.assertEqual(found, [key])
@@ -99,12 +102,16 @@ class TestModelScopeKeyPattern(unittest.TestCase):
         for query, pattern in _condition_patterns(_preset_task()).items():
             self.assertEqual(re.compile(pattern).groups, 1, query)
 
-    def test_length_floor_eight(self) -> None:
+    def test_length_floor_thirtysix(self) -> None:
+        body35 = "aB3d" * 8 + "xYz"
+        body36 = body35 + "9"
+        self.assertEqual(len(body35), 35)
+        self.assertEqual(len(body36), 36)
         self.assertIsNone(
-            self.re.search("MODELSCOPE_API_KEY=" + '"' + "ms-" + "Ab3xYz9" + '"')
+            self.re.search("MODELSCOPE_API_KEY=" + '"' + "ms-" + body35 + '"')
         )
         self.assertIsNotNone(
-            self.re.search("MODELSCOPE_API_KEY=" + '"' + "ms-" + "Ab3xYz9" + "pQ" + '"')
+            self.re.search("MODELSCOPE_API_KEY=" + '"' + "ms-" + body36 + '"')
         )
 
     def test_no_bare_branch(self) -> None:
@@ -112,14 +119,15 @@ class TestModelScopeKeyPattern(unittest.TestCase):
         self.assertIsNone(self.re.search(bare))
 
     def test_domain_bearer_pattern_matches(self) -> None:
-        key = "ms-" + "Kq8Rt2Wx" + "5Nv"
+        key = "ms-" + "Kq8Rt2Wx" + "5Nv" + "Hj3Lm9" + "P7sD1" + "fG6yU2" + "iO0aZ4" + "xC8vB6" + "nM1"
+        self.assertGreaterEqual(len(key) - 3, 36)
         rx = re.compile(_domain_pattern(_preset_task(), _BEARER_QUERY))
         self.assertEqual(rx.findall("Bearer " + key), [key])
         self.assertEqual(rx.findall('"' + key + '"'), [key])
         self.assertEqual(rx.findall(key), [key])
 
     def test_domain_oauth2_pattern_matches(self) -> None:
-        key = "ms-" + "Pq4Zs7Xc" + "2Mn"
+        key = "ms-" + "Pq4Zs7Xc" + "2Mn" + "Vb9Kj3" + "H6gF8" + "dS1aQ5" + "wE7rT0" + "yU4iO2" + "pL9zX3"
         rx = re.compile(_domain_pattern(_preset_task(), _OAUTH2_QUERY))
         url = "oauth2:" + key + "@api-inference.modelscope.cn"
         self.assertEqual(rx.findall(url), [key])

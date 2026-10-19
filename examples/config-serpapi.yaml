@@ -126,6 +126,12 @@ tasks:
       - query: '"SERPAPI_API_KEY" language:TypeScript'
       - query: '"SERPAPI_API_KEY" language:Go'
       - query: '"SERPAPI_API_KEY" extension:env'
+      # Size triplets fully walk this class (487 results, 24 keys/100); its
+      # language: refinements are all zero-result (extension: cannot be
+      # language-partitioned) - measured 2026-10-19.
+      - query: '"SERPAPI_API_KEY" extension:env size:1..1000'
+      - query: '"SERPAPI_API_KEY" extension:env size:1000..10000'
+      - query: '"SERPAPI_API_KEY" extension:env size:>10000'
       - query: '"SERPAPI_API_KEY" extension:json'
       - query: '"SERPAPI_API_KEY" extension:yaml'
       - query: '"SERPAPI_API_KEY" extension:yml'

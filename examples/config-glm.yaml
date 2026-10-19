@@ -94,7 +94,11 @@ tasks:
       retries: 3
       use_proxy: false  # domestic endpoint — connect directly
     patterns:
-      key_pattern: "[0-9a-f]{32}\\.[A-Za-z0-9]{16,}"
+      # Body charset widened [A-Za-z0-9] -> [A-Za-z0-9_-] (2026-10-19: 52% of
+      # measured valid keys on the SHARED <32hex>.<body> shape (ollama corpus)
+      # carry _ or -; glm's own corpus is all-alnum today, which is circular -
+      # the pattern could only ever produce alnum bodies. Re-measure after one run).
+      key_pattern: "[0-9a-f]{32}\\.[A-Za-z0-9_-]{16,}"
       address_pattern: ""
       endpoint_pattern: ""
       model_pattern: ""
