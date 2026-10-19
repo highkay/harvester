@@ -131,7 +131,11 @@ _DEFAULT_SCHEDULES: tuple[tuple[str, str, str], ...] = (
     # plateau corpus daily — 5,933 pushed keys produced 9 net-new — so daily
     # burned the shared GitHub search budget for <1 new key/day. 3x/week
     # keeps pool refill ahead of the measured decay while freeing the quota.
-    ("glm", "0 12 * * mon,wed,fri", "examples/config-glm.yaml"),
+    # 2026-10-19: 12:00 → 14:00 — its search phase (measured 12:00→13:10)
+    # sat inside nvidia's (11:50→13:50); 14:00 clears both nvidia's search
+    # and glm-ai's 16:00 (search-phase overlap is the only measured quota
+    # cost — solo searches produce zero cooldowns at any hour).
+    ("glm", "0 14 * * mon,wed,fri", "examples/config-glm.yaml"),
     # 2026-10-09 frequency policy: saturated providers (measured 0-2 net-new
     # keys/day, 98-100% cross-run overlap over 11 days) drop to weekly or
     # 2-3x/week — a weekly floor keeps supply-resumption visibility without
@@ -160,7 +164,10 @@ _DEFAULT_SCHEDULES: tuple[tuple[str, str, str], ...] = (
     # saturated at ~40 keys; the scan is cheap — 16k links — but the quota
     # saving goes to the high-churn providers). 2026-10-18: 2x/week → weekly
     # (2 net-new keys in 12 days, 43,902 gathered links per added key).
-    ("agnes-ai", "0 10 * * fri", "examples/config-agnes-ai.yaml"),
+    # 2026-10-19: 10:00 → 17:30 fri — the 10:00 fire rode inside tavily's
+    # 09:00-11:00 search window; the whole agnes run is 14-54 min, so 17:30
+    # lands alone between glm's search end (~15:20) and brave's 20:00.
+    ("agnes-ai", "30 17 * * fri", "examples/config-agnes-ai.yaml"),
     # Secondary regional tasks live in their own config files now (previously
     # bundled into the primary provider's config, which mixed run records,
     # push statistics and schedules together). Daily at staggered hours —
@@ -169,16 +176,27 @@ _DEFAULT_SCHEDULES: tuple[tuple[str, str, str], ...] = (
     # provider (1 net-new key in 12 days; 1.28M gathered links per added
     # key; yield trend 61→28 and still decaying). Weekly floor per house
     # rule.
-    ("glm-ai", "0 13 * * wed", "examples/config-glm-ai.yaml"),
+    # glm-ai. 2026-10-18: daily → weekly — the single most saturated
+    # provider (1 net-new key in 12 days; 1.28M gathered links per added
+    # key; yield trend 61→28 and still decaying). Weekly floor per house
+    # rule. 2026-10-19: 13:00 → 16:00 — 13:00 landed inside nvidia's and
+    # glm's search windows (the two measured cooldown-storm hours); 16:00
+    # wed is isolated on every side.
+    ("glm-ai", "0 16 * * wed", "examples/config-glm-ai.yaml"),
     # Brave Search — daily at 15:00 (no day-of-week field: the seed stays
     # daily regardless of any supply probe; adjust the prod row, not this
     # seed, if a probe shows saturation).
-    ("brave", "0 15 * * *", "examples/config-brave.yaml"),
+    # 2026-10-19: 15:00 → 20:00 — its search permanently overlapped exa's
+    # (60 min/day); night starts are measured ~16x cheaper per query for
+    # multi-way overlaps (10 vs 151 cooldown events per 1000 queries).
+    ("brave", "0 20 * * *", "examples/config-brave.yaml"),
     # Exa Search — daily at 16:00, one hour behind brave's 15:00 firing so
     # the two daily GitHub-search scans never collide on the shared token
     # pool. No day-of-week field: the seed stays daily; adjust the prod row,
     # not this seed, if a supply probe shows saturation.
-    ("exa", "0 16 * * *", "examples/config-exa.yaml"),
+    # 2026-10-19: 16:00 → 22:00 — separates from brave's 20:00 (search ends
+    # ~21:15) with a 45 min margin; same night-window economics.
+    ("exa", "0 22 * * *", "examples/config-exa.yaml"),
     # 2026-09-24: the four below moved out of the 14:00-17:00 Beijing window.
     # Measured on prod: the GitHub token-cooldown storm concentrates at
     # 10:00-16:00 Beijing (4529 warnings on 2026-09-24) while the morning
@@ -212,7 +230,9 @@ _DEFAULT_SCHEDULES: tuple[tuple[str, str, str], ...] = (
     # pools saturated, daily-plus re-validation was paying search quota for
     # duplicates. Weekly floor per house rule.
     ("ollama", "0 3 * * mon", "examples/config-ollama.yaml"),
-    ("openrouter", "0 8 * * thu", "examples/config-openrouter.yaml"),
+    # 2026-10-19: 08:00 → 07:30 thu — the whole run is ≤57 min; at 08:00 it
+    # cleared tavily's 09:00 search by 3 min (razor margin); 07:30 gives 33.
+    ("openrouter", "30 7 * * thu", "examples/config-openrouter.yaml"),
     ("nvidia", "50 11 * * *", "examples/config-nvidia.yaml"),
     # OpenCode Go subscription keys — WEEKLY (Sat 22:00), downgraded from
     # daily on 2026-09-28 after two consecutive zero-valid runs (92k links →
@@ -221,7 +241,9 @@ _DEFAULT_SCHEDULES: tuple[tuple[str, str, str], ...] = (
     # of the GitHub-search budget; re-promote if a weekly run ever yields.
     # 2026-10-09: "0 22 * * 6" was firing on SUNDAY (APScheduler dow footgun,
     # see above) — corrected to the documented Saturday via the name form.
-    ("opencode", "0 22 * * sat", "examples/config-opencode.yaml"),
+    # 2026-10-19: 22:00 → 18:00 sat — exa moved to 22:00 daily; 18:00 sat is
+    # empty (brave moved to 20:00).
+    ("opencode", "0 18 * * sat", "examples/config-opencode.yaml"),
 )
 
 

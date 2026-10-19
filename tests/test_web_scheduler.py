@@ -97,7 +97,7 @@ class TestSeedData(unittest.TestCase):
         "kimi": "15 */4 * * *",
         "mimo-cn": "30 */4 * * *",
         "qwen-cn": "45 */4 * * *",
-        "glm": "0 12 * * mon,wed,fri",
+        "glm": "0 14 * * mon,wed,fri",
         # 2026-10-09 frequency policy: saturated providers → weekly floor or
         # 2-3x/week (measured 0-2 net-new/day, 98-100% cross-run overlap).
         # Day-of-week entries are NAME-based on purpose: APScheduler's
@@ -109,14 +109,14 @@ class TestSeedData(unittest.TestCase):
         "tavily": "40 */6 * * *",
         "github": "50 */6 * * *",
         "serpapi": "0 6 * * mon,wed,fri",
-        "agnes-ai": "0 10 * * fri",
-        "glm-ai": "0 13 * * wed",
+        "agnes-ai": "30 17 * * fri",
+        "glm-ai": "0 16 * * wed",
         # Brave Search: daily 15:00 — NO day-of-week field on purpose (the
         # seed stays daily; a supply probe may only adjust the prod row).
-        "brave": "0 15 * * *",
+        "brave": "0 20 * * *",
         # Exa Search: daily 16:00 — one hour behind brave's 15:00 firing;
         # NO day-of-week field on purpose (same daily-seed policy).
-        "exa": "0 16 * * *",
+        "exa": "0 22 * * *",
         # 2026-09-24: moved off the 14:00-17:00 Beijing window — measured prod
         # token-cooldown storm concentrated at 10:00-16:00 Beijing (4529
         # warnings on 2026-09-24), which starved these four providers' search
@@ -127,9 +127,9 @@ class TestSeedData(unittest.TestCase):
         "mimo-sg": "0 20 * * *",
         "qwen-intl": "0 21 * * *",
         "ollama": "0 3 * * mon",
-        "openrouter": "0 8 * * thu",
+        "openrouter": "30 7 * * thu",
         "nvidia": "50 11 * * *",
-        "opencode": "0 22 * * sat",
+        "opencode": "0 18 * * sat",
     }
     _EXPECTED_CONFIG_FILES = {
         "deepseek": "examples/config-deepseek.yaml",
@@ -240,7 +240,7 @@ class TestSeedListShape(unittest.TestCase):
     # APScheduler numeric-dow footgun note in _EXPECTED_CRONS.
     _PINNED_ENTRIES = {
         "ollama": ("0 3 * * mon", "examples/config-ollama.yaml"),
-        "openrouter": ("0 8 * * thu", "examples/config-openrouter.yaml"),
+        "openrouter": ("30 7 * * thu", "examples/config-openrouter.yaml"),
         "nvidia": ("50 11 * * *", "examples/config-nvidia.yaml"),
         "github": ("50 */6 * * *", "examples/config-github.yaml"),
     }
