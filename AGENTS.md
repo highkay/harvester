@@ -184,7 +184,10 @@ docker compose restart && curl -s http://localhost:8002/health
   `web/tavily_push.py`), env-gated by `SERPAPI_PROXY_BASE_URL` /
   `SERPAPI_PROXY_AUTH_KEY` — silent no-op until configured. Prod (fnos)
   configures them now: `SERPAPI_PROXY_BASE_URL=http://192.168.1.18:48081` +
-  pool master key (see pool section). Contract identical to
+  pool master key (see pool section). **2026-10-15 SUPERSEDED: the target is
+  now tavily-hikari `http://192.168.1.18:8787` (see the hikari section
+  below); 48081 no longer answers (measured 2026-10-19: curl exit 000).**
+  Contract identical to
   TavilyProxyManager: `POST {base}/api/keys`, Bearer, `{"key","alias":...}`;
   only 20–64-hex keys are pushed; one `push_logs` row.
 - Hook: `web/runner.py` `_on_completed` fires serpapi push iff
