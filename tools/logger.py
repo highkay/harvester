@@ -566,11 +566,22 @@ class Logger:
         if module_name in Logger._module_handlers:
             return Logger._module_handlers[module_name]
 
-        # Handle existing module log file before creating new handler
-        Logger._handle_module_log(module_name)
-
         # Create module-specific log file
         module_log_file = Logger._logs_dir / f"{module_name}.log"
+
+        # A module log that resolves to the global main log path (the "main"
+        # logger) must reuse the global handler: two rotating handlers on the
+        # same file corrupt rotation, because the non-rotating one keeps
+        # writing into the just-renamed backup.
+        global_handler = Logger._file_handler
+        global_path = getattr(global_handler, "baseFilename", None)
+        if global_path is not None and os.path.normcase(os.path.abspath(module_log_file)) == os.path.normcase(
+            os.path.abspath(global_path)
+        ):
+            return global_handler
+
+        # Handle existing module log file before creating new handler
+        Logger._handle_module_log(module_name)
         module_handler = SafeRotatingFileHandler(
             module_log_file, max_bytes=20 * 1024 * 1024, backup_count=5, encoding="utf-8"  # 20MB
         )
@@ -617,9 +628,11 @@ class Logger:
         _ensure_redaction_filter(console_handler)
         logger_instance.addHandler(console_handler)
 
-        # Add module-specific file handler
+        # Add module-specific file handler (the "main" logger reuses the
+        # global main-log handler, so it must not be attached twice)
         module_handler = Logger._get_or_create_module_handler(name)
-        logger_instance.addHandler(module_handler)
+        if module_handler is not Logger._file_handler:
+            logger_instance.addHandler(module_handler)
 
         # Add main pipeline log handler (for centralized logging)
         if Logger._file_handler:
