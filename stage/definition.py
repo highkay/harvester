@@ -102,6 +102,13 @@ _BLOB_PATH_SAFE = "/@ "
 
 _REPO_LINK_CAP = 25
 
+# A dork's pagination tail is exhausted once this many consecutive pages add
+# no NEW fetchable link (measured 2026-10-20: deepseek kept ~900 page tasks
+# running for hours after gather drained, every page returning only links that
+# the repo cap or the seen-set already rejected). Skipping the rest saves the
+# shared GitHub search budget without changing which links get fetched.
+_DORK_EMPTY_PAGE_LIMIT = 3
+
 
 def _github_repo_key(url: str) -> str:
     """``owner/repo`` (lowercased) for a github.com URL, else "".
@@ -194,6 +201,15 @@ class SearchStage(BasePipelineStage):
         # every provider's corpus. owner/repo -> links queued this run.
         self._repo_link_counts: dict[str, int] = {}
         self._repo_cap_logged: set[str] = set()
+        # Dork-tail convergence (2026-10-20): consecutive no-new-link pages per
+        # provider|search_type|query, and the dorks whose tail is exhausted.
+        self._dork_tail_streak: dict[str, int] = {}
+        self._dork_exhausted: set[str] = set()
+
+    def _dork_key(self, task: SearchTask) -> str:
+        """Dork identity for tail convergence (provider + source + query)."""
+        search_type = getattr(task, "search_type", "code") or "code"
+        return f"{task.provider}|{search_type}|{task.query}"
 
     def _link_cap(self) -> int:
         """Per-run link cap from global.max_links_per_run (0 = unlimited).
@@ -264,6 +280,8 @@ class SearchStage(BasePipelineStage):
         """Pure functional search worker"""
         if self._link_cap_reached(task.provider):
             return None
+        if self._dork_key(task) in self._dork_exhausted:
+            return None
         try:
             # Execute search based on page number
             if task.page == 1:
@@ -289,6 +307,10 @@ class SearchStage(BasePipelineStage):
                     )
 
             # Create acquisition tasks for links
+            # queued_new is initialised OUTSIDE the `if results:` gate: a page
+            # that returned zero links queues nothing, and that is exactly the
+            # deep-tail case the convergence guard below must observe.
+            queued_new = 0
             if results:
                 search_type = getattr(task, "search_type", "code") or "code"
                 patterns = Patterns(
@@ -327,6 +349,11 @@ class SearchStage(BasePipelineStage):
                                 f"for {task.provider} ({search_type})"
                             )
 
+                fresh = [link for link in gather_links if link not in self._gather_links_seen]
+                self._gather_links_seen.update(fresh)
+                fresh_set = set(fresh)
+                self._gather_links_queued += len(fresh)
+
                 for link in gather_links:
                     # Per-repo fetch cap: over-cap links stay in links.txt
                     # (discovery record, via add_links below) but are neither
@@ -343,23 +370,40 @@ class SearchStage(BasePipelineStage):
                                 )
                             continue
                         self._repo_link_counts[repo] = repo_n + 1
+                    if link in fresh_set:
+                        queued_new += 1
                     acquisition_task = TaskFactory.create_acquisition_task(task.provider, link, patterns)
                     output.add_task(acquisition_task, PipelineStage.GATHER.value)
 
                 # Persist all discovered links (including ones skipped for gather)
                 output.add_links(task.provider, results)
-                # Count what actually drives runtime: the URLs queued for
-                # FETCH, after the link index filtered already-known links
-                # (`skip_known_links`), deduplicated WITHIN this run (the
-                # 2026-10-19 measurement above). Counting raw discoveries
-                # would let a mature provider burn the budget on URLs it will
-                # never fetch again, and would disagree with
-                # run_records.links_total (persisted links, which include the
-                # index-skipped ones) — so the WARNING names the bounded
-                # quantity explicitly.
-                fresh = [link for link in gather_links if link not in self._gather_links_seen]
-                self._gather_links_seen.update(fresh)
-                self._gather_links_queued += len(fresh)
+
+            # Dork-tail convergence: once a dork's pages stop contributing
+            # NEW fetchable links, its remaining pages can only burn search
+            # quota. The tasks are already queued, so the saving comes from
+            # the early return above (no HTTP request per skipped page).
+            #
+            # PRODUCTIVE means the page contributed at least one link that will
+            # be fetched THIS run (queued_new, measured AFTER the 25/repo cap —
+            # a page whose every link lands in an already-capped repo fetches
+            # nothing) OR the page yielded keys extracted from the search
+            # content (a dork can pay for itself through in-result extraction).
+            # Anything else — including a page that returned zero links — is
+            # unproductive. Pages > 1 only: page 1 is never counted.
+            if task.page > 1:
+                dork = self._dork_key(task)
+                if queued_new or keys:
+                    self._dork_tail_streak.pop(dork, None)
+                else:
+                    streak = self._dork_tail_streak.get(dork, 0) + 1
+                    self._dork_tail_streak[dork] = streak
+                    if streak >= _DORK_EMPTY_PAGE_LIMIT:
+                        self._dork_exhausted.add(dork)
+                        logger.info(
+                            f"[{self.name}] dork tail exhausted for {task.provider} "
+                            f"({task.query[:80]}): {streak} consecutive pages added no new "
+                            f"fetchable links — dropping its remaining pages"
+                        )
 
             # Handle first page results for pagination/refinement.
             # Reaching this gate with total == 0 now means the fetch SUCCEEDED

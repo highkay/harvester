@@ -21,7 +21,7 @@ from typing import Any, cast
 from unittest import mock
 
 from config.schemas import StageConfig, TaskConfig
-from core.models import SearchTask
+from core.models import SearchTask, Service
 from search import client
 from search.github.index import LinkIndex
 from stage.base import StageResources
@@ -275,6 +275,103 @@ class TestRepoLinkCap(unittest.TestCase):
         self.assertIsNotNone(output)
         assert output is not None
         self.assertEqual(30, len(output.new_tasks))
+
+
+class TestDorkTailConvergence(unittest.TestCase):
+    """Dork-tail convergence: unproductive pages latch ``_dork_exhausted``.
+
+    A page is PRODUCTIVE iff it queued at least one link for THIS run's fetch
+    (``queued_new``, measured AFTER the 25/repo cap) or yielded keys extracted
+    from the search content. A page returning zero links is unproductive by
+    definition, and so is a page whose every link lands in an already-capped
+    repo. ``_DORK_EMPTY_PAGE_LIMIT`` consecutive unproductive pages must latch
+    the dork so its remaining pages cost no search request.
+    """
+
+    @staticmethod
+    def _stage() -> SearchStage:
+        return SearchStage(_resources(max_links=0), handler=lambda _o: None)
+
+    def _run(self, stage: SearchStage, task: SearchTask, search_mock: Any):
+        with mock.patch.object(client, "search_code", search_mock), mock.patch.object(
+            client, "get_link_index", return_value=None
+        ):
+            return stage.process_task(task)
+
+    def test_three_empty_pages_exhaust_the_dork(self) -> None:
+        # The defect: the streak bookkeeping sat inside `if results:`, so a
+        # page returning zero links never counted — the deep tail kept running
+        # forever. Three EXECUTED empty pages must latch the dork.
+        stage = self._stage()
+        dork = stage._dork_key(_task(page=2))
+        search_mock = mock.MagicMock(return_value=([], ""))
+
+        outputs = [self._run(stage, _task(page=page), search_mock) for page in (2, 3, 4)]
+
+        self.assertTrue(all(o is not None for o in outputs), "empty pages still produce an output")
+        self.assertEqual(3, search_mock.call_count, "all three pages were executed")
+        self.assertEqual(3, stage._dork_tail_streak.get(dork, 0))
+        self.assertIn(dork, stage._dork_exhausted, "three consecutive empty pages must latch the dork")
+
+        # The dequeue gate: the exhausted dork's next page costs no HTTP call.
+        self.assertIsNone(self._run(stage, _task(page=5), search_mock))
+        self.assertEqual(3, search_mock.call_count, "an exhausted dork must not hit the search API")
+
+    def test_all_links_over_repo_cap_count_as_unproductive(self) -> None:
+        # Productive is measured AFTER the 25/repo cap: a page whose every link
+        # lands in an already-capped repo fetches nothing this run, so it must
+        # advance the streak exactly like an empty page.
+        stage = self._stage()
+        dork = stage._dork_key(_task(page=2))
+        base = "https://github.com/o/big-repo/blob/main/"
+        by_page = {
+            2: [f"{base}f{i}.env" for i in range(30)],  # 25 queued, 5 capped
+            3: [f"{base}g{i}.env" for i in range(4)],  # all capped (fresh URLs)
+            4: [f"{base}h{i}.env" for i in range(4)],
+            5: [f"{base}i{i}.env" for i in range(4)],
+        }
+
+        def _sheet(*_a: Any, **kwargs: Any):
+            return by_page[kwargs["page"]], ""
+
+        with mock.patch.object(client, "search_code", side_effect=_sheet), mock.patch.object(
+            client, "get_link_index", return_value=None
+        ):
+            self.assertIsNotNone(stage.process_task(_task(page=2)))
+            self.assertEqual(25, stage._repo_link_counts["o/big-repo"])
+            self.assertNotIn(dork, stage._dork_tail_streak, "the page that filled the repo is productive")
+
+            for page in (3, 4, 5):
+                output = stage.process_task(_task(page=page))
+                self.assertIsNotNone(output)
+                assert output is not None
+                self.assertEqual([], output.new_tasks, f"page {page}: every link is over the repo cap")
+
+        self.assertEqual(3, stage._dork_tail_streak[dork])
+        self.assertIn(dork, stage._dork_exhausted, "all-capped pages must not look productive")
+
+    def test_extracted_keys_make_an_empty_page_productive(self) -> None:
+        # A dork can pay for itself through in-result key extraction: a page
+        # that returns no links but yields keys is productive and resets the
+        # streak instead of counting toward exhaustion.
+        stage = self._stage()
+        task = _task(page=2)
+        task.regex = '"api_key"'
+        dork = stage._dork_key(task)
+        stage._dork_tail_streak[dork] = 2
+        service = Service(key="sk-test", address="https://example.test")
+        search_mock = mock.MagicMock(return_value=([], '{"api_key": "sk-test"}'))
+
+        with mock.patch.object(client, "search_code", search_mock), mock.patch.object(
+            client, "get_link_index", return_value=None
+        ), mock.patch.object(stage, "_extract_keys_from_content", return_value=[service]):
+            output = stage.process_task(task)
+
+        self.assertIsNotNone(output)
+        assert output is not None
+        self.assertEqual(1, len(output.new_tasks), "the extracted key still queues a check task")
+        self.assertNotIn(dork, stage._dork_tail_streak, "an extracted key resets the unproductive streak")
+        self.assertNotIn(dork, stage._dork_exhausted)
 
 
 class TestCapConfigContract(unittest.TestCase):
