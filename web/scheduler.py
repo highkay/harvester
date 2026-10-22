@@ -43,8 +43,14 @@ logger = get_logger("web.scheduler")
 # a global cap on concurrent runs, and a bounded deferred retry instead of a
 # dropped firing. Both are env-overridable; 0 disables the cap.
 _MAX_CONCURRENT_SCANS = max(
-    0, int(os.environ.get("HARVESTER_MAX_CONCURRENT_SCANS", "6") or 0)
+    0, int(os.environ.get("HARVESTER_MAX_CONCURRENT_SCANS", "3") or 0)
 )
+# Cap lowered 6 -> 3 (2026-10-22) from production measurements: five overlapping
+# runs on 2026-10-20 stretched one scan to 12.8 h, while the old cap of 6 never
+# fired once — 0 "concurrency cap reached" lines in four days of prod logs,
+# against 3 "firing DROPPED" and 30 "deferred (attempt" lines. Lowering the
+# ceiling makes a burst wait at admission instead of starving every live run of
+# gather/check workers (5-way overlap is what the cap exists for).
 # The blocking condition is another run holding the provider, and a bounded run
 # is now hours, not minutes (the 120k link cap targets ~3-4 h) — so a 3 x 15 min
 # ladder would just drop the firing 45 min later. 6 x 30 min covers a full run

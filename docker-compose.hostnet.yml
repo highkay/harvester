@@ -35,11 +35,11 @@ services:
       # --- Exa push service ---
       - EXA_PROXY_BASE_URL=${EXA_PROXY_BASE_URL:-}
       - EXA_PROXY_AUTH_KEY=${EXA_PROXY_AUTH_KEY:-}
-      # --- Admission control (web/scheduler.py; take effect on RECREATE, not
-      # restart — container env is frozen at creation). Defaults match the code:
-      # 6 concurrent runs, 30 min deferral ladder, 6 retries (3 h). 0 disables
-      # the cap / the retries. ---
-      - HARVESTER_MAX_CONCURRENT_SCANS=${HARVESTER_MAX_CONCURRENT_SCANS:-6}
+      # --- Admission control (web/scheduler.py; RECREATE only — env frozen at
+      # creation). Code defaults: cap 3 (lowered from 6 — five overlapping runs
+      # on 2026-10-20 stretched one scan to 12.8 h; 6 never fired: 0
+      # "concurrency cap reached" in 4 days), 30 min ladder, 6 retries (3 h). ---
+      - HARVESTER_MAX_CONCURRENT_SCANS=${HARVESTER_MAX_CONCURRENT_SCANS:-3}
       - HARVESTER_DEFER_DELAY_SECONDS=${HARVESTER_DEFER_DELAY_SECONDS:-1800}
       - HARVESTER_MAX_DEFERRALS=${HARVESTER_MAX_DEFERRALS:-8}
       # --- Agnes AI push service (to gpt-load add-multiple, group 19) ---

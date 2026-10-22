@@ -14,6 +14,8 @@ from __future__ import annotations
 import asyncio
 import os
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import unittest
 from typing import Any, cast
@@ -55,6 +57,37 @@ class TestActiveRunCount(unittest.TestCase):
         self.assertEqual(2, _run_async(scheduler_mod._active_run_count(db_path)))
 
 
+class TestModuleDefault(unittest.TestCase):
+    """The shipped concurrent-scan ceiling is 3 (was 6 before 2026-10-22).
+
+    Read in a FRESH interpreter with ``HARVESTER_MAX_CONCURRENT_SCANS`` removed
+    from its environment: an operator shell (or a real ``.env`` export) that
+    still carries the old ``6`` must not be able to make this pass.
+    """
+
+    def test_module_default_cap_is_three(self) -> None:
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if k != "HARVESTER_MAX_CONCURRENT_SCANS"
+        }
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import web.scheduler as s; print(s._MAX_CONCURRENT_SCANS)",
+            ],
+            cwd=repo_root,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(0, proc.returncode, proc.stderr)
+        self.assertEqual("3", proc.stdout.strip())
+
+
 class TestConcurrencyCap(unittest.TestCase):
     def _service(self, db_path: str) -> SchedulerService:
         svc = SchedulerService.__new__(SchedulerService)
@@ -79,19 +112,51 @@ class TestConcurrencyCap(unittest.TestCase):
         runner.assert_not_called()
         self.assertEqual(set(), svc._running, "a refused start must not hold the guard")
 
-    def test_below_cap_is_not_refused(self) -> None:
-        db_path = _db_with_rows()
+    def test_two_live_runs_below_the_cap_of_three_are_allowed(self) -> None:
+        db_path = _db_with_rows("running", "running")
         svc = self._service(db_path)
         runner = MagicMock()
         runner.run_scan = AsyncMock(return_value="run-1")
 
-        with patch.object(scheduler_mod, "_MAX_CONCURRENT_SCANS", 6), patch.object(
+        with patch.object(scheduler_mod, "_MAX_CONCURRENT_SCANS", 3), patch.object(
             scheduler_mod, "_lazy_get_runner", return_value=runner
         ), patch.object(svc, "_watch_run", AsyncMock(return_value=None)):
             run_id = _run_async(svc.start_scan("p", None))
 
         self.assertEqual("run-1", run_id)
         runner.run_scan.assert_awaited_once()
+
+    def test_third_live_run_is_refused_at_the_cap_of_three(self) -> None:
+        db_path = _db_with_rows("running", "running", "running")
+        svc = self._service(db_path)
+
+        with patch.object(scheduler_mod, "_MAX_CONCURRENT_SCANS", 3), patch.object(
+            scheduler_mod, "_lazy_get_runner"
+        ) as runner:
+            with self.assertRaises(HTTPException) as ctx:
+                _run_async(svc.start_scan("p", None))
+
+        self.assertEqual(429, ctx.exception.status_code)
+        self.assertIn(
+            "concurrency cap reached (3/3 runs live)", str(ctx.exception.detail)
+        )
+        runner.assert_not_called()
+
+    def test_cap_six_still_refuses_the_seventh_live_run(self) -> None:
+        # The old ceiling still works when an operator overrides the env var:
+        # the cap is a comparison, not a hard-coded 3.
+        db_path = _db_with_rows(*(["running"] * 6))
+        svc = self._service(db_path)
+
+        with patch.object(scheduler_mod, "_MAX_CONCURRENT_SCANS", 6), patch.object(
+            scheduler_mod, "_lazy_get_runner"
+        ) as runner:
+            with self.assertRaises(HTTPException) as ctx:
+                _run_async(svc.start_scan("p", None))
+
+        self.assertEqual(429, ctx.exception.status_code)
+        self.assertIn("concurrency cap reached (6/6 runs live)", str(ctx.exception.detail))
+        runner.assert_not_called()
 
 
 class TestDeferral(unittest.TestCase):
