@@ -36,7 +36,9 @@ services:
       # --- Admission control (web/scheduler.py; RECREATE only — env frozen at
       # creation). Code defaults: cap 3 (lowered from 6 — five overlapping runs
       # on 2026-10-20 stretched one scan to 12.8 h; 6 never fired: 0
-      # "concurrency cap reached" in 4 days), 30 min ladder, 6 retries (3 h). ---
+      # "concurrency cap reached" in 4 days), 30 min defer ladder, code default
+      # _MAX_DEFERRALS=8 -> worst case sum(1800s x i, i=1..8) = 64,800s = 18 h;
+      # prod env HARVESTER_MAX_DEFERRALS=6 -> sum(i=1..6) = 37,800s = 10.5 h. ---
       - HARVESTER_MAX_CONCURRENT_SCANS=${HARVESTER_MAX_CONCURRENT_SCANS:-3}
       - HARVESTER_DEFER_DELAY_SECONDS=${HARVESTER_DEFER_DELAY_SECONDS:-1800}
       - HARVESTER_MAX_DEFERRALS=${HARVESTER_MAX_DEFERRALS:-8}
