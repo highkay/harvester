@@ -355,6 +355,9 @@ class PipelineRunner:
         This method is **blocking** and must run in a background thread.
         """
         temp_yaml_path: Path | None = None
+        # Bound before the try so the failure branch can read the stats of a
+        # partially-run app without risking an UnboundLocalError.
+        app: Any | None = None
         # run_scan pre-registers the event before the row insert/thread
         # start so an early cancel is never dropped; setdefault keeps
         # direct _execute calls (tests) working.
@@ -437,6 +440,7 @@ class PipelineRunner:
             duration = round(time.time() - start_time, 2)
             valid_keys = self._count_valid_keys(app, task_names)
             links_total, materials_total = self._count_pipeline_totals(app)
+            total_keys_checked = self._count_total_keys_checked(app)
 
             # Zero-yield tripwire (observability guard): a large corpus with
             # ZERO extracted candidates is the historical "healthy-looking
@@ -472,6 +476,7 @@ class PipelineRunner:
                 finished_at=True,
                 duration_seconds=duration,
                 valid_keys_found=valid_keys,
+                total_keys_checked=total_keys_checked,
                 links_total=links_total,
                 materials_total=materials_total,
                 error_message=degradation,
@@ -543,11 +548,13 @@ class PipelineRunner:
             failed_valid_keys = self._count_valid_keys_for_failed_run(
                 provider_name, temp_yaml_path
             )
+            failed_checked_keys = self._count_total_keys_checked(app)
             self._update_run_sync(
                 run_id=run_id,
                 status="failed",
                 finished_at=True,
                 valid_keys_found=failed_valid_keys,
+                total_keys_checked=failed_checked_keys,
                 error_message=error_msg,
                 duration_from_started_at=True,
                 only_if_running=True,
@@ -1252,6 +1259,23 @@ class PipelineRunner:
         except Exception:
             return (None, None)
 
+    def _count_total_keys_checked(self, app: Any) -> int | None:
+        """Extract the run's checked-key count from the pipeline stats.
+
+        ``BaseKeyStats.total`` is valid + invalid + no_quota + wait_check
+        (state/models.py) — exactly the number of candidates the check stage
+        judged, which is what the runs UI/API have always called
+        ``total_keys_checked``.  Returns ``None`` when stats are unavailable
+        (mocked app, dead task_manager, malformed counters); the DB write
+        then skips the column exactly like ``links_total`` does.
+        """
+        try:
+            if app is None or app.task_manager is None:
+                return None
+            return int(app.task_manager.stats().resource.total)
+        except Exception:
+            return None
+
     def _gather_counter_snapshot(self, app: Any) -> dict[str, int]:
         """Sum the per-provider gather-outcome counters of this run.
 
@@ -1518,6 +1542,7 @@ class PipelineRunner:
         finished_at: bool = False,
         duration_seconds: float | None = None,
         valid_keys_found: int | None = None,
+        total_keys_checked: int | None = None,
         error_message: str | None = None,
         duration_from_started_at: bool = False,
         only_if_running: bool = False,
@@ -1535,10 +1560,13 @@ class PipelineRunner:
         state so a terminal write from the scan thread can never overwrite
         a 'cancelled' (or otherwise terminal) row.
 
-        ``links_total`` / ``materials_total`` persist the run's corpus and
-        candidate-extraction counters (zero-yield tripwire inputs). ``None``
-        skips the column entirely, keeping the UPDATE compatible with
-        pre-migration databases whose rows lack the columns.
+        ``total_keys_checked`` persists how many keys the check stage
+        actually judged (``BaseKeyStats.total`` = valid + invalid +
+        no_quota + wait_check). ``links_total`` / ``materials_total`` persist
+        the run's corpus and candidate-extraction counters (zero-yield
+        tripwire inputs). ``None`` skips the column entirely, keeping the
+        UPDATE compatible with pre-migration databases whose rows lack the
+        columns.
         """
         conn = sqlite3.connect(self._db_path)
         try:
@@ -1558,6 +1586,9 @@ class PipelineRunner:
             if valid_keys_found is not None:
                 parts.append("valid_keys_found = ?")
                 params.append(valid_keys_found)
+            if total_keys_checked is not None:
+                parts.append("total_keys_checked = ?")
+                params.append(total_keys_checked)
             if links_total is not None:
                 parts.append("links_total = ?")
                 params.append(links_total)

@@ -27,6 +27,7 @@ from unittest.mock import MagicMock, patch
 
 from web.db import init_db as _init_db_async
 from web.runner import PipelineRunner
+from state.models import StatsSource
 
 
 def _run_async(coro):
@@ -106,6 +107,39 @@ def _app_with_stats(
     managers.values.return_value = (
         [SimpleNamespace(gather_counters=lambda: dict(counters))] if counters else []
     )
+    app.task_manager.pipeline.result_manager.managers = managers
+    return app
+
+
+def _app_with_checked_keys(
+    *,
+    valid: int = 0,
+    invalid: int = 0,
+    no_quota: int = 0,
+    wait_check: int = 0,
+    links: int = 10,
+    material: int = 3,
+) -> MagicMock:
+    """MagicMock HarvesterApp backed by the REAL ``StatsSource`` dataclass.
+
+    ``StatsSource.total`` (valid + invalid + no_quota + wait_check) is the
+    production accessor ``_count_total_keys_checked`` reads, so this fixture
+    exercises the real property instead of pinning a hand-set ``total``.
+    """
+    app = MagicMock()
+    app.initialize.return_value = True
+    app.task_manager.stats.return_value = SimpleNamespace(
+        resource=StatsSource(
+            valid=valid,
+            invalid=invalid,
+            no_quota=no_quota,
+            wait_check=wait_check,
+            links=links,
+            material=material,
+        )
+    )
+    managers = MagicMock()
+    managers.values.return_value = []
     app.task_manager.pipeline.result_manager.managers = managers
     return app
 
@@ -330,6 +364,97 @@ class TestZeroYieldTripwire(unittest.TestCase):
             self.assertEqual(row["status"], "completed")
             self.assertEqual(row["valid_keys_found"], 2)
             self.assertNotIn("links_total", row)
+
+
+# ---------------------------------------------------------------------------
+# total_keys_checked plumbing (GAP-4: column had readers, no writer)
+# ---------------------------------------------------------------------------
+
+
+class TestCountTotalKeysChecked(unittest.TestCase):
+    def setUp(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self.runner = _make_runner(Path(tmpdir), str(Path(tmpdir) / "x.db"))
+
+    def test_reads_base_key_stats_total(self) -> None:
+        app = _app_with_checked_keys(valid=4, invalid=3, no_quota=2, wait_check=1)
+        self.assertEqual(self.runner._count_total_keys_checked(app), 10)
+
+    def test_unavailable_stats_yield_none(self) -> None:
+        """None makes _update_run_sync skip the column (legacy DB safe)."""
+        app = MagicMock()
+        app.task_manager = None
+        self.assertIsNone(self.runner._count_total_keys_checked(app))
+        self.assertIsNone(self.runner._count_total_keys_checked(None))
+
+
+class TestTotalKeysChecked(unittest.TestCase):
+    """Given a run whose stats report judged keys,
+    When _execute writes its terminal row,
+    Then run_records.total_keys_checked carries that count — on BOTH the
+    completion and the failure path — and reads 0 (never NULL) when the run
+    judged nothing or reported no stats at all.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        workdir = Path(self._tmp.name)
+        self.db_path = str(workdir / "harvester.db")
+        _run_async(_init_db_async(self.db_path))
+        self.runner = _make_runner(workdir, self.db_path)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_completion_records_nonzero_checked_count(self) -> None:
+        _insert_run(self.db_path, "run-checked-1")
+        app = _app_with_checked_keys(
+            valid=4, invalid=3, no_quota=2, wait_check=1, links=120, material=9
+        )
+
+        _run_execute(self.runner, app, "run-checked-1")
+
+        row = _read_run(self.db_path, "run-checked-1")
+        self.assertEqual(row["status"], "completed")
+        self.assertEqual(row["total_keys_checked"], 10)
+        self.assertEqual(row["valid_keys_found"], 4)
+
+    def test_completion_with_no_checked_keys_writes_zero_not_null(self) -> None:
+        _insert_run(self.db_path, "run-checked-0")
+        app = _app_with_checked_keys(links=10, material=3)
+
+        _run_execute(self.runner, app, "run-checked-0")
+
+        row = _read_run(self.db_path, "run-checked-0")
+        self.assertEqual(row["status"], "completed")
+        self.assertIsNotNone(row["total_keys_checked"])
+        self.assertEqual(row["total_keys_checked"], 0)
+
+    def test_unavailable_stats_leave_column_at_zero_not_null(self) -> None:
+        """stale_state guard: no stats -> column skipped -> row default 0,
+        never NULL (the runs UI/API format it as a number)."""
+        _insert_run(self.db_path, "run-checked-nostats")
+        app = MagicMock()
+        app.initialize.return_value = True
+        app.task_manager = None
+
+        _run_execute(self.runner, app, "run-checked-nostats")
+
+        row = _read_run(self.db_path, "run-checked-nostats")
+        self.assertIsNotNone(row["total_keys_checked"])
+        self.assertEqual(row["total_keys_checked"], 0)
+
+    def test_failure_path_records_checked_count_reached(self) -> None:
+        _insert_run(self.db_path, "run-checked-fail")
+        app = _app_with_checked_keys(valid=3, invalid=6, links=200, material=4)
+        app.run.side_effect = RuntimeError("pipeline exploded")
+
+        _run_execute(self.runner, app, "run-checked-fail")
+
+        row = _read_run(self.db_path, "run-checked-fail")
+        self.assertEqual(row["status"], "failed")
+        self.assertIn("pipeline exploded", row["error_message"])
+        self.assertEqual(row["total_keys_checked"], 9)
 
 
 if __name__ == "__main__":
