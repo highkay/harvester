@@ -26,6 +26,9 @@ from core.types import IProvider
 from stage.base import StageResources
 from stage.definition import AcquisitionStage
 from storage.persistence import (
+    GATHER_304,
+    GATHER_304_EMPTY,
+    GATHER_304_REPLAYED,
     GATHER_EMPTY,
     GATHER_ERROR_404,
     GATHER_ERROR_OTHER,
@@ -160,6 +163,9 @@ class TestResultManagerGatherCounters(unittest.TestCase):
                 "gather_empty": 0,
                 "gather_error_404": 0,
                 "gather_error_other": 0,
+                "gather_304": 0,
+                "gather_304_replayed": 0,
+                "gather_304_empty": 0,
                 "gather_error": 0,
             },
         )
@@ -172,12 +178,21 @@ class TestResultManagerGatherCounters(unittest.TestCase):
         self.manager.record_gather_outcome(GATHER_ERROR_OTHER)
         self.manager.record_gather_outcome(GATHER_ERROR_OTHER)
         self.manager.record_gather_outcome(GATHER_ERROR_OTHER)
+        self.manager.record_gather_outcome(GATHER_304)
+        self.manager.record_gather_outcome(GATHER_304_REPLAYED)
+        self.manager.record_gather_outcome(GATHER_304_EMPTY)
 
         counters = self.manager.gather_counters()
         self.assertEqual(counters["gather_ok"], 2)
         self.assertEqual(counters["gather_empty"], 1)
         self.assertEqual(counters["gather_error_404"], 1)
         self.assertEqual(counters["gather_error_other"], 3)
+        # A 304 is orthogonal to ok/empty (a replay also bumps gather_ok), so
+        # it never feeds the derived error aggregate. The two splits say which
+        # zero-body path was taken and never fold into gather_304.
+        self.assertEqual(counters["gather_304"], 1)
+        self.assertEqual(counters["gather_304_replayed"], 1)
+        self.assertEqual(counters["gather_304_empty"], 1)
         # Derived aggregate
         self.assertEqual(counters["gather_error"], 4)
 

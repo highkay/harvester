@@ -65,8 +65,30 @@ GATHER_ERROR_404 = "gather_error_404"  # resource gone (FileNotFoundError)
 # requeues, so one URL can bump this once per retry. That is intentional:
 # the counter measures failed fetches (transport health), not lost URLs.
 GATHER_ERROR_OTHER = "gather_error_other"
+# A raw fetch answered 304 Not Modified (ETag revalidation, 2026-10-22 GAP-1):
+# the body was NOT downloaded. Orthogonal to the four outcomes above — a 304
+# ALSO bumps gather_ok (stored candidates replayed to CHECK) or gather_empty
+# (no candidates to emit) — so gather_ok + gather_empty still equals the number
+# of links processed while gather_304 counts how many of them cost zero body
+# bytes. The two splits below say WHICH zero-body path was taken:
+GATHER_304 = "gather_304"
+# 304 + stored candidates re-emitted to CHECK (no download, no extractor).
+GATHER_304_REPLAYED = "gather_304_replayed"
+# 304 + explicit empty outcome: no download, no extractor, nothing to CHECK.
+# This is the R1 bulk case (kimi-coding 0.07% / glm 0.70-0.76% extraction).
+GATHER_304_EMPTY = "gather_304_empty"
 
-_GATHER_COUNTER_FIELDS = frozenset({GATHER_OK, GATHER_EMPTY, GATHER_ERROR_404, GATHER_ERROR_OTHER})
+_GATHER_COUNTER_FIELDS = frozenset(
+    {
+        GATHER_OK,
+        GATHER_EMPTY,
+        GATHER_ERROR_404,
+        GATHER_ERROR_OTHER,
+        GATHER_304,
+        GATHER_304_REPLAYED,
+        GATHER_304_EMPTY,
+    }
+)
 
 # Live result managers keyed by PROVIDER INSTANCE — the one object both the
 # pipeline stages (StageResources.providers) and the persistence layer
@@ -302,6 +324,9 @@ class ResultManager:
         self.gather_empty = 0
         self.gather_error_404 = 0
         self.gather_error_other = 0
+        self.gather_304 = 0
+        self.gather_304_replayed = 0
+        self.gather_304_empty = 0
 
         # Durability accounting: how many flush attempts failed and how many
         # items were lost to a re-queue bound while a write stayed broken.
@@ -434,7 +459,8 @@ class ResultManager:
         """Snapshot of gather outcomes, plus the derived ``gather_error``.
 
         Returns keys: ``gather_ok``, ``gather_empty``, ``gather_error_404``,
-        ``gather_error_other`` and ``gather_error`` (= 404 + other).
+        ``gather_error_other``, ``gather_304``, ``gather_304_replayed``,
+        ``gather_304_empty`` and ``gather_error`` (= 404 + other).
         """
         with self.lock:
             counters = {name: int(getattr(self, name)) for name in _GATHER_COUNTER_FIELDS}
