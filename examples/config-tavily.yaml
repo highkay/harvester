@@ -5,6 +5,9 @@
 global:
   workspace: "./data"
   max_retries_requeued: 3
+  # Consecutive unproductive search pages after which a dork's remaining
+  # pagination is skipped (0 = never exhaust / disable the guard).
+  dork_tail_empty_page_limit: 3
   proxy: ""
   # ohmygh/gx-inspired transport: edge IP pool, cache, link index, text-match
   github_transport:

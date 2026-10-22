@@ -441,6 +441,10 @@ class PipelineRunner:
             valid_keys = self._count_valid_keys(app, task_names)
             links_total, materials_total = self._count_pipeline_totals(app)
             total_keys_checked = self._count_total_keys_checked(app)
+            # Dork-tail guard accounting (todo 2): the SearchStage instance is
+            # per-run and already stopped by the time app.run() returns, so its
+            # counters are final here. None when the guard never fired.
+            tail_summary = self._search_tail_summary(app)
 
             # Zero-yield tripwire (observability guard): a large corpus with
             # ZERO extracted candidates is the historical "healthy-looking
@@ -466,6 +470,15 @@ class PipelineRunner:
                     provider_name, run_id, links_total, materials_total, valid_keys, app
                 )
             run_status = "failed" if work_failed else "completed"
+            # The tail summary APPENDS to the degradation marker on the same
+            # terminal UPDATE; it never overwrites it and never touches status
+            # (the scan completed — this is an observability annotation).
+            if tail_summary:
+                error_message = (
+                    (degradation + " | " if degradation else "") + tail_summary
+                )
+            else:
+                error_message = degradation
 
             # 5. Update DB — completed. Conditional on the row still being
             # 'running': a cancel_run that landed mid-scan has already
@@ -479,7 +492,7 @@ class PipelineRunner:
                 total_keys_checked=total_keys_checked,
                 links_total=links_total,
                 materials_total=materials_total,
-                error_message=degradation,
+                error_message=error_message,
                 only_if_running=True,
             )
             if work_failed:
@@ -1294,6 +1307,22 @@ class PipelineRunner:
             return totals
         except Exception:
             return {}
+
+    def _search_tail_summary(self, app: Any) -> str | None:
+        """This run's dork-tail guard summary, or None when it never fired.
+
+        Reads the per-run SearchStage through the same pipeline handle as
+        :meth:`_stage_error_snapshot`. Enrichment only: any failure (mocked
+        app, stage-less pipeline, older tree) degrades to None so the
+        completion path is never broken by observability.
+        """
+        try:
+            stages = app.task_manager.pipeline.stages
+            stage = stages.get("search") if isinstance(stages, dict) else None
+            summary = stage.tail_summary_text() if stage is not None else None
+        except Exception:
+            return None
+        return summary if isinstance(summary, str) and summary else None
 
     def _zero_yield_degradation(
         self,

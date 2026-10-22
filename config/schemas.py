@@ -144,6 +144,12 @@ class GlobalConfig:
     # GitHub's best-match ordering means the tail pages are the lowest-signal
     # part of a corpus anyway. Set 0 to restore unlimited discovery.
     max_links_per_run: int = 120000
+    # Consecutive unproductive search pages after which a dork's remaining
+    # pagination is skipped (0 = never exhaust; the guard is disabled).
+    # Unproductive means the page queued no new fetchable link and yielded no
+    # in-result key — see stage/definition.py. Default 3 mirrors the historical
+    # module constant _DORK_EMPTY_PAGE_LIMIT.
+    dork_tail_empty_page_limit: int = 3
     proxy: str = ""
     github_credentials: Optional[CredentialsConfig] = None
     user_agents: List[str] = field(default_factory=list)

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import pathlib
+import re
 import tempfile
 import types
 import unittest
@@ -26,6 +27,10 @@ from search import client
 from search.github.index import LinkIndex
 from stage.base import StageResources
 from stage.definition import SearchStage
+
+
+# Sentinel: the config key is absent in the mocked global config.
+_UNSET = object()
 
 
 class _Auth:
@@ -42,15 +47,18 @@ class _Auth:
         return "test-agent"
 
 
-def _resources(max_links: int) -> StageResources:
+def _resources(
+    max_links: int, dork_tail_empty_page_limit: Any = _UNSET
+) -> StageResources:
+    global_config = types.SimpleNamespace(max_links_per_run=max_links)
+    if dork_tail_empty_page_limit is not _UNSET:
+        global_config.dork_tail_empty_page_limit = dork_tail_empty_page_limit
     return StageResources(
         limiter=mock.MagicMock(),
         providers={},
         config=cast(
             Any,
-            types.SimpleNamespace(
-                global_config=types.SimpleNamespace(max_links_per_run=max_links)
-            ),
+            types.SimpleNamespace(global_config=global_config),
         ),
         task_configs={
             "test": TaskConfig(name="test", provider_type="openai_like", stages=StageConfig())
@@ -372,6 +380,139 @@ class TestDorkTailConvergence(unittest.TestCase):
         self.assertEqual(1, len(output.new_tasks), "the extracted key still queues a check task")
         self.assertNotIn(dork, stage._dork_tail_streak, "an extracted key resets the unproductive streak")
         self.assertNotIn(dork, stage._dork_exhausted)
+
+
+class TestConfigurableDorkTailLimit(unittest.TestCase):
+    """``global.dork_tail_empty_page_limit`` drives the guard (todo 2).
+
+    YAML value 1 exhausts a dork after ONE unproductive page; an absent (or
+    unusable) key falls back to the historical constant 3; 0 disables the
+    guard (a dork is never exhausted, every page keeps executing). One INFO
+    summary per run reports search_pages_executed / pages_skipped_by_tail /
+    dorks_exhausted.
+    """
+
+    @staticmethod
+    def _stage(*, limit: Any = _UNSET) -> SearchStage:
+        return SearchStage(
+            _resources(max_links=0, dork_tail_empty_page_limit=limit),
+            handler=lambda _o: None,
+        )
+
+    @staticmethod
+    def _run_page(stage: SearchStage, page: int, search_mock: Any):
+        with mock.patch.object(client, "search_code", search_mock), mock.patch.object(
+            client, "get_link_index", return_value=None
+        ):
+            return stage.process_task(_task(page=page))
+
+    def test_config_value_one_exhausts_after_one_unproductive_page(self) -> None:
+        stage = self._stage(limit=1)
+        dork = stage._dork_key(_task(page=2))
+        search_mock = mock.MagicMock(return_value=([], ""))
+
+        self.assertIsNotNone(self._run_page(stage, 2, search_mock))
+        self.assertEqual(1, search_mock.call_count, "the first unproductive page executes")
+        self.assertEqual(1, stage._dork_tail_streak[dork])
+        self.assertIn(dork, stage._dork_exhausted, "limit=1 must exhaust after ONE page")
+
+        self.assertIsNone(self._run_page(stage, 3, search_mock))
+        self.assertEqual(1, search_mock.call_count, "the exhausted dork costs no request")
+        self.assertEqual(1, stage._pages_skipped_by_tail)
+        self.assertEqual(1, stage._search_pages_executed)
+
+    def test_absent_or_unusable_key_falls_back_to_three(self) -> None:
+        stage = self._stage()  # key absent from the mocked global config
+        self.assertEqual(3, stage._dork_tail_limit())
+        self.assertEqual(3, self._stage(limit="abc")._dork_tail_limit())
+
+        dork = stage._dork_key(_task(page=2))
+        search_mock = mock.MagicMock(return_value=([], ""))
+        for page in (2, 3):
+            self.assertIsNotNone(self._run_page(stage, page, search_mock))
+            self.assertNotIn(dork, stage._dork_exhausted)
+        self.assertIsNotNone(self._run_page(stage, 4, search_mock))
+        self.assertIn(dork, stage._dork_exhausted, "the third empty page exhausts")
+        self.assertEqual(3, search_mock.call_count)
+
+    def test_zero_disables_exhaustion(self) -> None:
+        stage = self._stage(limit=0)
+        self.assertEqual(0, stage._dork_tail_limit())
+        dork = stage._dork_key(_task(page=2))
+        search_mock = mock.MagicMock(return_value=([], ""))
+
+        for page in range(2, 7):
+            self.assertIsNotNone(self._run_page(stage, page, search_mock))
+
+        self.assertEqual(5, search_mock.call_count, "0 = never skip a tail page")
+        self.assertNotIn(dork, stage._dork_exhausted)
+        self.assertEqual(0, stage._pages_skipped_by_tail)
+
+    def test_one_info_summary_per_run(self) -> None:
+        stage = self._stage(limit=1)
+        search_mock = mock.MagicMock(return_value=([], ""))
+        self._run_page(stage, 2, search_mock)  # executes, exhausts
+        self._run_page(stage, 3, search_mock)  # skipped by the tail guard
+
+        with self.assertLogs("stage", level="INFO") as logs:
+            stage.stop()
+            stage.stop()  # second stop must not duplicate the line
+
+        lines = [
+            r.getMessage()
+            for r in logs.records
+            if "dork-tail guard:" in r.getMessage()
+        ]
+        self.assertEqual(1, len(lines), "exactly ONE INFO summary per run")
+        self.assertIn("search_pages_executed=1", lines[0])
+        self.assertIn("pages_skipped_by_tail=1", lines[0])
+        self.assertIn("dorks_exhausted=1", lines[0])
+        self.assertIsNotNone(stage.tail_summary_text())
+
+
+class TestDorkTailLimitConfig(unittest.TestCase):
+    """The knob round-trips through the real YAML loader (defaults<->examples)."""
+
+    EXAMPLE = "examples/config-tavily.yaml"
+
+    @unittest.skipUnless(os.path.exists(EXAMPLE), "example config not present")
+    def test_loader_round_trips_the_key(self) -> None:
+        from config.loader import ConfigLoader
+
+        with mock.patch.dict(
+            os.environ, {"GITHUB_TOKENS": "ghp_dummy_token_for_test_123456"}, clear=False
+        ):
+            default = ConfigLoader(self.EXAMPLE).load()
+            self.assertEqual(3, default.global_config.dork_tail_empty_page_limit)
+
+            source = pathlib.Path(self.EXAMPLE).read_text(encoding="utf-8")
+            key_line = re.compile(r"^  dork_tail_empty_page_limit:.*$", re.MULTILINE)
+            self.assertRegex(
+                source,
+                key_line,
+                "examples/config-tavily.yaml must carry the knob",
+            )
+            with tempfile.TemporaryDirectory() as td:
+                path = pathlib.Path(td) / "tail_absent.yaml"
+                path.write_text(key_line.sub("", source, count=1), encoding="utf-8")
+                loaded = ConfigLoader(str(path)).load()
+                self.assertEqual(
+                    3, loaded.global_config.dork_tail_empty_page_limit,
+                    "an absent key must fall back to the default 3",
+                )
+
+                for value, expected in (("1", 1), ("0", 0), ("abc", 3)):
+                    path = pathlib.Path(td) / f"tail{value}.yaml"
+                    path.write_text(
+                        key_line.sub(
+                            f"  dork_tail_empty_page_limit: {value}", source, count=1
+                        ),
+                        encoding="utf-8",
+                    )
+                    loaded = ConfigLoader(str(path)).load()
+                    self.assertEqual(
+                        expected, loaded.global_config.dork_tail_empty_page_limit
+                    )
 
 
 class TestCapConfigContract(unittest.TestCase):

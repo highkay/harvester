@@ -160,10 +160,21 @@ class ConfigLoader:
         else:
             proxy = self._get_env_ignore_case("https_proxy", "http_proxy")
 
+        # Unusable values ("abc", null, a list) fall back to the default 3
+        # instead of failing config load; negative values clamp to 0, which
+        # SearchStage reads as "never exhaust" (guard disabled).
+        try:
+            dork_tail_empty_page_limit = max(
+                0, int(data.get("dork_tail_empty_page_limit", 3))
+            )
+        except (TypeError, ValueError):
+            dork_tail_empty_page_limit = 3
+
         return GlobalConfig(
             workspace=os.path.abspath(data.get("workspace", "./data")),
             max_retries_requeued=data.get("max_retries_requeued", 3),
             max_links_per_run=max(0, int(data.get("max_links_per_run", 120000) or 0)),
+            dork_tail_empty_page_limit=dork_tail_empty_page_limit,
             proxy=proxy,
             github_credentials=credentials,
             user_agents=data.get("user_agents", []),

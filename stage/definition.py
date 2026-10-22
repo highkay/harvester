@@ -18,7 +18,12 @@ from constant.search import (
     WEB_MAX_PAGES,
     WEB_RESULTS_PER_PAGE,
 )
-from constant.system import DEFAULT_HEADERS, DEFAULT_SHUTDOWN_TIMEOUT, SERVICE_TYPE_GITHUB_API, SERVICE_TYPE_GITHUB_WEB
+from constant.system import (
+    DEFAULT_HEADERS,
+    DEFAULT_SHUTDOWN_TIMEOUT,
+    SERVICE_TYPE_GITHUB_API,
+    SERVICE_TYPE_GITHUB_WEB,
+)
 from core.enums import ErrorReason, PipelineStage, ResultType
 from core.models import (
     AcquisitionTask,
@@ -224,11 +229,62 @@ class SearchStage(BasePipelineStage):
         # provider|search_type|query, and the dorks whose tail is exhausted.
         self._dork_tail_streak: dict[str, int] = {}
         self._dork_exhausted: set[str] = set()
+        # Dork-tail observability (one INFO summary per run in stop()). The
+        # stage instance is per-run and shipped configs pin threads.search: 1,
+        # so these counters have exactly one writer per run (same argument as
+        # _gather_links_queued/_dork_tail_streak above).
+        self._search_pages_executed = 0
+        self._pages_skipped_by_tail = 0
+        self._tail_summary_logged = False
 
     def _dork_key(self, task: SearchTask) -> str:
         """Dork identity for tail convergence (provider + source + query)."""
         search_type = getattr(task, "search_type", "code") or "code"
         return f"{task.provider}|{search_type}|{task.query}"
+
+    def _dork_tail_limit(self) -> int:
+        """Consecutive unproductive pages before a dork is exhausted.
+
+        ``global.dork_tail_empty_page_limit`` (0 = guard disabled). Falls back
+        to the module constant when the key is absent (older configs, mocked
+        resources) or unusable (non-int, MagicMock) — the same defensive shape
+        as :meth:`_link_cap`.
+        """
+        raw = getattr(
+            getattr(self.resources.config, "global_config", None),
+            "dork_tail_empty_page_limit",
+            None,
+        )
+        if isinstance(raw, bool) or not isinstance(raw, int):
+            return _DORK_EMPTY_PAGE_LIMIT
+        return max(0, raw)
+
+    def _tail_summary_line(self) -> str:
+        """One-line dork-tail guard accounting for this run."""
+        return (
+            f"dork-tail guard: search_pages_executed={self._search_pages_executed} "
+            f"pages_skipped_by_tail={self._pages_skipped_by_tail} "
+            f"dorks_exhausted={len(self._dork_exhausted)}"
+        )
+
+    def tail_summary_text(self) -> Optional[str]:
+        """Summary for run_records/error_message, or None when never fired."""
+        if self._pages_skipped_by_tail <= 0 and not self._dork_exhausted:
+            return None
+        return self._tail_summary_line()
+
+    def stop(self, timeout: float = DEFAULT_SHUTDOWN_TIMEOUT) -> None:
+        """Stop workers, then emit the per-run dork-tail summary exactly once.
+
+        Only when the guard actually fired (a tail page was skipped or a dork
+        was exhausted); a run with the guard dormant stays silent.
+        """
+        try:
+            super().stop(timeout)
+        finally:
+            if not self._tail_summary_logged and self.tail_summary_text() is not None:
+                self._tail_summary_logged = True
+                logger.info(f"[{self.name}] {self._tail_summary_line()}")
 
     def _link_cap(self) -> int:
         """Per-run link cap from global.max_links_per_run (0 = unlimited).
@@ -300,7 +356,9 @@ class SearchStage(BasePipelineStage):
         if self._link_cap_reached(task.provider):
             return None
         if self._dork_key(task) in self._dork_exhausted:
+            self._pages_skipped_by_tail += 1
             return None
+        self._search_pages_executed += 1
         try:
             # Execute search based on page number
             if task.page == 1:
@@ -408,15 +466,18 @@ class SearchStage(BasePipelineStage):
             # nothing) OR the page yielded keys extracted from the search
             # content (a dork can pay for itself through in-result extraction).
             # Anything else — including a page that returned zero links — is
-            # unproductive. Pages > 1 only: page 1 is never counted.
-            if task.page > 1:
+            # unproductive. Pages > 1 only: page 1 is never counted. A
+            # configured limit of 0 disables the guard entirely (never
+            # exhaust) — the knob is read once per page from the run config.
+            tail_limit = self._dork_tail_limit()
+            if task.page > 1 and tail_limit > 0:
                 dork = self._dork_key(task)
                 if queued_new or keys:
                     self._dork_tail_streak.pop(dork, None)
                 else:
                     streak = self._dork_tail_streak.get(dork, 0) + 1
                     self._dork_tail_streak[dork] = streak
-                    if streak >= _DORK_EMPTY_PAGE_LIMIT:
+                    if streak >= tail_limit:
                         self._dork_exhausted.add(dork)
                         logger.info(
                             f"[{self.name}] dork tail exhausted for {task.provider} "
