@@ -7,9 +7,10 @@ Registers all standard pipeline stages with their dependencies.
 
 import math
 import re
+import threading
 import time
 import urllib.parse
-from typing import List, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional, Tuple
 
 from constant.search import (
     API_MAX_PAGES,
@@ -17,7 +18,7 @@ from constant.search import (
     WEB_MAX_PAGES,
     WEB_RESULTS_PER_PAGE,
 )
-from constant.system import DEFAULT_HEADERS, SERVICE_TYPE_GITHUB_API, SERVICE_TYPE_GITHUB_WEB
+from constant.system import DEFAULT_HEADERS, DEFAULT_SHUTDOWN_TIMEOUT, SERVICE_TYPE_GITHUB_API, SERVICE_TYPE_GITHUB_WEB
 from core.enums import ErrorReason, PipelineStage, ResultType
 from core.models import (
     AcquisitionTask,
@@ -30,8 +31,12 @@ from core.models import (
 )
 from core.types import IProvider
 from search import client
+from search.github.fetch_store import FetchStore, default_directory
 from search.github.refine.engine import RefineEngine
 from storage.persistence import (
+    GATHER_304,
+    GATHER_304_EMPTY,
+    GATHER_304_REPLAYED,
     GATHER_EMPTY,
     GATHER_ERROR_404,
     GATHER_ERROR_OTHER,
@@ -126,6 +131,20 @@ def _github_repo_key(url: str) -> str:
     if len(parts) < 2 or not parts[0] or not parts[1]:
         return ""
     return f"{parts[0]}/{parts[1]}".lower()
+
+
+class _FetchResult(NamedTuple):
+    """One raw fetch + extraction exchange (see ``_fetch_and_extract``).
+
+    ``replayed`` means a 304 re-emitted stored candidates; ``empty_304`` means
+    a 304 found an explicit empty outcome and skipped the fetch entirely (the
+    two are mutually exclusive; plain 304 fallbacks have both False).
+    """
+
+    services: List[Service]
+    saw_304: bool
+    replayed: bool = False
+    empty_304: bool = False
 
 
 def github_blob_to_raw(url: str) -> str:
@@ -686,6 +705,215 @@ class AcquisitionStage(BasePipelineStage):
 
     def __init__(self, resources: StageResources, handler: OutputHandler, **kwargs):
         super().__init__(PipelineStage.GATHER.value, resources, handler, **kwargs)
+        # ETag / extraction-outcome store for raw fetches (2026-10-22, GAP-1).
+        # PER RUN and owned by this stage — never a process-global singleton:
+        # configure_github_transport close()s the singletons IT owns at every
+        # scan start (search/client.py:668-670), which would silently close a
+        # store shared with a concurrent run. Created lazily on the first fetch
+        # (a stage that never gathers must not create ./data/cache/...),
+        # retired in stop().
+        self._fetch_store: Optional[FetchStore] = None
+        self._fetch_store_lock = threading.Lock()
+        self._fetch_store_tried = False
+        # Per-run 304 accounting, logged once in stop() (guarded by stats_lock).
+        self._gather_304 = 0
+        self._gather_304_replayed = 0
+        self._gather_304_empty = 0
+
+    def _fetch_store_instance(self) -> Optional[FetchStore]:
+        """This run's FetchStore, or None when conditional fetching is off.
+
+        Returns None (fail-open) when the workspace is unusable or the store
+        could not be opened: conditional fetching is an optimization, so a
+        broken ./data must degrade to the plain unconditional fetch instead of
+        failing the run. FetchStore itself logs the one warning.
+        """
+        with self._fetch_store_lock:
+            if self._fetch_store is not None:
+                return self._fetch_store
+            if self._fetch_store_tried:
+                return None
+            self._fetch_store_tried = True
+            global_config = getattr(self.resources.config, "global_config", None)
+            workspace = getattr(global_config, "workspace", None)
+            # A non-str workspace (a MagicMock in unit tests, a malformed
+            # config) must never reach os.makedirs.
+            if not isinstance(workspace, str) or not workspace.strip():
+                logger.debug(f"[{self.name}] no workspace for the fetch store; raw fetches stay unconditional")
+                return None
+            store = FetchStore(default_directory(workspace))
+            if not store.enabled:
+                return None
+            self._fetch_store = store
+            logger.info(f"[{self.name}] conditional raw fetch enabled, store at {store.directory}")
+            return store
+
+    def _retire_fetch_store(self) -> None:
+        """Prune, log the run's 304 summary once, then close the store."""
+        with self._fetch_store_lock:
+            store, self._fetch_store = self._fetch_store, None
+        if store is None:
+            return
+        stats: dict = {}
+        try:
+            store.prune(retention_days=FetchStore.RETENTION_DAYS, max_rows=FetchStore.MAX_ROWS)
+            stats = store.stats()
+        finally:
+            store.close()
+        with self.stats_lock:
+            revalidated, replayed, empty = (
+                self._gather_304,
+                self._gather_304_replayed,
+                self._gather_304_empty,
+            )
+        logger.info(
+            f"[{self.name}] gather_304={revalidated} gather_304_replayed={replayed} "
+            f"gather_304_empty={empty} fetch_store={stats}"
+        )
+
+    def stop(self, timeout: float = DEFAULT_SHUTDOWN_TIMEOUT) -> None:
+        """Stop the workers first, then retire this run's fetch store.
+
+        Called on pipeline teardown (manager/pipeline.py::_on_stop). The close
+        runs even when the stage never started, and BasePipelineStage.stop()
+        early-returns in that case — hence the unconditional call after it.
+        """
+        super().stop(timeout)
+        self._retire_fetch_store()
+
+    def _count_304(self, replayed: bool = False, empty: bool = False) -> None:
+        with self.stats_lock:
+            self._gather_304 += 1
+            if replayed:
+                self._gather_304_replayed += 1
+            if empty:
+                self._gather_304_empty += 1
+
+    def _plain_collect(self, task: AcquisitionTask, raw_url: str, headers: Dict[str, str]) -> List[Service]:
+        """The unconditional fetch path: download the body and extract from it."""
+        return client.collect(
+            key_pattern=task.key_pattern,
+            url=raw_url,
+            retries=task.retries,
+            address_pattern=task.address_pattern,
+            endpoint_pattern=task.endpoint_pattern,
+            model_pattern=task.model_pattern,
+            headers=headers,
+        )
+
+    def _fetch_and_extract(
+        self, task: AcquisitionTask, raw_url: str, headers: Dict[str, str]
+    ) -> _FetchResult:
+        """Fetch one raw file, revalidating with ETag when an outcome is stored.
+
+        Four outcomes:
+
+        * **200** — extract from the fresh body, then store the etag and the
+          outcome for this (provider, url, pattern_fp). The outcome row is
+          written even when the extraction produced NOTHING (an explicit empty
+          marker): zero-candidate links are ~99% of the corpus, so they are
+          the ones that must not fall back to a full fetch on the next 304.
+        * **304 + candidates** — REPLAY: the candidates go to CHECK with no
+          body downloaded and the extractor never called, so
+          ``materials_total`` / ``valid_keys_found`` and the pool's periodic
+          re-validation of known keys both survive the ~80-92% cross-run link
+          overlap (measured: nvidia 92.2 / glm 84.1 / tavily 83.8).
+        * **304 + explicit empty marker** — SKIP: the body is unchanged and
+          last time it yielded no candidate, so there is nothing to replay and
+          nothing to extract. No download, no extractor call, nothing emitted
+          to CHECK; counted ``gather_304_empty``.
+        * **304 + no row** — first time this provider/pattern pair sees the
+          URL, so fall back to a normal full fetch.
+
+        A changed pattern fingerprint is a different outcome row, so neither
+        stale candidates nor an empty skip can be reused under new patterns;
+        provider is part of the row key, so nothing replays across providers;
+        an empty etag never sends ``If-None-Match`` (no validator, no skip); a
+        404 is never stored (only successful fetches write state).
+        """
+        store = self._fetch_store_instance()
+        if store is None:
+            return _FetchResult(self._plain_collect(task, raw_url, headers), False)
+
+        pattern_fp = FetchStore.pattern_fingerprint(
+            task.key_pattern, task.address_pattern, task.endpoint_pattern, task.model_pattern
+        )
+        state = store.get_state(raw_url)
+        etag = state.etag if state is not None else ""
+
+        try:
+            result = client.http_get_raw(
+                url=raw_url,
+                headers=headers,
+                etag=etag,
+                retries=task.retries,
+            )
+        except (ConnectionError, TimeoutError):
+            # Retryable transport failures keep escaping to _worker_loop's
+            # requeue path — the same contract client.collect() has.
+            raise
+        except Exception as e:
+            # Non-retryable failures (404 FileNotFoundError, 401/403
+            # NetworkError, decode errors) degrade to "nothing collected"
+            # exactly like collect() does, so the link is still written to
+            # links.txt and counted GATHER_EMPTY instead of vanishing from the
+            # corpus. Nothing is stored: a transient CDN 404 must not stick.
+            logger.error(f"[{self.name}] raw fetch failed for {task.provider}: {e}")
+            return _FetchResult([], False)
+
+        if result.unchanged:
+            stored = store.get_outcome(task.provider, raw_url, pattern_fp)
+            if stored is not None:
+                # ``[]`` is an explicit empty outcome, not "no row": the
+                # extraction completed last time and produced nothing, so the
+                # unchanged body has nothing to replay and nothing to extract.
+                # Skip the fetch entirely — the R1 bulk case (kimi-coding 0.07%
+                # / glm 0.70-0.76% extraction rates).
+                self._count_304(replayed=bool(stored), empty=not stored)
+                if stored:
+                    logger.debug(f"[{self.name}] 304 replay of {len(stored)} candidate(s) for {task.provider}")
+                    # fetched_at is deliberately NOT refreshed here, so a hot
+                    # URL pays one full re-extraction every RETENTION_DAYS (14)
+                    # when prune() retires its rows. That bounds the store AND
+                    # self-heals a row whose stored candidates drifted from
+                    # what the current extractor would produce.
+                    return _FetchResult(list(stored), True, replayed=True)
+                logger.debug(
+                    f"[{self.name}] 304 skip: stored empty outcome for {task.provider} "
+                    f"(no download, no extraction)"
+                )
+                return _FetchResult([], True, empty_304=True)
+            # No outcome row for this (provider, pattern_fp): revalidate proved
+            # the body is unchanged but we never extracted from it under these
+            # patterns, so do a normal full fetch. The etag is refreshed from
+            # the 304 (it may omit the header — the validator is unchanged by
+            # definition) so the state row's fetched_at does not age out.
+            self._count_304()
+            services = self._plain_collect(task, raw_url, headers)
+            if result.etag:
+                store.put_state(raw_url, result.etag, result.status)
+                store.put_outcome(task.provider, raw_url, pattern_fp, services)
+            return _FetchResult(services, True)
+
+        if result.status == 200 and result.content:
+            services = client.collect(
+                key_pattern=task.key_pattern,
+                text=result.content,
+                address_pattern=task.address_pattern,
+                endpoint_pattern=task.endpoint_pattern,
+                model_pattern=task.model_pattern,
+            )
+            if result.etag:
+                store.put_state(raw_url, result.etag, result.status)
+                # Every completed extraction is stored, including an empty one:
+                # the explicit marker is what lets the next 304 skip the body
+                # fetch instead of paying two requests for the same bytes.
+                store.put_outcome(task.provider, raw_url, pattern_fp, services)
+            return _FetchResult(services, False)
+
+        # Any other status (204, an empty 200 body): nothing to extract and
+        # nothing worth caching.
+        return _FetchResult([], False)
 
     def _generate_id(self, task: ProviderTask) -> str:
         """Generate unique task identifier for deduplication"""
@@ -721,24 +949,33 @@ class AcquisitionStage(BasePipelineStage):
             # github_blob_to_raw): the HTML blob page is ~85x larger and its
             # JSON-escaped quotes defeat the quote-anchored key patterns.
             # links.txt and the dedup id below keep the ORIGINAL blob URL.
-            services = client.collect(
-                key_pattern=task.key_pattern,
-                url=github_blob_to_raw(task.url),
-                retries=task.retries,
-                address_pattern=task.address_pattern,
-                endpoint_pattern=task.endpoint_pattern,
-                model_pattern=task.model_pattern,
-                headers={**DEFAULT_HEADERS, "User-Agent": get_user_agent()},
+            # The fetch itself is ETag-conditional across runs: an unchanged
+            # body replays the candidates stored for this
+            # (provider, url, pattern fingerprint) instead of re-downloading.
+            fetch = self._fetch_and_extract(
+                task,
+                github_blob_to_raw(task.url),
+                {**DEFAULT_HEADERS, "User-Agent": get_user_agent()},
             )
+            services = fetch.services
 
             # Gather-outcome counters (zero-yield tripwire observability):
             # bumped on the provider's live ResultManager, reached through
             # the same IProvider instance the result layer holds. No-op-safe
-            # before the manager materializes; never raises.
-            record_gather_outcome(
-                self.resources.providers.get(task.provider),
-                GATHER_OK if services else GATHER_EMPTY,
-            )
+            # before the manager materializes; never raises. GATHER_304 is an
+            # ORTHOGONAL sub-count (a 304 also bumps ok/empty for the work it
+            # produced) so gather_ok + gather_empty keeps equalling the number
+            # of links processed. gather_304_replayed / gather_304_empty split
+            # the 304s into "candidates re-emitted" and "known-empty, fetch
+            # skipped", the two cases that actually cost zero body bytes.
+            provider = self.resources.providers.get(task.provider)
+            record_gather_outcome(provider, GATHER_OK if services else GATHER_EMPTY)
+            if fetch.saw_304:
+                record_gather_outcome(provider, GATHER_304)
+                if fetch.replayed:
+                    record_gather_outcome(provider, GATHER_304_REPLAYED)
+                elif fetch.empty_304:
+                    record_gather_outcome(provider, GATHER_304_EMPTY)
 
             # Create output object
             output = StageOutput(task=task)

@@ -14,6 +14,7 @@ import threading
 import time
 import traceback
 import urllib.parse
+from dataclasses import dataclass, field
 from email.utils import parsedate_to_datetime
 from typing import Any, Callable, Dict, List, Mapping, Optional, Set, Tuple
 
@@ -1454,6 +1455,186 @@ def http_get(
     except requests.exceptions.RequestException as e:
         # URL errors are usually network-related and should be retried
         raise ConnectionError(f"Request error: {e}")
+
+    except Exception as e:
+        # Classify unknown errors
+        if "timeout" in str(e).lower():
+            # Timeout errors should be retried
+            raise TimeoutError(f"Request timeout: {e}")
+        else:
+            # Other errors should not be retried
+            raise NetworkError(f"Unexpected error: {e}")
+
+
+def _response_etag(headers: Any, fallback: str = "") -> str:
+    """Read the ETag out of a response header mapping (case-insensitively).
+
+    ``requests`` gives a CaseInsensitiveDict, tests and adapters may give a
+    plain dict, so both spellings are tried before falling back to the etag we
+    sent (a 304 may omit the header entirely — the validator is unchanged by
+    definition).
+    """
+    if not headers:
+        return trim(fallback)
+    for name in ("ETag", "etag", "Etag", "ETAG"):
+        try:
+            value = headers.get(name)
+        except AttributeError:
+            return trim(fallback)
+        if value:
+            return trim(str(value))
+    return trim(fallback)
+
+
+@dataclass
+class RawFetchResult:
+    """Result of one raw-file GET (:func:`http_get_raw`).
+
+    ``unchanged`` is the distinguishable 304 outcome the gather stage needs:
+    ``http_get`` raises ``NetworkError`` on ANY non-200 (see its
+    ``status_code != 200`` branch), so an ETag revalidation hit would be a
+    silent drop there. A 304 carries an empty ``content`` — the wire body is
+    0 bytes — and the caller decides what to do with it.
+    """
+
+    status: int = 200
+    content: str = ""
+    etag: str = ""
+    headers: Dict[str, str] = field(default_factory=dict)
+
+    @property
+    def unchanged(self) -> bool:
+        """True when the server revalidated our ``If-None-Match`` (304)."""
+        return self.status == 304
+
+
+@network_retry
+def http_get_raw(
+    url: str,
+    headers: Optional[Dict] = None,
+    etag: str = "",
+    retries: int = 3,
+    interval: float = 1.0,
+    timeout: float = 10,
+    use_proxy: bool = True,
+) -> RawFetchResult:
+    """GET a raw file body with optional ETag revalidation.
+
+    Same transport path, retry classification and proxy/egress routing as
+    :func:`http_get` — it is the RAW-fetch twin, not a change to it: the
+    API/search cache path (``GitHubClient._http_get`` + ``ResponseCache``) is
+    untouched. Two differences:
+
+    * a non-empty ``etag`` is sent as ``If-None-Match``;
+    * a **304 is a normal return** (``RawFetchResult(status=304,
+      content="")``) instead of ``NetworkError``, so the caller can replay
+      what it extracted from that body last time.
+
+    An empty ``etag`` sends NO conditional header, so this degrades to a plain
+    fetch — a missing/blank validator must never be mistaken for "unchanged".
+
+    Args:
+        url: URL to request (raw.githubusercontent.com is a _DIRECT_HOST)
+        headers: HTTP headers
+        etag: validator to revalidate with ("" = unconditional fetch)
+        retries: Number of retry attempts (default: 3, minimum: 1)
+        interval: Initial delay between retries in seconds (default: 1.0)
+        timeout: Request timeout in seconds
+
+    Returns:
+        RawFetchResult: status/content/etag of the exchange
+
+    Raises:
+        ValidationError: For invalid input
+        FileNotFoundError: HTTP 404 (never cached by the caller — a transient
+            CDN miss must not become permanent)
+        NetworkError: For non-retryable HTTP/decode failures
+        ConnectionError: HTTP 429/5xx and request errors (retried, then raised)
+        TimeoutError: request timed out on every attempt (retried, then raised)
+    """
+
+    # Input validation
+    if isblank(url):
+        raise ValidationError("URL cannot be empty", field="url")
+
+    # Setup request
+    headers = dict(headers or DEFAULT_HEADERS)
+    validator = trim(etag)
+    if validator:
+        headers["If-None-Match"] = validator
+    timeout = max(1, timeout)
+
+    try:
+        # Encode URL and add parameters
+        encoded_url = encoding_url(url)
+
+        with managed_network(
+            request("GET", encoded_url, headers=headers, timeout=timeout, use_proxy=use_proxy), "http_connection"
+        ) as response:
+            status_code = response.status_code
+            response_headers = dict(getattr(response, "headers", None) or {})
+
+            # 304 Not Modified: the body is empty BY CONTRACT, so nothing is
+            # decoded and the caller replays its stored extraction instead.
+            if status_code == 304:
+                return RawFetchResult(
+                    status=304,
+                    content="",
+                    etag=_response_etag(response_headers, validator),
+                    headers=response_headers,
+                )
+
+            if status_code != 200:
+                raise NetworkError(f"HTTP {status_code} error for URL: {url}")
+
+            content = response.content
+
+            # Decode content
+            try:
+                body = content.decode("utf-8")
+            except UnicodeDecodeError:
+                try:
+                    body = gzip.decompress(content).decode("utf-8")
+                except Exception:
+                    raise NetworkError("Failed to decode response content")
+
+            return RawFetchResult(
+                status=200,
+                content=body,
+                etag=_response_etag(response_headers),
+                headers=response_headers,
+            )
+
+    except requests.exceptions.HTTPError as e:
+        # Handle HTTP errors with basic classification (identical to http_get)
+        code = http_error_status(e)
+        reason = http_error_message(e)
+        if code == 429:
+            # Rate limit errors should be retried
+            raise ConnectionError(f"Rate limit exceeded (HTTP {code})")
+        elif code == 404:
+            raise FileNotFoundError(f"File not found (HTTP {code}), url: {url}, wire: {encoded_url}")
+        elif code in (401, 403):
+            # Auth errors should not be retried
+            raise NetworkError(f"Authentication failed (HTTP {code})")
+        elif code >= 500:
+            # Server errors should be retried
+            raise ConnectionError(f"Server error (HTTP {code}): {reason}")
+        else:
+            # Client errors should not be retried
+            raise NetworkError(f"HTTP {code} error: {reason}")
+
+    except requests.exceptions.Timeout as e:
+        raise TimeoutError(f"Request timeout: {e}")
+
+    except requests.exceptions.RequestException as e:
+        # URL errors are usually network-related and should be retried
+        raise ConnectionError(f"Request error: {e}")
+
+    except (NetworkError, ValidationError, FileNotFoundError):
+        # Already classified above (a bare raise keeps the retry decorator
+        # from re-wrapping them) — never fall into the catch-all below.
+        raise
 
     except Exception as e:
         # Classify unknown errors
