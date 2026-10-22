@@ -1718,6 +1718,681 @@ class TestMissedRunCatchup(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Test: reschedule/re-enable catch-up (todo 7, 2026-10-22)
+# ---------------------------------------------------------------------------
+
+
+def _noop_job() -> None:
+    """Placeholder callback for jobs that must exist but never run in tests."""
+
+
+class TestRescheduleCatchup(unittest.TestCase):
+    """Given a schedule PUT that re-enables a provider,
+    When ``SchedulerService.update_schedule`` rebuilds its cron job,
+    Then it arms AT MOST ONE staggered catch-up for the latest missed fire
+    through the existing ``_run_catchup_job`` path — and none when the last
+    run already covers that fire, a run is live, or the env gate is off.
+    """
+
+    PROVIDER = "deepseek"
+    CRON = "0 3 * * *"
+    CONFIG = "examples/config-deepseek.yaml"
+
+    def setUp(self) -> None:
+        # The arm guard is module-level (same as _scheduler_service); each test
+        # starts from scratch so one case's armed job cannot leak into another.
+        import web.scheduler as scheduler_mod
+
+        scheduler_mod._reschedule_catchup_armed.clear()
+
+    def tearDown(self) -> None:
+        import web.scheduler as scheduler_mod
+
+        scheduler_mod._reschedule_catchup_armed.clear()
+
+    @staticmethod
+    def _start_service(db_path: str):
+        """Real (started) AsyncIOScheduler + SchedulerService over *db_path*."""
+        from apscheduler.executors.asyncio import AsyncIOExecutor
+        from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+        from web.scheduler import SchedulerService
+
+        scheduler = AsyncIOScheduler(executors={"default": AsyncIOExecutor()})
+        scheduler.start()
+        return SchedulerService(scheduler=scheduler, db_path=db_path)
+
+    @staticmethod
+    def _catchup_jobs(scheduler):
+        return [
+            job
+            for job in scheduler.get_jobs()
+            if str(job.id).startswith("catchup-")
+        ]
+
+    @staticmethod
+    async def _make_db(
+        db_path: str,
+        run_inserts: list[tuple[str, str, str, str]] = (),
+    ) -> str:
+        """Full-schema temp DB (never the repo's data/) with run rows."""
+        from web.db import init_db
+
+        await init_db(db_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            for run_id, provider, status, started_sql in run_inserts:
+                conn.execute(
+                    "INSERT INTO run_records "
+                    "(id, provider_name, config_file, status, started_at) "
+                    f"VALUES (?, ?, 'c.yaml', ?, {started_sql})",
+                    (run_id, provider, status),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+        return db_path
+
+    async def _update_and_collect(self, db_path: str):
+        """Run a real update_schedule and snapshot the scheduler's jobs."""
+        from apscheduler.executors.asyncio import AsyncIOExecutor
+        from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+        from web.scheduler import SchedulerService
+
+        scheduler = AsyncIOScheduler(executors={"default": AsyncIOExecutor()})
+        scheduler.start()
+        svc = SchedulerService(scheduler=scheduler, db_path=db_path)
+        try:
+            result = await svc.update_schedule(
+                provider_name=self.PROVIDER,
+                cron_expression=self.CRON,
+                enabled=True,
+                config_file=self.CONFIG,
+            )
+            tz = scheduler.timezone
+            jobs = [
+                {
+                    "id": job.id,
+                    "func_name": getattr(job.func, "__name__", str(job.func)),
+                    "args": list(job.args),
+                    "run_date": getattr(job.trigger, "run_date", None),
+                    "max_instances": job.max_instances,
+                    "misfire_grace_time": job.misfire_grace_time,
+                }
+                for job in scheduler.get_jobs()
+            ]
+            scan_job_present = (
+                scheduler.get_job(f"scan-{self.PROVIDER}") is not None
+            )
+        finally:
+            # svc.shutdown() also clears the module-level arm guard.
+            await svc.shutdown()
+        return result, jobs, scan_job_present, tz
+
+    async def _armed_catchup(self, svc):
+        """Arm a reschedule catch-up and take its one-shot out of the store.
+
+        APScheduler 3.11 removes a due DateTrigger job BEFORE invoking its
+        callback (``base.py`` submit then remove), so calling the captured
+        func/args after this removal models exactly the execution window the
+        deferral guard must cover.
+        """
+        await svc.update_schedule(self.PROVIDER, self.CRON, True, self.CONFIG)
+        jobs = self._catchup_jobs(svc._scheduler)
+        self.assertEqual(len(jobs), 1, jobs)
+        job = jobs[0]
+        svc._scheduler.remove_job(job.id)
+        return job
+
+    def test_run_covering_latest_fire_arms_zero_catchups(self) -> None:
+        """Case (i): the latest fire predates the last run → ZERO catch-ups.
+
+        A run started NOW is at/after any latest fire (fires are never in the
+        future), whatever the wall clock, so this pins the "already covered"
+        branch rather than the live-run one.
+        """
+
+        async def _scenario() -> None:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                db_path = await self._make_db(
+                    os.path.join(tmpdir, "h.db"),
+                    run_inserts=[
+                        ("r1", self.PROVIDER, "completed", "datetime('now')")
+                    ],
+                )
+
+                result, jobs, scan_present, _tz = await self._update_and_collect(
+                    db_path
+                )
+
+                self.assertTrue(scan_present, "the cron job must be rebuilt")
+                self.assertTrue(result["next_run_time"])
+                self.assertEqual(
+                    [j for j in jobs if j["id"].startswith("catchup-")], []
+                )
+
+        _run_async(_scenario())
+
+    def test_missed_fire_arms_exactly_one_staggered_catchup(self) -> None:
+        """Case (ii): latest fire POSTDATES the last run → EXACTLY ONE catch-up.
+
+        The daily cron has fired many times in the 8-day lookback; only the
+        latest fire may be armed (no backfill). The job must go through the
+        one-shot ``_run_catchup_job`` (so cap + deferral ladder apply) at
+        ``_CATCHUP_STAGGER_SECONDS`` from now.
+        """
+
+        async def _scenario() -> None:
+            import web.scheduler as scheduler_mod
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                db_path = await self._make_db(
+                    os.path.join(tmpdir, "h.db"),
+                    run_inserts=[
+                        (
+                            "r1",
+                            self.PROVIDER,
+                            "completed",
+                            "datetime('now','-2 day')",
+                        )
+                    ],
+                )
+
+                _result, jobs, scan_present, tz = await self._update_and_collect(
+                    db_path
+                )
+
+                self.assertTrue(scan_present)
+                catchups = [j for j in jobs if j["id"].startswith("catchup-")]
+                self.assertEqual(len(catchups), 1, catchups)
+                job = catchups[0]
+                self.assertEqual(job["func_name"], "_run_catchup_job")
+                self.assertEqual(job["args"][0], self.PROVIDER)
+                self.assertEqual(job["args"][1], self.CONFIG)
+                self.assertEqual(job["max_instances"], 1)
+                self.assertIsNone(job["misfire_grace_time"])
+
+                # The reason arg is the LATEST fire (UTC ISO), not an older one.
+                expected_fire = scheduler_mod._previous_fire_time(
+                    self.CRON, tz
+                )
+                self.assertIsNotNone(expected_fire)
+                self.assertEqual(
+                    job["args"][2],
+                    expected_fire.astimezone(timezone.utc).isoformat(),
+                )
+
+                # One stagger slot after now, measured in the job's tz.
+                run_date = job["run_date"]
+                self.assertIsNotNone(run_date)
+                expected_run = datetime.now(run_date.tzinfo) + timedelta(
+                    seconds=scheduler_mod._CATCHUP_STAGGER_SECONDS
+                )
+                self.assertLess(
+                    abs((run_date - expected_run).total_seconds()), 5
+                )
+
+        _run_async(_scenario())
+
+    def test_live_run_suppresses_catchup(self) -> None:
+        """Case (iii): a live 'running' row → ZERO catch-ups.
+
+        The row started BEFORE the latest */5 fire, so only the
+        ``_catchup_state`` live-run branch can suppress this arm.
+        """
+
+        async def _scenario() -> None:
+            self.CRON = "*/5 * * * *"
+            try:
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    db_path = await self._make_db(
+                        os.path.join(tmpdir, "h.db"),
+                        run_inserts=[
+                            (
+                                "r1",
+                                self.PROVIDER,
+                                "running",
+                                "datetime('now','-1 day')",
+                            )
+                        ],
+                    )
+
+                    _result, jobs, scan_present, _tz = (
+                        await self._update_and_collect(db_path)
+                    )
+
+                    self.assertTrue(scan_present)
+                    self.assertEqual(
+                        [j for j in jobs if j["id"].startswith("catchup-")],
+                        [],
+                    )
+            finally:
+                self.CRON = "0 3 * * *"
+
+        _run_async(_scenario())
+
+    def test_env_gate_off_disables_reschedule_catchup(self) -> None:
+        """Case (iv): HARVESTER_SCHEDULER_CATCHUP=0 (``_CATCHUP_ENABLED``
+        False) → the cron job is still rebuilt, but NO catch-up is armed.
+        """
+
+        async def _scenario() -> None:
+            import web.scheduler as scheduler_mod
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                db_path = await self._make_db(os.path.join(tmpdir, "h.db"))
+
+                with patch.object(scheduler_mod, "_CATCHUP_ENABLED", False):
+                    _result, jobs, scan_present, _tz = (
+                        await self._update_and_collect(db_path)
+                    )
+
+                self.assertTrue(scan_present)
+                self.assertEqual(
+                    [j for j in jobs if j["id"].startswith("catchup-")], []
+                )
+
+        _run_async(_scenario())
+
+    # -- 2026-10-22 verifier probes: deterministic double-fire fixes ---------
+
+    def test_pending_deferral_ladder_suppresses_catchup(self) -> None:
+        """PROBE A (verifier 2026-10-22): an earlier firing was 429/409 and
+        ``schedule_deferred`` already queued a ``defer-`` job. Arming a
+        catch-up here starts run-1 now; when run-1 finishes the pending
+        ladder retries and starts run-2 — TWO scans for ONE missed fire.
+        The arm must be skipped with one INFO line naming the ladder.
+        """
+
+        async def _scenario() -> None:
+            from apscheduler.triggers.date import DateTrigger
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                db_path = await self._make_db(os.path.join(tmpdir, "h.db"))
+                svc = self._start_service(db_path)
+                scheduler = svc._scheduler
+                try:
+                    scheduler.add_job(
+                        _noop_job,
+                        trigger=DateTrigger(
+                            run_date=datetime.now(scheduler.timezone)
+                            + timedelta(minutes=30)
+                        ),
+                        id=f"defer-{self.PROVIDER}-{int(time.time() * 1000)}",
+                    )
+
+                    with self.assertLogs("web.scheduler", level="INFO") as logs:
+                        await svc.update_schedule(
+                            self.PROVIDER, self.CRON, True, self.CONFIG
+                        )
+
+                    self.assertEqual(
+                        self._catchup_jobs(scheduler),
+                        [],
+                        "a pending deferral ladder already owns the slot — no "
+                        "catch-up may be armed",
+                    )
+                    messages = [r.getMessage() for r in logs.records]
+                    self.assertTrue(
+                        any(
+                            "deferral ladder already owns the slot" in message
+                            for message in messages
+                        ),
+                        messages,
+                    )
+                finally:
+                    await svc.shutdown()
+
+        _run_async(_scenario())
+
+    def test_two_updates_same_tick_arm_exactly_one_catchup(self) -> None:
+        """PROBE B (verifier 2026-10-22): two schedule PUTs for the same
+        provider run in the same event-loop tick and both pass the
+        ``_catchup_state`` re-check before any run row exists. Exactly ONE
+        catch-up may be armed — two callbacks would race, one would 409 into
+        the deferral ladder, and the ladder would later start a second scan.
+
+        The gate holds the first callback inside its state read until either
+        the second PUT reaches the same point (unguarded: two arms) or the
+        bounded wait expires (guarded: the second PUT is a no-op before the
+        state read, so this call is the only entrant).
+        """
+
+        async def _scenario() -> None:
+            import web.scheduler as scheduler_mod
+
+            entered = 0
+            release = asyncio.Event()
+
+            async def _gated_state(db, provider):
+                nonlocal entered
+                entered += 1
+                if entered == 1:
+                    try:
+                        await asyncio.wait_for(release.wait(), timeout=1.0)
+                    except asyncio.TimeoutError:
+                        pass
+                else:
+                    release.set()
+                return False, None
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                db_path = await self._make_db(
+                    os.path.join(tmpdir, "h.db"),
+                    run_inserts=[
+                        (
+                            self.PROVIDER,
+                            self.PROVIDER,
+                            "completed",
+                            "datetime('now','-2 day')",
+                        )
+                    ],
+                )
+                svc = self._start_service(db_path)
+                scheduler = svc._scheduler
+                try:
+                    with patch.object(
+                        scheduler_mod, "_catchup_state", _gated_state
+                    ):
+                        await asyncio.gather(
+                            svc.update_schedule(
+                                self.PROVIDER, self.CRON, True, self.CONFIG
+                            ),
+                            svc.update_schedule(
+                                self.PROVIDER, self.CRON, True, self.CONFIG
+                            ),
+                        )
+
+                    catchups = self._catchup_jobs(scheduler)
+                    self.assertEqual(
+                        len(catchups),
+                        1,
+                        "one missed fire must arm one catch-up, got "
+                        f"{[str(j.id) for j in catchups]}",
+                    )
+                    self.assertEqual(
+                        entered,
+                        1,
+                        "the same-tick second PUT must be a no-op BEFORE the "
+                        "state re-check (the in-process guard serializes them)",
+                    )
+                    self.assertIsNotNone(
+                        scheduler.get_job(f"scan-{self.PROVIDER}")
+                    )
+                finally:
+                    await svc.shutdown()
+
+        _run_async(_scenario())
+
+    def test_guard_clears_after_armed_job_executes(self) -> None:
+        """PROBE B follow-up: the in-process guard must not leak. Once the
+        armed one-shot executes (and APScheduler removes it), a later PUT may
+        arm again for the next missed slot.
+        """
+
+        async def _scenario() -> None:
+            import web.scheduler as scheduler_mod
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                db_path = await self._make_db(
+                    os.path.join(tmpdir, "h.db"),
+                    run_inserts=[
+                        (
+                            self.PROVIDER,
+                            self.PROVIDER,
+                            "completed",
+                            "datetime('now','-2 day')",
+                        )
+                    ],
+                )
+                svc = self._start_service(db_path)
+                scheduler = svc._scheduler
+                old_svc = scheduler_mod._scheduler_service
+                scheduler_mod._scheduler_service = svc
+                try:
+                    await svc.update_schedule(
+                        self.PROVIDER, self.CRON, True, self.CONFIG
+                    )
+                    first = self._catchup_jobs(scheduler)
+                    self.assertEqual(len(first), 1)
+                    job_id = first[0].id
+                    func = first[0].func
+                    args = tuple(first[0].args)
+
+                    # APScheduler removes a one-shot DateTrigger job once it
+                    # has run; simulate that removal before invoking the
+                    # callback through its scheduled func/args.
+                    scheduler.remove_job(job_id)
+                    with patch.object(
+                        scheduler_mod, "_run_provider_job", new=AsyncMock()
+                    ) as mock_run:
+                        await func(*args)
+                    mock_run.assert_awaited_once_with(self.PROVIDER, self.CONFIG)
+                    self.assertEqual(
+                        scheduler_mod._reschedule_catchup_armed,
+                        set(),
+                        "the guard must be cleared by its armed job",
+                    )
+
+                    await svc.update_schedule(
+                        self.PROVIDER, self.CRON, True, self.CONFIG
+                    )
+                    second = self._catchup_jobs(scheduler)
+                    self.assertEqual(
+                        len(second),
+                        1,
+                        "after the armed job ran, a later PUT must be able "
+                        "to arm the next missed slot",
+                    )
+                    self.assertIsNone(scheduler.get_job(job_id))
+                finally:
+                    scheduler_mod._scheduler_service = old_svc
+                    await svc.shutdown()
+
+        _run_async(_scenario())
+
+    def test_pending_startup_catchup_blocks_reschedule_arm(self) -> None:
+        """PROBE B, startup half: ``_schedule_catchups`` already armed a
+        one-shot for the same fire and its 60 s stagger window is still open.
+        A PUT must not arm a second callback — the pending one owns the slot.
+        """
+
+        async def _scenario() -> None:
+            from apscheduler.triggers.date import DateTrigger
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                db_path = await self._make_db(os.path.join(tmpdir, "h.db"))
+                svc = self._start_service(db_path)
+                scheduler = svc._scheduler
+                try:
+                    pending_id = (
+                        f"catchup-{self.PROVIDER}-{int(time.time() * 1000)}"
+                    )
+                    scheduler.add_job(
+                        _noop_job,
+                        trigger=DateTrigger(
+                            run_date=datetime.now(scheduler.timezone)
+                            + timedelta(seconds=60)
+                        ),
+                        id=pending_id,
+                    )
+
+                    with self.assertLogs("web.scheduler", level="INFO") as logs:
+                        await svc.update_schedule(
+                            self.PROVIDER, self.CRON, True, self.CONFIG
+                        )
+
+                    self.assertEqual(
+                        [str(j.id) for j in self._catchup_jobs(scheduler)],
+                        [pending_id],
+                        "the already-armed startup catch-up must stay the "
+                        "only one for this slot",
+                    )
+                    messages = [r.getMessage() for r in logs.records]
+                    self.assertTrue(
+                        any(
+                            "pending one-shot owns the missed slot" in message
+                            for message in messages
+                        ),
+                        messages,
+                    )
+                finally:
+                    await svc.shutdown()
+
+        _run_async(_scenario())
+    # -- 2026-10-22 residual: EXECUTION-TIME deferral guard -----------------
+
+    def test_execution_time_deferral_guard_suppresses_catchup(self) -> None:
+        """Case (ix): the 429 callback RE-QUEUES the ladder after the catch-up
+        was armed. APScheduler removes the due ``defer-`` one-shot before its
+        callback runs, so a PUT inside that window sees no pending ladder and
+        arms; at execution time the re-queued ladder owns the slot.
+
+        The armed job must skip with one INFO line, leaving exactly ONE scan
+        for the missed fire (the ladder's) — never two.
+        """
+
+        async def _scenario() -> None:
+            import web.scheduler as scheduler_mod
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                db_path = await self._make_db(
+                    os.path.join(tmpdir, "h.db"),
+                    run_inserts=[
+                        (
+                            self.PROVIDER,
+                            self.PROVIDER,
+                            "completed",
+                            "datetime('now','-2 day')",
+                        )
+                    ],
+                )
+                svc = self._start_service(db_path)
+                scheduler = svc._scheduler
+                old_svc = scheduler_mod._scheduler_service
+                scheduler_mod._scheduler_service = svc
+                try:
+                    job = await self._armed_catchup(svc)
+                    with patch.object(
+                        scheduler_mod, "_run_provider_job", new=AsyncMock()
+                    ) as mock_run:
+                        # step 4: the deferral callback 429s + re-queues the
+                        # ladder AFTER the arm (scheduled under the patch so
+                        # the ladder's retry is observable below).
+                        self.assertTrue(
+                            svc.schedule_deferred(self.PROVIDER, self.CONFIG, 0)
+                        )
+                        with self.assertLogs(
+                            "web.scheduler", level="INFO"
+                        ) as logs:
+                            await job.func(*job.args)
+                        calls_after_catchup = mock_run.await_count
+
+                        # step 5: the ladder retry fires later (one scan).
+                        defer_job = [
+                            j
+                            for j in scheduler.get_jobs()
+                            if str(j.id).startswith(
+                                f"defer-{self.PROVIDER}-"
+                            )
+                        ][0]
+                        scheduler.remove_job(defer_job.id)
+                        await defer_job.func(*defer_job.args)
+                    calls_total = mock_run.await_count
+
+                    # Assert the TOTAL first: without the guard this reports
+                    # two runner calls for one missed fire.
+                    self.assertEqual(
+                        calls_total,
+                        1,
+                        "one missed fire must produce exactly one scan; the "
+                        "catch-up must not add a second beside the ladder",
+                    )
+                    self.assertEqual(
+                        calls_after_catchup,
+                        0,
+                        "the armed catch-up must not start a scan while a "
+                        "deferral ladder owns the slot",
+                    )
+                    messages = [r.getMessage() for r in logs.records]
+                    self.assertEqual(
+                        [
+                            m
+                            for m in messages
+                            if "Reschedule catch-up skipped" in m
+                            and "deferral ladder" in m
+                        ],
+                        [
+                            f"Reschedule catch-up skipped for {self.PROVIDER}: "
+                            f"a deferral ladder is queued and owns the missed "
+                            f"slot"
+                        ],
+                        messages,
+                    )
+                    self.assertEqual(
+                        scheduler_mod._reschedule_catchup_armed, set()
+                    )
+                finally:
+                    scheduler_mod._scheduler_service = old_svc
+                    await svc.shutdown()
+
+        _run_async(_scenario())
+
+    def test_execution_time_guard_allows_catchup_without_a_ladder(self) -> None:
+        """Case (x): no deferral ladder is queued at execution time → the new
+        guard must not over-suppress; the armed catch-up runs exactly ONE scan
+        through ``_run_provider_job``.
+        """
+
+        async def _scenario() -> None:
+            import web.scheduler as scheduler_mod
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                db_path = await self._make_db(
+                    os.path.join(tmpdir, "h.db"),
+                    run_inserts=[
+                        (
+                            self.PROVIDER,
+                            self.PROVIDER,
+                            "completed",
+                            "datetime('now','-2 day')",
+                        )
+                    ],
+                )
+                svc = self._start_service(db_path)
+                scheduler = svc._scheduler
+                old_svc = scheduler_mod._scheduler_service
+                scheduler_mod._scheduler_service = svc
+                try:
+                    job = await self._armed_catchup(svc)
+                    self.assertFalse(
+                        any(
+                            str(j.id).startswith(
+                                f"defer-{self.PROVIDER}-"
+                            )
+                            for j in scheduler.get_jobs()
+                        ),
+                        "fixture: no ladder may be queued for case (x)",
+                    )
+                    with patch.object(
+                        scheduler_mod, "_run_provider_job", new=AsyncMock()
+                    ) as mock_run:
+                        await job.func(*job.args)
+                    mock_run.assert_awaited_once_with(
+                        self.PROVIDER, self.CONFIG
+                    )
+                    self.assertEqual(
+                        scheduler_mod._reschedule_catchup_armed, set()
+                    )
+                finally:
+                    scheduler_mod._scheduler_service = old_svc
+                    await svc.shutdown()
+
+        _run_async(_scenario())
+
+
+# ---------------------------------------------------------------------------
 # Helper
 # ---------------------------------------------------------------------------
 

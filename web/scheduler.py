@@ -84,6 +84,15 @@ _CATCHUP_ENABLED = os.environ.get(
 # Catch-up jobs are staggered by index so a restart does not fire a whole
 # missed chain at once (thundering herd on a box already at load ~8).
 _CATCHUP_STAGGER_SECONDS = 60
+# In-process guard for RESCHEDULE-armed catch-ups (2026-10-22 verifier probe
+# B). Two `update_schedule` calls in the same event-loop tick both pass the
+# `_catchup_state` re-check before either can insert a run_records row, so
+# both used to arm a catch-up for the same fire; the second callback then 409s
+# into the deferral ladder and the ladder later starts a SECOND scan for one
+# missed slot. The entry is added synchronously before the helper's first
+# await, discarded when the armed job executes (:_run_catchup_job) and cleared
+# on scheduler shutdown (SchedulerService.shutdown), so it cannot leak.
+_reschedule_catchup_armed: set[str] = set()
 
 
 async def _active_run_count(db_path: str) -> int:
@@ -448,6 +457,7 @@ async def _run_catchup_job(
     provider_name: str,
     config_file: str | None = None,
     missed_fire_iso: str = "",
+    check_deferral: bool = False,
 ) -> None:
     """One-shot catch-up callback: RE-CHECK the missed fire, then run.
 
@@ -469,9 +479,32 @@ async def _run_catchup_job(
     Going through :func:`_run_provider_job` when the re-check passes means the
     provider guard, the concurrency cap and the deferral ladder apply to a
     catch-up firing exactly as they do to a regular cron firing.
+
+    *check_deferral* is set ONLY by the reschedule-armed one-shot
+    (:_arm_reschedule_catchup); startup jobs keep the original three-argument
+    call and behaviour. A deferral ladder can be RE-QUEUED after the arm:
+    APScheduler removes a due one-shot from the store BEFORE invoking its
+    callback, so a PUT landing while that callback awaits the cap reads
+    ``has_pending_deferral()`` as False, arms a catch-up, and the callback
+    then 429s and queues the ladder. Re-checking here — the only point where
+    the re-queued job is visible — makes the catch-up a no-op so one missed
+    fire yields one scan (the ladder's), never two.
     """
     # _parse_utc_started_at: same ISO→aware-UTC parse the arming side compares
     # against (None = legacy/garbage arg → no re-check possible).
+    # This one-shot is executing; the reschedule arm guard (if any) has done
+    # its job. Clearing here keeps a later PUT free to arm the next slot.
+    _reschedule_catchup_armed.discard(provider_name)
+
+    if check_deferral:
+        svc = get_scheduler_service()
+        if svc is not None and svc.has_pending_deferral(provider_name):
+            logger.info(
+                f"Reschedule catch-up skipped for {provider_name}: a "
+                f"deferral ladder is queued and owns the missed slot"
+            )
+            return
+
     missed_fire = (
         _parse_utc_started_at(missed_fire_iso) if missed_fire_iso else None
     )
@@ -588,6 +621,159 @@ async def _schedule_catchups(
             await db.close()
         except Exception:
             pass
+
+
+def _has_pending_catchup(
+    scheduler: AsyncIOScheduler, provider_name: str
+) -> bool:
+    """Whether a one-shot catch-up job for *provider_name* is still queued.
+
+    Queried from APScheduler (a one-shot DateTrigger job removes itself when
+    it runs) rather than a parallel flag. This is what closes the STARTUP
+    half of the double-fire: ``_schedule_catchups`` arms
+    ``catchup-<provider>-<ms>`` 60 s out, and a schedule PUT inside that
+    window used to arm a second callback for the same fire. The exact
+    numeric-suffix check keeps ``catchup-kimi-ai-…`` from counting as a
+    pending job for ``kimi`` — the same provider-segment trap
+    :meth:`SchedulerService.has_pending_deferral` pins for ``defer-`` ids.
+    """
+    prefix = f"catchup-{provider_name}-"
+    try:
+        for job in scheduler.get_jobs():
+            job_id = str(getattr(job, "id", ""))
+            if job_id.startswith(prefix) and job_id[len(prefix):].isdigit():
+                return True
+        return False
+    except Exception:
+        return False
+
+
+async def _arm_reschedule_catchup(
+    svc: "SchedulerService",
+    provider_name: str,
+    cron_expression: str,
+    config_file: str,
+) -> bool:
+    """Arm AT MOST ONE catch-up after update_schedule re-enabled a provider.
+
+    The startup catch-up (:_schedule_catchups) runs only at process boot, so
+    a slot that passes while a provider is DISABLED — or that a changed cron
+    expression newly produces — is otherwise lost silently. This reuses the
+    startup pass's exact decision pair: latest fire from
+    :_previous_fire_time, then :_catchup_state for "live run / a run started
+    at or after the fire". Only the MOST RECENT fire is considered (never a
+    backfill), and the one-shot :_run_catchup_job re-checks the same state at
+    execution time and delegates through :_run_provider_job, so the provider
+    guard, the concurrency cap and the deferral ladder still apply.
+
+    Returns True when a job was armed. Never raises: a failed check must not
+    turn a schedule PUT into a 500 (mirrors _schedule_catchups' per-provider
+    failure policy).
+
+    Double-fire guards (2026-10-22 verifier): a pending catch-up job for the
+    provider already owns the slot (startup arm + a PUT inside its 60 s
+    window), and an in-process set serializes two same-tick PUTs — neither
+    can see the other's job because no run row exists yet. A pending
+    DEFERRAL ladder also owns the slot: arming here would start run-1 now and
+    the ladder would start run-2 when run-1 finishes. That check cannot see a
+    ladder re-queued AFTER the arm (the due defer- one-shot is removed before
+    its callback runs), so the armed job passes ``check_deferral=True`` and
+    re-checks :meth:`SchedulerService.has_pending_deferral` at execution time.
+    """
+    if not _CATCHUP_ENABLED:
+        return False
+
+    scheduler = svc._scheduler
+    db_path = svc._db_path
+
+    # Checked BEFORE the in-process set: two same-tick PUTs both reach this
+    # line before either arms a job, so the set (not this check) is what
+    # serializes them; this check closes the startup-arm case.
+    if _has_pending_catchup(scheduler, provider_name):
+        logger.info(
+            f"Catch-up already armed for {provider_name}: a pending one-shot "
+            f"owns the missed slot"
+        )
+        return False
+
+    if provider_name in _reschedule_catchup_armed:
+        logger.info(
+            f"Reschedule catch-up already armed for {provider_name}: a "
+            f"second arm in the same window is a no-op"
+        )
+        return False
+
+    if svc.has_pending_deferral(provider_name):
+        logger.info(
+            f"Reschedule catch-up skipped for {provider_name}: a pending "
+            f"deferral ladder already owns the slot"
+        )
+        return False
+
+    # Added synchronously, before the helper's first await: a second PUT in
+    # the same tick sees this entry instead of passing the state re-check too.
+    _reschedule_catchup_armed.add(provider_name)
+    armed = False
+    try:
+        tz = getattr(scheduler, "timezone", None)
+        if not isinstance(tz, tzinfo):
+            tz = None
+
+        fire = _previous_fire_time(cron_expression, tz)
+        if fire is None:
+            return False
+
+        db = await get_db(db_path)
+        try:
+            has_live_run, last_started = await _catchup_state(db, provider_name)
+        finally:
+            try:
+                await db.close()
+            except Exception:
+                pass
+        if has_live_run:
+            logger.info(
+                f"Catch-up skipped for {provider_name}: a run is still live"
+            )
+            return False
+        if last_started is not None and last_started >= fire:
+            # A run already covers the latest slot — re-enabling changed
+            # nothing, so this is where a double scan would come from.
+            return False
+
+        # ONE slot, FIRST stagger position: a reschedule is a single event,
+        # unlike the startup pass which spaces a whole queue of providers.
+        delay = _CATCHUP_STAGGER_SECONDS
+        missed_fire_iso = fire.astimezone(timezone.utc).isoformat()
+        scheduler.add_job(
+            _run_catchup_job,
+            trigger=DateTrigger(
+                run_date=datetime.now(tz) + timedelta(seconds=delay)
+            ),
+            # check_deferral=True: execution-time re-check of the ladder that
+            # the 429 callback may have re-queued after this arm.
+            args=[provider_name, config_file, missed_fire_iso, True],
+            id=f"catchup-{provider_name}-{int(time.time() * 1000)}",
+            max_instances=1,
+            replace_existing=False,
+            misfire_grace_time=None,
+        )
+        armed = True
+        logger.info(
+            f"Scheduled catch-up run for {provider_name} on reschedule: "
+            f"missed cron fire at {missed_fire_iso}, firing in {delay}s"
+        )
+        return True
+    except Exception as exc:
+        logger.warning(
+            f"Reschedule catch-up check failed for {provider_name}: {exc}"
+        )
+        return False
+    finally:
+        # Path failure (no fire, live run, already satisfied, add_job raise)
+        # must not leak the guard: a later PUT may try again.
+        if not armed:
+            _reschedule_catchup_armed.discard(provider_name)
 
 
 # ---------------------------------------------------------------------------
@@ -998,6 +1184,16 @@ class SchedulerService:
                 args=(provider_name, config_file),
                 replace_existing=True,
             )
+            # Re-enabling/rescheduling can step over a slot the old row never
+            # fired. Arm at most the latest missed one (startup-only catch-up
+            # cannot see this edit); the job goes through _run_catchup_job so
+            # the cap and the deferral ladder apply. Never fatal to the PUT.
+            await _arm_reschedule_catchup(
+                self,
+                provider_name,
+                cron_expression,
+                config_file,
+            )
         else:
             # Remove existing job if disabled
             try:
@@ -1101,6 +1297,9 @@ class SchedulerService:
             watcher.cancel()
         if watchers:
             await asyncio.gather(*watchers, return_exceptions=True)
+        # No armed catch-up survives a stopped scheduler; drop the in-process
+        # reschedule guards so a later in-process restart cannot no-op.
+        _reschedule_catchup_armed.clear()
         self._scheduler.shutdown(wait=False)
         logger.info("Scheduler shut down")
 
