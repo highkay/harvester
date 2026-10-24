@@ -93,10 +93,15 @@ class TestSeedData(unittest.TestCase):
         }
     )
     _EXPECTED_CRONS = {
-        "deepseek": "0 */4 * * *",
-        "kimi": "15 */4 * * *",
-        "mimo-cn": "30 */4 * * *",
-        "qwen-cn": "45 */4 * * *",
+        # 2026-10-24 audit: these four were seeded every 4 hours on a
+        # fast-churn theory; measured weekly-era yield is 0-2 net-new keys per run
+        # (70 d: deepseek 17, kimi 4, mimo-cn 2) against 2-13 h runs each, and
+        # daily→weekly had already cost ~20 keys/fortnight. Weekly floor per the
+        # 2026-10-18 house rule; depth is bounded per config instead.
+        "deepseek": "0 2 * * sun",
+        "kimi": "0 4 * * mon",
+        "mimo-cn": "0 6 * * tue",
+        "qwen-cn": "0 7 * * wed",
         "glm": "0 14 * * mon,wed,fri",
         # 2026-10-09 frequency policy: saturated providers → weekly floor or
         # 2-3x/week (measured 0-2 net-new/day, 98-100% cross-run overlap).
@@ -122,10 +127,13 @@ class TestSeedData(unittest.TestCase):
         # warnings on 2026-09-24), which starved these four providers' search
         # stages (qwen-intl completed with 0 links). Evening starts land after
         # the morning chain's search phases have drained the pool.
-        "kimi-ai": "0 18 * * *",
-        "kimi-coding": "0 19 * * *",
-        "mimo-sg": "0 20 * * *",
-        "qwen-intl": "0 21 * * *",
+        # 2026-10-24 de-collision (measured on prod): mimo-sg 20:00 sat fired
+        # inside brave 20:00 daily (41 min shared search), kimi-coding 19:00 fri
+        # cleared brave by 5 min, qwen-intl 21:00 sun cleared exa 22:00 by 14 min.
+        "kimi-ai": "0 18 * * thu",
+        "kimi-coding": "0 16 * * fri",
+        "mimo-sg": "0 15 * * sat",
+        "qwen-intl": "0 16 * * sun",
         "ollama": "0 3 * * mon",
         "openrouter": "30 7 * * thu",
         "nvidia": "50 11 * * *",
@@ -1235,9 +1243,13 @@ class TestMissedRunCatchup(unittest.TestCase):
                 self.assertIn("T", kwargs["args"][2])
                 self.assertEqual(kwargs["max_instances"], 1)
                 self.assertIsNone(kwargs["misfire_grace_time"])
-                # One-shot DateTrigger at now + 60s (first stagger slot).
+                # One-shot DateTrigger at now + one stagger slot (the constant,
+                # not a literal: the 2026-10-24 wave raised it 60 s -> 900 s).
+                import web.scheduler as scheduler_mod
+
+                stagger = scheduler_mod._CATCHUP_STAGGER_SECONDS
                 run_date = kwargs["trigger"].run_date
-                expected = datetime.now(run_date.tzinfo) + timedelta(seconds=60)
+                expected = datetime.now(run_date.tzinfo) + timedelta(seconds=stagger)
                 self.assertLess(abs((run_date - expected).total_seconds()), 5)
                 self.assertTrue(
                     any(
@@ -1331,12 +1343,15 @@ class TestMissedRunCatchup(unittest.TestCase):
                 self.assertEqual(calls[1].kwargs["args"][0], "kimi")
                 first = calls[0].kwargs["trigger"].run_date
                 second = calls[1].kwargs["trigger"].run_date
+                import web.scheduler as scheduler_mod
+
+                stagger = scheduler_mod._CATCHUP_STAGGER_SECONDS
                 now = datetime.now(second.tzinfo)
                 self.assertLess(
-                    abs((first - (now + timedelta(seconds=60))).total_seconds()), 5
+                    abs((first - (now + timedelta(seconds=stagger))).total_seconds()), 5
                 )
                 self.assertLess(
-                    abs((second - (now + timedelta(seconds=120))).total_seconds()), 5
+                    abs((second - (now + timedelta(seconds=stagger * 2))).total_seconds()), 5
                 )
 
         _run_async(_scenario())

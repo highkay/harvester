@@ -83,7 +83,12 @@ _CATCHUP_ENABLED = os.environ.get(
 ).strip().lower() not in ("0", "false", "no", "off", "")
 # Catch-up jobs are staggered by index so a restart does not fire a whole
 # missed chain at once (thundering herd on a box already at load ~8).
-_CATCHUP_STAGGER_SECONDS = 60
+# Delay between catch-up firings after a restart (seconds). Measured 2026-10-20:
+# the previous 60 s value opened FIVE runs at the same second (deepseek / kimi /
+# mimo-cn / qwen-cn all started 03:46:24 UTC plus the next slot), and that burst —
+# not the weekly cadence — stretched deepseek to 12.83 h and starved the shared
+# GitHub search pool. 900 s (15 min) matches the seed list's own slot spacing.
+_CATCHUP_STAGGER_SECONDS = 900
 # In-process guard for RESCHEDULE-armed catch-ups (2026-10-22 verifier probe
 # B). Two `update_schedule` calls in the same event-loop tick both pass the
 # `_catchup_state` re-check before either can insert a run_records row, so
@@ -132,15 +137,20 @@ async def _active_run_count(db_path: str) -> int:
 # ---------------------------------------------------------------------------
 
 _DEFAULT_SCHEDULES: tuple[tuple[str, str, str], ...] = (
-    # High-churn "sk-…" providers: GitHub-leaked keys are revoked within hours,
-    # so scan every 4 hours. The four providers are staggered 15 minutes apart
-    # so the GitHub search burst does not land on the same minute. Evidence:
-    # kimi gained 82 valid keys in a ~2.7-hour same-day window (data-kimi
-    # backups 20260810-155759 → 20260810-183753).
-    ("deepseek", "0 */4 * * *", "examples/config-deepseek.yaml"),
-    ("kimi", "15 */4 * * *", "examples/config-kimi.yaml"),
-    ("mimo-cn", "30 */4 * * *", "examples/config-mimo.yaml"),
-    ("qwen-cn", "45 */4 * * *", "examples/config-qwen.yaml"),
+    # Four former "high-churn" providers, WEEKLY since the 2026-10-24 audit.
+    # They were seeded every 4 hours on the theory that leaked keys die fast
+    # (kimi once gained 82 valid keys in a ~2.7 h window), but the measured
+    # weekly-era yield is 0-2 net-new keys per run (70 d: mimo-sg 3, mimo-cn 2,
+    # kimi-coding 2, kimi-ai 3, kimi 4, deepseek 17) while each run costs 2-13 h
+    # and 0.9-1.0k search pages. Daily→weekly had already cost only ~20 keys per
+    # fortnight (qwen-cn 66→3, deepseek 18→0, mimo-cn 3→0), so the house weekly
+    # floor is the correct cadence; the depth bound lives in each config
+    # (max_pages 3 / max_links_per_run 12000). Day names are spelled out for the
+    # APScheduler footgun (numeric dow: 0=mon, not 0=sun).
+    ("deepseek", "0 2 * * sun", "examples/config-deepseek.yaml"),
+    ("kimi", "0 4 * * mon", "examples/config-kimi.yaml"),
+    ("mimo-cn", "0 6 * * tue", "examples/config-mimo.yaml"),
+    ("qwen-cn", "0 7 * * wed", "examples/config-qwen.yaml"),
     # Medium-churn providers. 2026-10-18 frequency policy (measured over the
     # prior 12 days of run_records×push_logs): glm re-validated the same
     # plateau corpus daily — 5,933 pushed keys produced 9 net-new — so daily
@@ -212,25 +222,24 @@ _DEFAULT_SCHEDULES: tuple[tuple[str, str, str], ...] = (
     # 2026-10-19: 16:00 → 22:00 — separates from brave's 20:00 (search ends
     # ~21:15) with a 45 min margin; same night-window economics.
     ("exa", "0 22 * * *", "examples/config-exa.yaml"),
-    # 2026-09-24: the four below moved out of the 14:00-17:00 Beijing window.
-    # Measured on prod: the GitHub token-cooldown storm concentrates at
-    # 10:00-16:00 Beijing (4529 warnings on 2026-09-24) while the morning
-    # chain's long runs (github/groq/deepseek, 200k+ links each) still hold
-    # the shared code-search quota — kimi-ai gathered 828 links in 8.6h and
-    # qwen-intl completed with 0 links in that window. Evening starts search
-    # against a recovered token pool.
-    ("kimi-ai", "0 18 * * *", "examples/config-kimi-ai.yaml"),
-    ("kimi-coding", "0 19 * * *", "examples/config-kimi-coding.yaml"),
-    ("mimo-sg", "0 20 * * *", "examples/config-mimo-sg.yaml"),
-    ("qwen-intl", "0 21 * * *", "examples/config-qwen-intl.yaml"),
+    # Evening/weekend weekly slots. These keep the 2026-09-24 evening rationale
+    # (the GitHub cooldown storm concentrates 10:00-16:00 Beijing) and add the
+    # 2026-10-24 de-collision measured on prod: mimo-sg 20:00 sat fired inside
+    # brave 20:00 (41 min of overlapping search), kimi-coding 19:00 fri cleared
+    # brave by only 5 min, qwen-intl 21:00 sun cleared exa 22:00 by 14 min.
+    # New hours: mimo-sg 15:00 sat, kimi-coding 16:00 fri, qwen-intl 16:00 sun;
+    # kimi-ai stays 18:00 thu (ends ~18:44, brave starts 20:00).
+    ("kimi-ai", "0 18 * * thu", "examples/config-kimi-ai.yaml"),
+    ("kimi-coding", "0 16 * * fri", "examples/config-kimi-coding.yaml"),
+    ("mimo-sg", "0 15 * * sat", "examples/config-mimo-sg.yaml"),
+    ("qwen-intl", "0 16 * * sun", "examples/config-qwen-intl.yaml"),
     # 2026-09-22: providers with configs + prod history that were missing
     # from the seed list (prod rows came from manual/UI inserts, and the
     # seed only runs against an EMPTY schedule_config table — so fresh
     # installs grew up without these scans). Each cron mirrors prod's hour
     # chain (ollama 03, openrouter 08, nvidia beside modelscope's 11) and
     # picks a minute that collides with nothing else in this list: hour 03
-    # is never hit by the */4 cluster, the */4 cluster's 08 fires at
-    # :00/:15/:45, and modelscope's 11 fires at :00.
+    # is never hit by the weekly slots, and modelscope's 11 fires at :00.
     # 2026-09-24: groq REMOVED from the seed list — Groq is a GitHub
     # secret-scanning partner with push protection, so leaked gsk_ keys are
     # auto-revoked within minutes of a public push (22 completed prod runs,
