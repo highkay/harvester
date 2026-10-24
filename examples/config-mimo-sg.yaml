@@ -16,11 +16,12 @@ global:
   max_retries_requeued: 3
   # Per-run corpus bound (2026-10-24 wave). The 120k default never bound here, so
   # these tasks paid search quota for links gather could never reach: mimo-sg
-  # discovered 95,742 links, queued 19,394 (20.3%) and its single valid key
-  # appeared at links~7.5k. 12,000 caps the run at the measured productive head
-  # and cuts wall time ~60% (mimo-sg 3.1h was 73% gather drain). Charged on
-  # UNIQUE queued links, so the cap is reached by real fetches, not duplicates.
-  max_links_per_run: 12000
+  # discovered 95,742 links but queued only 19,394 (20.3%), and its single valid
+  # key appeared at links~7.5k. 9,000 unique queued links caps the run near the
+  # measured productive head while staying far above it (discoveries run ~3.3x
+  # unique, so the cap lands at ~30k discovered). Charged on UNIQUE queued links,
+  # so the cap is reached by real fetches, not duplicate discoveries.
+  max_links_per_run: 9000
   proxy: ""
   github_credentials:
     sessions:
@@ -78,14 +79,14 @@ tasks:
     enabled: true
     provider_type: mimo
     use_api: true
-    # Per-dork depth bound (2026-10-24 wave). `_max_pages()` already clamps to
-    # API_MAX_PAGES=10, so 1000 was inert here; the measured 869 pages/run on
-    # mimo-sg came from refine fan-out (28 language x size partitions, each its
-    # own page-1 task) plus 10 pages per dork. 3 keeps every dork's head (page 1
-    # is enqueued before any pagination/refine task) and drops the tail pages
-    # that measured 0 candidates: mimo-sg 95,742 links -> 156 materials -> 1 valid
-    # (2026-10-24), kimi-coding 102,470 -> 72 -> 0 (2026-10-23).
-    max_pages: 3
+    # Pagination depth deliberately LEFT AT 1000 (inert: `_max_pages()` clamps to
+    # API_MAX_PAGES=10). The 2026-10-24 wave first tried 3 and measured the side
+    # effect on the live run: refine triggers on `total > max_pages*100`, so 3
+    # lowers the threshold to 300 and EVERY large dork fans out into 28 language
+    # partitions — 1,179 search pages for 14.7k links versus 869 pages for 95.7k
+    # before. The corpus is bounded by global.max_links_per_run below instead,
+    # which drops further search tasks at worker entry.
+    max_pages: 1000
     search_types: [code]
     stages:
       search: true

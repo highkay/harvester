@@ -538,7 +538,7 @@ class TestCapConfigContract(unittest.TestCase):
         ):
             shipped = ConfigLoader(self.EXAMPLE).load()
             self.assertEqual(
-                12000, shipped.global_config.max_links_per_run,
+                9000, shipped.global_config.max_links_per_run,
                 "the shipped low-yield config carries its measured bound",
             )
 

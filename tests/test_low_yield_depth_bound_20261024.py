@@ -5,9 +5,9 @@
 Measured basis (prod, 2026-10-24):
 - mimo-sg discovered 95,742 links, queued only 19,394 (20.3%) and its single
   valid key appeared at links~7.5k; the run was 73% gather drain (138/188 min).
-- 869 search pages/run came from refine fan-out (28 language x size partitions,
-  each its own page-1 task) plus up to 10 pages per dork — `_max_pages()`
-  already clamps to API_MAX_PAGES, so the old `max_pages: 1000` was inert.
+- The corpus bound is `max_links_per_run` (unique queued links). Pagination depth
+  stays at the inert 1000 because lowering it to 3 was measured on a live run to
+  INCREASE search pages from 869 to 1,179: refine triggers on total > max_pages*100.
 - Weekly-era yield for these tasks is 0-2 net-new keys per run (70 d: mimo-sg 3,
   mimo-cn 2, kimi-coding 2, kimi-ai 3, kimi 4, deepseek 17), so the house weekly
   floor stays and the per-run corpus is bounded instead.
@@ -49,8 +49,8 @@ class TestLowYieldDepthBound(unittest.TestCase):
         for name in _BOUNDED:
             with self.subTest(config=name):
                 config = self._parse(name)
-                self.assertEqual(3, config.tasks[0].max_pages, f"{name}: per-dork page bound")
-                self.assertEqual(12000, config.global_config.max_links_per_run, f"{name}: run corpus bound")
+                self.assertEqual(1000, config.tasks[0].max_pages, f"{name}: pagination left inert")
+                self.assertEqual(9000, config.global_config.max_links_per_run, f"{name}: run corpus bound")
 
     def test_high_yield_configs_keep_their_depth(self) -> None:
         # The wave is scoped to the low-yield set; a copy-paste that bounds a
