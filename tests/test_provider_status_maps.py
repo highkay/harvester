@@ -537,6 +537,13 @@ class TestQwenQuotaStatusMap(unittest.TestCase):
         result = self._check_with_completion_body(400, body)
         self.assertEqual(result.reason, ErrorReason.NO_QUOTA)
 
+    def test_429_insufficient_quota_is_no_quota(self):
+        # The other half of the pinned pair: a balance-exhaustion marker stays
+        # terminal, so the narrowing did not swing the other way.
+        body = json.dumps({"code": "insufficient_quota", "message": "You exceeded your current quota."})
+        result = self._check_with_completion_body(429, body)
+        self.assertEqual(result.reason, ErrorReason.NO_QUOTA)
+
     def test_429_quota_exceeded_word_order_stays_no_quota(self):
         # DashScope's documented exhaustion shape ("Throttling.QuotaExceeded")
         # must remain terminal: the 2026-10-24 narrowing only moves a refillable
