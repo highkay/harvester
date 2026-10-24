@@ -125,8 +125,14 @@ class QwenProvider(OpenAILikeProvider):
             return CheckResult.fail(ErrorReason.BAD_REQUEST)
 
         if code == 429:
-            lowered = trim(message).lower()
-            if re.findall(r"quota|throttling|exceeded_current_quota|insufficient", lowered):
+            # 2026-10-24: a bare "throttling" match used to mean NO_QUOTA, i.e.
+            # the terminal no-quota bucket. DashScope's rate-limit code is
+            # `Throttling.RateQuota` — a FUNDED key that is merely being
+            # throttled was therefore filed as permanently unusable and never
+            # re-probed. Only genuine exhaustion markers stay terminal;
+            # everything else on a 429 is recoverable (wait-check) because the
+            # rate limiter refills on its own.
+            if _QUOTA_EXHAUSTED.search(message or ""):
                 return CheckResult.fail(ErrorReason.NO_QUOTA)
             return CheckResult.fail(ErrorReason.RATE_LIMITED)
 
@@ -200,8 +206,9 @@ class QwenProvider(OpenAILikeProvider):
             return CheckResult.fail(ErrorReason.BAD_REQUEST)
 
         if code == 429:
-            lowered = trim(message).lower()
-            if re.findall(r"quota|throttling|exceeded_current_quota|insufficient", lowered):
+            # See the completion-probe branch: `Throttling.RateQuota` on the
+            # models gate is a refillable rate limit, not a balance verdict.
+            if _QUOTA_EXHAUSTED.search(message or ""):
                 return CheckResult.fail(ErrorReason.NO_QUOTA)
             return CheckResult.fail(ErrorReason.RATE_LIMITED)
 
@@ -217,13 +224,27 @@ class QwenProvider(OpenAILikeProvider):
         if code == 401 or re.findall(r"invalid_api_key|incorrect api key", message, flags=re.I):
             return CheckResult.fail(ErrorReason.INVALID_KEY)
 
-        if code == 402 or re.findall(r"arrearage|quota|throttling|insufficient_balance", message, flags=re.I):
+        if code == 402 or _QUOTA_EXHAUSTED.search(message or ""):
+            # Same narrowing as the 429 branch: "quota" alone also matches
+            # `Throttling.RateQuota` and `AllocationQuota`-style rate codes, and
+            # a rate-limited key must stay recoverable.
             return CheckResult.fail(ErrorReason.NO_QUOTA)
 
         if code == 429:
             return CheckResult.fail(ErrorReason.RATE_LIMITED)
 
         return super()._judge(code, message)
+
+
+# Balance/quota markers that mean "this account cannot serve requests until it
+# is topped up" — the ONLY 429/400 bodies that may land in the terminal
+# no-quota bucket (2026-10-24 audit). `Throttling.RateQuota` deliberately does
+# NOT match: it is a refillable rate limit, so those keys go to wait-check.
+_QUOTA_EXHAUSTED = re.compile(
+    r"allocationquota|insufficient[_ ]?quota|exceeded_current_quota|quota[_ -]?exceeded|"
+    r"insufficient[_ ]?balance|arrearage|out_of_service|good standing",
+    re.I,
+)
 
 
 register_provider("qwen", QwenProvider)

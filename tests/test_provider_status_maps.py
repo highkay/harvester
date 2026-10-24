@@ -31,6 +31,7 @@ from provider.azure import AzureOpenAIProvider
 from provider.doubao import DoubaoProvider
 from provider.openai_like import OpenAILikeProvider
 from provider.openrouter import OpenRouterProvider
+from provider.qwen import QwenProvider
 from provider.qianfan import QianFanProvider
 from provider.stabilityai import StabilityAIProvider
 from provider.vertex import VertexProvider
@@ -486,3 +487,76 @@ class TestVertexInspectCollection(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# qwen: DashScope returns 400 Arrearage for zero balance (measured 2026-10-24),
+# and \`Throttling.RateQuota\` for a refillable RATE limit. The 2026-10-24 audit
+# narrowed the old "any 429 containing throttling -> NO_QUOTA" branch: a funded
+# key that is merely throttled must stay in the recoverable wait bucket instead
+# of the terminal no-quota bucket.
+# ---------------------------------------------------------------------------
+
+
+_QWEN_MODELS_OK = json.dumps({"data": [{"id": "qwen3.8-max"}]})
+
+
+class TestQwenQuotaStatusMap(unittest.TestCase):
+    def setUp(self):
+        self.provider = QwenProvider(conditions=[], retries=1, timeout=5)
+        mock.patch("provider.qwen.time.sleep", return_value=None).start()
+        mock.patch("provider.openai_like.get_user_agent", return_value="test-agent").start()
+        self.addCleanup(mock.patch.stopall)
+
+    def _check_with_completion_body(self, status: int, body: str):
+        with mock.patch(
+            "provider.qwen.request",
+            side_effect=[FakeResponse(200, _QWEN_MODELS_OK), FakeResponse(status, body)],
+        ):
+            return self.provider.check(token="sk-" + "qwenstatusmap0123456789", model="qwen3.8-max")
+
+    def test_429_rate_quota_is_rate_limited_not_no_quota(self):
+        # DashScope's rate-limit code: the account is funded, the limiter refills.
+        body = json.dumps(
+            {"code": "Throttling.RateQuota", "message": "Requests rate limit exceeded, please try again later."}
+        )
+        result = self._check_with_completion_body(429, body)
+        self.assertFalse(result.available)
+        self.assertEqual(result.reason, ErrorReason.RATE_LIMITED)
+        self.assertTrue(result.reason.is_retryable(), "must route to wait-check, not no-quota")
+
+    def test_429_allocation_quota_is_no_quota(self):
+        body = json.dumps(
+            {"code": "AllocationQuota.FreeTierOnly", "message": "You exceeded your current quota, please check your plan."}
+        )
+        result = self._check_with_completion_body(429, body)
+        self.assertEqual(result.reason, ErrorReason.NO_QUOTA)
+
+    def test_400_arrearage_is_no_quota(self):
+        body = json.dumps({"code": "Arrearage", "message": "Access denied, please make sure your account is in good standing."})
+        result = self._check_with_completion_body(400, body)
+        self.assertEqual(result.reason, ErrorReason.NO_QUOTA)
+
+    def test_429_quota_exceeded_word_order_stays_no_quota(self):
+        # DashScope's documented exhaustion shape ("Throttling.QuotaExceeded")
+        # must remain terminal: the 2026-10-24 narrowing only moves a refillable
+        # rate limit out of no-quota, never a real quota exhaustion.
+        body = json.dumps({"code": "Throttling.QuotaExceeded", "message": "Your allocated quota is exceeded."})
+        result = self._check_with_completion_body(429, body)
+        self.assertEqual(result.reason, ErrorReason.NO_QUOTA)
+
+    def test_429_bare_rate_limit_message_is_rate_limited(self):
+        body = json.dumps({"message": "Requests rate limit exceeded, please try again later."})
+        result = self._check_with_completion_body(429, body)
+        self.assertEqual(result.reason, ErrorReason.RATE_LIMITED)
+    def test_403_unpurchased_model_does_not_condemn_the_key(self):
+        # Measured in the 2026-10-24 audit's wait-check bucket: a plan-gated model
+        # answers 403 AccessDenied.Unpurchased. The key itself is authentic.
+        body = json.dumps(
+            {"code": "AccessDenied.Unpurchased", "message": "Access to model denied. Please make sure you are eligible for using the model."}
+        )
+        result = self._check_with_completion_body(403, body)
+        self.assertFalse(result.available)
+        # Exact verdict: NO_ACCESS routes to wait-check via CheckStage, so a
+        # regression to INVALID_KEY (permanent discard) fails this assertion.
+        self.assertEqual(result.reason, ErrorReason.NO_ACCESS)
