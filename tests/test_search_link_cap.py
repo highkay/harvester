@@ -516,28 +516,50 @@ class TestDorkTailLimitConfig(unittest.TestCase):
 
 
 class TestCapConfigContract(unittest.TestCase):
-    """The cap is a real config key: default 120000, 0 means unlimited."""
+    """The cap is a real config key: schema default 120000, 0 means unlimited.
+
+    2026-10-24: the schema default stays 120000 (productive providers keep their
+    depth), while the eight low-yield configs now SET 12000 explicitly — so the
+    contract is pinned on the schema default plus the explicit-override path,
+    not on one example happening to omit the key.
+    """
 
     EXAMPLE = "examples/config-kimi-coding.yaml"
 
     @unittest.skipUnless(os.path.exists(EXAMPLE), "example config not present")
-    def test_example_defaults_and_overrides(self) -> None:
+    def test_schema_default_and_explicit_overrides(self) -> None:
         from config.loader import ConfigLoader
+        from config.schemas import GlobalConfig
+
+        self.assertEqual(120000, GlobalConfig().max_links_per_run)
 
         with mock.patch.dict(
             os.environ, {"GITHUB_TOKENS": "ghp_dummy_token_for_test_123456"}, clear=False
         ):
-            default = ConfigLoader(self.EXAMPLE).load()
-            self.assertEqual(120000, default.global_config.max_links_per_run)
+            shipped = ConfigLoader(self.EXAMPLE).load()
+            self.assertEqual(
+                12000, shipped.global_config.max_links_per_run,
+                "the shipped low-yield config carries its measured bound",
+            )
 
             source = pathlib.Path(self.EXAMPLE).read_text(encoding="utf-8")
             with tempfile.TemporaryDirectory() as td:
                 for value, expected in (("0", 0), ("7", 7)):
                     path = pathlib.Path(td) / f"cap{value}.yaml"
-                    path.write_text(
-                        source.replace("global:", f"global:\n  max_links_per_run: {value}", 1),
-                        encoding="utf-8",
+                    # The shipped example now SETS max_links_per_run explicitly
+                    # (2026-10-24 depth bound), so an injected key placed above it
+                    # would be shadowed by YAML's last-wins rule. Replace the
+                    # existing line instead; the "7"/"0" cases still prove the
+                    # override path end to end.
+                    patched = re.sub(
+                        r"^  max_links_per_run:.*$",
+                        f"  max_links_per_run: {value}",
+                        source,
+                        count=1,
+                        flags=re.M,
                     )
+                    self.assertNotEqual(source, patched, "example must carry the key")
+                    path.write_text(patched, encoding="utf-8")
                     loaded = ConfigLoader(str(path)).load()
                     self.assertEqual(expected, loaded.global_config.max_links_per_run)
 

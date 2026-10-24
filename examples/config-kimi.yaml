@@ -12,6 +12,13 @@
 global:
   workspace: "./data-kimi"
   max_retries_requeued: 3
+  # Per-run corpus bound (2026-10-24 wave). The 120k default never bound here, so
+  # these tasks paid search quota for links gather could never reach: mimo-sg
+  # discovered 95,742 links, queued 19,394 (20.3%) and its single valid key
+  # appeared at links~7.5k. 12,000 caps the run at the measured productive head
+  # and cuts wall time ~60% (mimo-sg 3.1h was 73% gather drain). Charged on
+  # UNIQUE queued links, so the cap is reached by real fetches, not duplicates.
+  max_links_per_run: 12000
   proxy: ""
   github_credentials:
     sessions:
@@ -73,7 +80,14 @@ tasks:
     enabled: true
     provider_type: kimi
     use_api: true
-    max_pages: 1000
+    # Per-dork depth bound (2026-10-24 wave). `_max_pages()` already clamps to
+    # API_MAX_PAGES=10, so 1000 was inert here; the measured 869 pages/run on
+    # mimo-sg came from refine fan-out (28 language x size partitions, each its
+    # own page-1 task) plus 10 pages per dork. 3 keeps every dork's head (page 1
+    # is enqueued before any pagination/refine task) and drops the tail pages
+    # that measured 0 candidates: mimo-sg 95,742 links -> 156 materials -> 1 valid
+    # (2026-10-24), kimi-coding 102,470 -> 72 -> 0 (2026-10-23).
+    max_pages: 3
     search_types: [code]
     stages:
       search: true
