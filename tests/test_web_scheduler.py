@@ -1248,6 +1248,10 @@ class TestMissedRunCatchup(unittest.TestCase):
                 import web.scheduler as scheduler_mod
 
                 stagger = scheduler_mod._CATCHUP_STAGGER_SECONDS
+                # Pin the POLICY value, not just the derivation: both tests below
+                # read the constant, so without this a regression to 60 s would
+                # still pass while the measured restart burst returned.
+                self.assertEqual(900, stagger, "catch-up stagger policy (2026-10-24 wave)")
                 run_date = kwargs["trigger"].run_date
                 expected = datetime.now(run_date.tzinfo) + timedelta(seconds=stagger)
                 self.assertLess(abs((run_date - expected).total_seconds()), 5)
@@ -1346,6 +1350,10 @@ class TestMissedRunCatchup(unittest.TestCase):
                 import web.scheduler as scheduler_mod
 
                 stagger = scheduler_mod._CATCHUP_STAGGER_SECONDS
+                # Pin the POLICY value, not just the derivation: both tests below
+                # read the constant, so without this a regression to 60 s would
+                # still pass while the measured restart burst returned.
+                self.assertEqual(900, stagger, "catch-up stagger policy (2026-10-24 wave)")
                 now = datetime.now(second.tzinfo)
                 self.assertLess(
                     abs((first - (now + timedelta(seconds=stagger))).total_seconds()), 5
