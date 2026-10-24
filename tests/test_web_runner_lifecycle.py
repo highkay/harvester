@@ -766,29 +766,60 @@ class TestFindUnpushedTerminalRuns(unittest.TestCase):
                 await init_db(db_path)
                 conn = sqlite3.connect(db_path)
                 try:
+                    # started_at is pinned per row on purpose: the two rows the
+                    # test EXPECTS (r-hit, r-hit-failed) must be the newest
+                    # starts for provider 'p', otherwise the supersede clause
+                    # treats them as superseded by a later row.
+                    # (Original flake: every row shared provider 'p' and the
+                    # datetime('now') default is second-granular, so same-second
+                    # inserts compared non-deterministically.)
+                    # clause excludes any row whose SAME provider has a newer
+                    # started_at, and the schema default is datetime('now') to
+                    # the second — rows inserted in the same second therefore
+                    # compared non-deterministically and this test flaked in
+                    # the full suite (2026-10-25: 'r-hit' vanished once).
                     def ins(
                         run_id: str,
                         status: str,
                         valid: int,
                         finished_sql: str,
+                        started_sql: str,
                     ) -> None:
                         conn.execute(
                             "INSERT INTO run_records (id, provider_name, "
-                            "config_file, status, valid_keys_found, finished_at) "
-                            f"VALUES (?, 'p', 'c.yaml', ?, ?, {finished_sql})",
+                            "config_file, status, valid_keys_found, finished_at, "
+                            "started_at) "
+                            f"VALUES (?, 'p', 'c.yaml', ?, ?, {finished_sql}, {started_sql})",
                             (run_id, status, valid),
                         )
 
-                    ins("r-hit", "completed", 5, "datetime('now','-1 hours')")
-                    ins("r-hit-failed", "failed", 2, "datetime('now','-2 hours')")
-                    ins("r-pushed", "completed", 5, "datetime('now','-1 hours')")
-                    ins("r-zero", "completed", 0, "datetime('now','-1 hours')")
-                    ins("r-old", "completed", 5, "datetime('now','-25 hours')")
-                    ins("r-cancelled", "cancelled", 5, "datetime('now','-1 hours')")
+                    ins("r-hit", "completed", 5, "datetime('now','-1 hours')",
+                        "datetime('now','-1 hours')")
+                    ins("r-hit-failed", "failed", 2, "datetime('now','-2 hours')",
+                        "datetime('now','-1 hours')")
+                    ins("r-pushed", "completed", 5, "datetime('now','-1 hours')",
+                        "datetime('now','-5 hours')")
+                    ins("r-zero", "completed", 0, "datetime('now','-1 hours')",
+                        "datetime('now','-6 hours')")
+                    # Own provider: this row must be excluded by the WINDOW
+                    # alone. On 'p' it would also be superseded, and the 48 h
+                    # assertion below ("r-old returns") could never hold.
+                    conn.execute(
+                        "INSERT INTO run_records (id, provider_name, config_file, "
+                        "status, valid_keys_found, finished_at, started_at) VALUES "
+                        "('r-old','p-old','c.yaml','completed',5,"
+                        "datetime('now','-25 hours'),datetime('now','-27 hours'))"
+                    )
+                    ins("r-cancelled", "cancelled", 5, "datetime('now','-1 hours')",
+                        "datetime('now','-7 hours')")
+                    # provider 'p2' on purpose: the default started_at is
+                    # now(), newer than every 'p' row, so on 'p' the supersede
+                    # clause would skip BOTH expected hits. This row's role is
+                    # only "a running row is never selected".
                     conn.execute(
                         "INSERT INTO run_records (id, provider_name, "
                         "config_file, status) VALUES "
-                        "('r-running','p','c.yaml','running')"
+                        "('r-running','p2','c.yaml','running')"
                     )
                     conn.execute(
                         "INSERT INTO push_logs (run_id, provider_name, "
