@@ -428,7 +428,7 @@ class TestOpenCodePushServiceBasic(unittest.TestCase):
             self.assertEqual(row2["status"], "failed")
 
     def test_push_env_defaults_when_unset(self) -> None:
-        """No OPENCODE_LOAD_* env -> default base url and group id 20."""
+        """No OPENCODE_LOAD_* env -> default base url and group id 19 (v2)."""
         db_path = _temp_db_path()
         with tempfile.TemporaryDirectory() as workspace:
             _init_schema(db_path)
@@ -437,7 +437,7 @@ class TestOpenCodePushServiceBasic(unittest.TestCase):
                 svc = OpenCodePushService(db_path=db_path, workspace=workspace)
 
             self.assertEqual(svc._base_url, "http://192.168.1.18:43001")
-            self.assertEqual(svc._group_id, 20)
+            self.assertEqual(svc._group_id, 19)
 
     def test_push_skips_non_opencode_provider(self) -> None:
         """provider_name != opencode -> no POST and no push_logs row."""

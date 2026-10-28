@@ -37,7 +37,7 @@ logger = get_logger("web.opencode_push")
 # ---------------------------------------------------------------------------
 
 _DEFAULT_BASE_URL: str = "http://192.168.1.18:43001"
-_DEFAULT_GROUP_ID: int = 20
+_DEFAULT_GROUP_ID: int = 19
 _PROVIDER_NAME: str = "opencode"
 # Chunk/timeout reference the agnes-ai measurements (2026-09-28): a WAN
 # gpt-load instance drops multi-KB POST bodies (server-side body-read i/o
