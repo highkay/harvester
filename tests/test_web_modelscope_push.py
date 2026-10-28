@@ -6,7 +6,7 @@ Given a temporary SQLite database and workspace with
 providers/modelscope/valid-keys.txt,
 When ModelScopePushService.push_valid_keys is called,
 Then keys matching ``[0-9A-Za-z_-]{20,}`` are POSTed in chunks to
-{base}/api/keys/add-multiple and ONE push_logs row is written.
+{base}/api/groups/{id}/credentials/import and ONE push_logs row is written.
 
 Test style mirrors tests/test_web_agnes_ai_push.py: unittest + unittest.mock,
 temp SQLite via web.db.init_db, temp workspace, and
@@ -160,7 +160,7 @@ def _count_logs(db_path: str, run_id: str) -> int:
 class TestModelScopePushServiceBasic(unittest.TestCase):
     """Given a temp DB + workspace,
     When push_valid_keys is called,
-    Then valid ModelScope keys are chunked-POSTed to {base}/api/keys/add-multiple
+    Then valid ModelScope keys are chunked-POSTed to {base}/api/groups/{id}/credentials/import
     and one push_logs row is written.
     """
 
@@ -185,7 +185,7 @@ class TestModelScopePushServiceBasic(unittest.TestCase):
             with patch(
                 "web.modelscope_push.requests.post",
                 return_value=_resp200(
-                    {"data": {"added_count": 2, "ignored_count": 0}}
+                    {"data": {"credentials_added": 2, "credentials_duplicated": 0}}
                 ),
             ) as mock_post:
                 svc.push_valid_keys("modelscope", "run-test-001")
@@ -193,13 +193,10 @@ class TestModelScopePushServiceBasic(unittest.TestCase):
             self.assertEqual(mock_post.call_count, 1, "exactly ONE POST call")
             call_args = mock_post.call_args
             self.assertEqual(
-                call_args[0][0], "http://127.0.0.1:9/api/keys/add-multiple"
+                call_args[0][0], "http://127.0.0.1:9/api/groups/13/credentials/import"
             )
             self.assertEqual(
-                call_args[1]["json"]["group_id"], 13, "group_id from env"
-            )
-            self.assertEqual(
-                call_args[1]["json"]["keys_text"],
+                call_args[1]["json"]["credentials"],
                 f"{key1}\n{key2}",
                 "only the 2 valid keys joined by newline; junk line absent",
             )
@@ -233,7 +230,7 @@ class TestModelScopePushServiceBasic(unittest.TestCase):
             with patch(
                 "web.modelscope_push.requests.post",
                 return_value=_resp200(
-                    {"data": {"added_count": 1, "ignored_count": 1}}
+                    {"data": {"credentials_added": 1, "credentials_duplicated": 1}}
                 ),
             ):
                 svc.push_valid_keys("modelscope", "run-test-002")
@@ -259,7 +256,7 @@ class TestModelScopePushServiceBasic(unittest.TestCase):
             with patch(
                 "web.modelscope_push.requests.post",
                 return_value=_resp200(
-                    {"data": {"added_count": 1, "ignored_count": 0}}
+                    {"data": {"credentials_added": 1, "credentials_duplicated": 0}}
                 ),
             ) as mock_post:
                 svc.push_valid_keys("modelscope", "run-test-003")
@@ -306,7 +303,7 @@ class TestModelScopePushServiceBasic(unittest.TestCase):
             with patch(
                 "web.modelscope_push.requests.post",
                 return_value=_resp200(
-                    {"data": {"added_count": 2, "ignored_count": 0}}
+                    {"data": {"credentials_added": 2, "credentials_duplicated": 0}}
                 ),
             ) as mock_post:
                 svc.push_valid_keys("modelscope", "run-test-005")
@@ -327,7 +324,7 @@ class TestModelScopePushServiceBasic(unittest.TestCase):
             with patch(
                 "web.modelscope_push.requests.post",
                 return_value=_resp200(
-                    {"data": {"added_count": 0, "ignored_count": 0}}
+                    {"data": {"credentials_added": 0, "credentials_duplicated": 0}}
                 ),
             ) as mock_post:
                 svc.push_valid_keys("modelscope", "run-test-006")
@@ -336,10 +333,10 @@ class TestModelScopePushServiceBasic(unittest.TestCase):
             first_call = mock_post.call_args_list[0]
             second_call = mock_post.call_args_list[1]
             self.assertEqual(
-                len(first_call[1]["json"]["keys_text"].splitlines()), 500
+                len(first_call[1]["json"]["credentials"].splitlines()), 500
             )
             self.assertEqual(
-                len(second_call[1]["json"]["keys_text"].splitlines()), 1
+                len(second_call[1]["json"]["credentials"].splitlines()), 1
             )
 
             row = _fetch_log(db_path, "run-test-006")
@@ -367,7 +364,7 @@ class TestModelScopePushServiceBasic(unittest.TestCase):
             self.assertEqual(row["status"], "failed")
 
     def test_push_env_defaults_when_unset(self) -> None:
-        """No MODELSCOPE_LOAD_* env → default base url and group id 13."""
+        """No MODELSCOPE_LOAD_* env → default base url and group id 12 (v2)."""
         db_path = _temp_db_path()
         with tempfile.TemporaryDirectory() as workspace:
             _init_schema(db_path)
@@ -376,7 +373,7 @@ class TestModelScopePushServiceBasic(unittest.TestCase):
                 svc = ModelScopePushService(db_path=db_path, workspace=workspace)
 
             self.assertEqual(svc._base_url, "http://192.168.1.18:43001")
-            self.assertEqual(svc._group_id, 13)
+            self.assertEqual(svc._group_id, 12)
 
     def test_push_skips_non_modelscope_provider(self) -> None:
         """provider_name != modelscope → no POST and no push_logs row."""

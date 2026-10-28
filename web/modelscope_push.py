@@ -2,7 +2,7 @@
 
 """ModelScope push service — reads modelscope valid-keys.txt after a scan completes
 and pushes the validated keys to a gpt-load instance via POST
-``{base}/api/keys/add-multiple`` (contract mirrors ``web.push.PushService._push_keys``).
+``{base}/api/groups/{id}/credentials/import`` (contract mirrors ``web.push.PushService._push_keys``).
 
 Called synchronously from a background thread (``PipelineRunner._on_completed``),
 so all DB and HTTP access is synchronous (``sqlite3`` + ``requests``).
@@ -23,6 +23,7 @@ import re
 import sqlite3
 import threading
 import time
+import uuid
 from pathlib import Path
 
 import requests
@@ -36,7 +37,7 @@ logger = get_logger("web.modelscope_push")
 # ---------------------------------------------------------------------------
 
 _DEFAULT_BASE_URL: str = "http://192.168.1.18:43001"
-_DEFAULT_GROUP_ID: int = 13
+_DEFAULT_GROUP_ID: int = 12
 _PROVIDER_NAME: str = "modelscope"
 _TIMEOUT_SECONDS: int = 30
 _MAX_RETRIES: int = 3
@@ -64,7 +65,7 @@ class ModelScopePushService:
         3. Reads valid-keys.txt from the workspace providers dir
         4. Pre-filters to ``[0-9A-Za-z_-]{20,}`` keys; other lines count as ignored
         5. POSTs keys in chunks of ``_MAX_KEYS_PER_POST`` to
-           ``{base}/api/keys/add-multiple`` with retry on 429/5xx/network errors
+           ``{base}/api/groups/{id}/credentials/import`` with retry on 429/5xx/network errors
         6. Writes one result row to ``push_logs``
     """
 
@@ -257,7 +258,7 @@ class ModelScopePushService:
         return keys
 
     def _push_chunk(self, chunk: list[str]) -> tuple[str, int, int, str | None]:
-        """POST one chunk of keys to ``{base}/api/keys/add-multiple``.
+        """POST one chunk of keys to ``{base}/api/groups/{id}/credentials/import``.
 
         Returns ``(outcome, added_count, ignored_count, error_message)`` where
         outcome is ``"success"`` (HTTP 200, or HTTP 400 whose body indicates the
@@ -266,9 +267,16 @@ class ModelScopePushService:
         exhaustion, unexpected errors). Retries on 429/5xx and network errors
         with exponential backoff (1s/3s/9s).
         """
-        url = f"{self._base_url}/api/keys/add-multiple"
-        body = {"group_id": self._group_id, "keys_text": "\n".join(chunk)}
-        headers = {"Content-Type": "application/json"}
+        url = (
+            f"{self._base_url}/api/groups/{self._group_id}/credentials/import"
+        )
+        body = {"credentials": "\n".join(chunk)}
+        headers = {
+            "Content-Type": "application/json",
+            # Constant across this chunk's retries: a retried import cannot
+            # double-apply server-side (gpt-load v2 idempotency contract).
+            "Idempotency-Key": str(uuid.uuid4()),
+        }
         if self._auth_key:
             headers["Authorization"] = f"Bearer {self._auth_key}"
 
@@ -282,8 +290,8 @@ class ModelScopePushService:
 
                 if resp.status_code == 200:
                     data = (resp.json() or {}).get("data") or {}
-                    added = int(data.get("added_count", 0))
-                    ignored = int(data.get("ignored_count", 0))
+                    added = int(data.get("credentials_added", 0))
+                    ignored = int(data.get("credentials_duplicated", 0))
                     return "success", added, ignored, None
 
                 if resp.status_code == 401:

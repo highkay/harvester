@@ -823,7 +823,7 @@ sequenceDiagram
 
 - **多 Token 管理** — 通过 Web 界面添加/删除/启停 GitHub API Token 或会话；Token 以 AES-256-GCM 加密存储（主密钥来自 `ENCRYPTION_KEY`）。
 - **定时扫描** — 每个 provider 独立的 cron 调度（默认每日 `0 3 * * *`，APScheduler 驱动）；支持页面"立即运行"；防重叠锁。
-- **自动推送到 gpt-load** — 扫描完成后，验证通过的 key 自动推送到 gpt-load 实例的对应分组（`POST /api/keys/add-multiple`，幂等去重）。每个任务的推送目标（实例地址 + 分组 + `max_size` 单批上限，默认 10000）均可在页面配置。
+- **自动推送到 gpt-load** — 扫描完成后，验证通过的 key 自动推送到 gpt-load 实例的对应分组（gpt-load v2 `POST /api/groups/{id}/credentials/import`，幂等去重）。每个任务的推送目标（实例地址 + 分组 + `max_size` 单批上限，默认 10000）均可在页面配置。
 - **自动推送到 Tavily key 池（tavily-hikari）** — 每次 tavily 扫描完成后，验证通过的 key 自动批量推送到 tavily-hikari 风格的 key 池（`POST {base}/api/keys/batch`；需同时设置 `TAVILY_PROXY_BASE_URL` 与 `TAVILY_PROXY_AUTH_KEY`）。
 - **自动推送到 SerpApi key 池（tavily-hikari）** — 每次 serpapi 扫描完成后，验证通过的 key 自动推送到 tavily-hikari key 池（`POST {base}/api/keys` 带 `provider: serpapi`；需同时设置 `SERPAPI_PROXY_BASE_URL` 与 `SERPAPI_PROXY_AUTH_KEY`）。
 - **自动推送到 Brave key 池（tavily-hikari）** — 每次 brave 扫描完成后，验证通过的 key 逐个推送到 tavily-hikari key 池（`POST {base}/api/keys` 带 `provider: brave`；需设置 `BRAVE_PROXY_BASE_URL`，`BRAVE_PROXY_AUTH_KEY` 可选——为空则不发送 `Authorization` 头）。

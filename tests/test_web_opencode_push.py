@@ -4,7 +4,7 @@
 
 Given a temporary SQLite database and workspace with providers/opencode/valid-keys.txt,
 When OpenCodePushService.push_valid_keys is called,
-Then generic sk- keys are POSTed in chunks to {base}/api/keys/add-multiple and
+Then generic sk- keys are POSTed in chunks to {base}/api/groups/{id}/credentials/import and
 ONE push_logs row is written.
 
 Test style mirrors tests/test_web_agnes_ai_push.py: unittest + unittest.mock,
@@ -138,7 +138,7 @@ def _count_logs(db_path: str, run_id: str) -> int:
 class TestOpenCodePushServiceBasic(unittest.TestCase):
     """Given a temp DB + workspace,
     When push_valid_keys is called,
-    Then valid sk- keys are chunked-POSTed to {base}/api/keys/add-multiple and
+    Then valid sk- keys are chunked-POSTed to {base}/api/groups/{id}/credentials/import and
     one push_logs row is written.
     """
 
@@ -204,20 +204,17 @@ class TestOpenCodePushServiceBasic(unittest.TestCase):
 
             with patch(
                 "web.opencode_push.requests.post",
-                return_value=_resp200({"data": {"added_count": 2, "ignored_count": 0}}),
+                return_value=_resp200({"data": {"credentials_added": 2, "credentials_duplicated": 0}}),
             ) as mock_post:
                 svc.push_valid_keys("opencode", "run-test-001")
 
             self.assertEqual(mock_post.call_count, 1, "exactly ONE POST call")
             call_args = mock_post.call_args
             self.assertEqual(
-                call_args[0][0], "http://127.0.0.1:9/api/keys/add-multiple"
+                call_args[0][0], "http://127.0.0.1:9/api/groups/20/credentials/import"
             )
             self.assertEqual(
-                call_args[1]["json"]["group_id"], 20, "group_id from env"
-            )
-            self.assertEqual(
-                call_args[1]["json"]["keys_text"],
+                call_args[1]["json"]["credentials"],
                 f"{key1}\n{key2}",
                 "only the 2 sk- keys joined by newline; junk line absent",
             )
@@ -248,7 +245,7 @@ class TestOpenCodePushServiceBasic(unittest.TestCase):
 
             with patch(
                 "web.opencode_push.requests.post",
-                return_value=_resp200({"data": {"added_count": 1, "ignored_count": 1}}),
+                return_value=_resp200({"data": {"credentials_added": 1, "credentials_duplicated": 1}}),
             ):
                 svc.push_valid_keys("opencode", "run-test-002")
 
@@ -272,7 +269,7 @@ class TestOpenCodePushServiceBasic(unittest.TestCase):
 
             with patch(
                 "web.opencode_push.requests.post",
-                return_value=_resp200({"data": {"added_count": 1, "ignored_count": 0}}),
+                return_value=_resp200({"data": {"credentials_added": 1, "credentials_duplicated": 0}}),
             ) as mock_post:
                 svc.push_valid_keys("opencode", "run-test-003")
 
@@ -317,7 +314,7 @@ class TestOpenCodePushServiceBasic(unittest.TestCase):
 
             with patch(
                 "web.opencode_push.requests.post",
-                return_value=_resp200({"data": {"added_count": 2, "ignored_count": 0}}),
+                return_value=_resp200({"data": {"credentials_added": 2, "credentials_duplicated": 0}}),
             ) as mock_post:
                 svc.push_valid_keys("opencode", "run-test-005")
                 svc.push_valid_keys("opencode", "run-test-005")
@@ -336,7 +333,7 @@ class TestOpenCodePushServiceBasic(unittest.TestCase):
 
             with patch(
                 "web.opencode_push.requests.post",
-                return_value=_resp200({"data": {"added_count": 0, "ignored_count": 0}}),
+                return_value=_resp200({"data": {"credentials_added": 0, "credentials_duplicated": 0}}),
             ) as mock_post:
                 svc.push_valid_keys("opencode", "run-test-006")
 
@@ -344,10 +341,10 @@ class TestOpenCodePushServiceBasic(unittest.TestCase):
             first_call = mock_post.call_args_list[0]
             last_call = mock_post.call_args_list[-1]
             self.assertEqual(
-                len(first_call[1]["json"]["keys_text"].splitlines()), 100
+                len(first_call[1]["json"]["credentials"].splitlines()), 100
             )
             self.assertEqual(
-                len(last_call[1]["json"]["keys_text"].splitlines()), 1
+                len(last_call[1]["json"]["credentials"].splitlines()), 1
             )
 
             row = _fetch_log(db_path, "run-test-006")
@@ -406,7 +403,7 @@ class TestOpenCodePushServiceBasic(unittest.TestCase):
                 "web.opencode_push.requests.post",
                 side_effect=[
                     transport_400,
-                    _resp200({"data": {"added_count": 1, "ignored_count": 0}}),
+                    _resp200({"data": {"credentials_added": 1, "credentials_duplicated": 0}}),
                 ],
             ) as mock_post, patch("web.opencode_push.time.sleep"):
                 svc.push_valid_keys("opencode", "run-test-010")

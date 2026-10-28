@@ -216,8 +216,12 @@ async def list_groups(
                 detail=f"gpt-load returned HTTP {resp.status_code}: {resp.text[:200]}",
             )
         data = resp.json()
-        # gpt-load groups API returns { code: 0, data: [...] }
-        return data.get("data", [])
+        # v1 returned ``{code: 0, data: [...]}``; v2 returns
+        # ``{code: 0, data: {items: [...], ...}}`` — normalize both to a list.
+        payload = data.get("data", [])
+        if isinstance(payload, dict):
+            payload = payload.get("items", [])
+        return payload
     except requests.RequestException as exc:
         raise HTTPException(
             status_code=502,

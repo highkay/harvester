@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import sqlite3
 import tempfile
 import unittest
@@ -70,7 +71,7 @@ def _ok_response(added: int = 2) -> MagicMock:
     resp.status_code = 200
     resp.json.return_value = {
         "code": 0,
-        "data": {"added_count": added, "ignored_count": 0, "total_in_group": added},
+        "data": {"credentials_added": added, "credentials_duplicated": 0},
     }
     return resp
 
@@ -157,9 +158,12 @@ class TestPushServiceRunIdempotency(unittest.TestCase):
                 svc.push_valid_keys("mimo-sg", "run-multi")
 
                 self.assertEqual(mock_post.call_count, 2)
-                groups = {
-                    call[1]["json"]["group_id"] for call in mock_post.call_args_list
-                }
+                groups = set()
+                for call in mock_post.call_args_list:
+                    # group id now travels in the URL path (v2 contract)
+                    m = re.search(r"/api/groups/(\d+)/credentials/import", call[0][0])
+                    assert m is not None, f"unexpected push URL: {call[0][0]}"
+                    groups.add(int(m.group(1)))
                 self.assertEqual(groups, {2, 3})
 
             self.assertEqual(_push_log_count(self.db_path, "run-multi"), 2)

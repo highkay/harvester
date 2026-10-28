@@ -101,9 +101,9 @@ class TestPushServiceBasic(unittest.TestCase):
             mock_response.json.return_value = {
                 "code": 0,
                 "data": {
-                    "added_count": 3,
-                    "ignored_count": 0,
-                    "total_in_group": 3,
+                    "group_id": 2,
+                    "credentials_added": 3,
+                    "credentials_duplicated": 0,
                 },
             }
 
@@ -114,17 +114,19 @@ class TestPushServiceBasic(unittest.TestCase):
                 mock_post.assert_called_once()
                 call_args = mock_post.call_args
                 url = call_args[0][0]
-                self.assertIn("/api/keys/add-multiple", url)
+                self.assertIn("/api/groups/2/credentials/import", url)
 
                 body = call_args[1]["json"]
-                self.assertEqual(body["group_id"], 2)
-                self.assertIn("sk-key-aaaa", body["keys_text"])
-                self.assertIn("sk-key-bbbb", body["keys_text"])
-                self.assertIn("sk-key-cccc", body["keys_text"])
+                self.assertIn("sk-key-aaaa", body["credentials"])
+                self.assertIn("sk-key-bbbb", body["credentials"])
+                self.assertIn("sk-key-cccc", body["credentials"])
 
                 headers = call_args[1]["headers"]
                 self.assertIn("Authorization", headers)
                 self.assertIn("Bearer", headers["Authorization"])
+                # gpt-load v2 requires a UUIDv4 Idempotency-Key header
+                import uuid as _uuid
+                _uuid.UUID(headers["Idempotency-Key"], version=4)
 
             # Verify push_logs entry
             conn = sqlite3.connect(db_path)
@@ -156,7 +158,7 @@ class TestPushServiceBasic(unittest.TestCase):
             mock_response.status_code = 200
             mock_response.json.return_value = {
                 "code": 0,
-                "data": {"added_count": 0, "ignored_count": 1, "total_in_group": 1},
+                "data": {"credentials_added": 0, "credentials_duplicated": 1},
             }
 
             with patch("web.push.requests.post", return_value=mock_response):
@@ -239,7 +241,7 @@ class TestPushServiceBasic(unittest.TestCase):
                 resp.status_code = 200
                 resp.json.return_value = {
                     "code": 0,
-                    "data": {"added_count": 1, "ignored_count": 0, "total_in_group": 1},
+                    "data": {"credentials_added": 1, "credentials_duplicated": 0},
                 }
                 return resp
 
@@ -287,53 +289,62 @@ class TestPushServiceBasic(unittest.TestCase):
             self.assertEqual(row["status"], "failed")
             self.assertIsNotNone(row["error_message"])
 
-    def test_push_valid_keys_large_batch_uses_add_async(self) -> None:
-        """When keys_count > mapping.max_size, POST to /api/keys/add-async.
+    def test_push_valid_keys_large_batch_is_chunked(self) -> None:
+        """Batches over the v2 import cap (5000 lines) are chunked.
 
-        The threshold is per-mapping configurable (default 10000); here the
-        mapping is set to 500 so a 501-key batch must use the async endpoint.
+        Each chunk is one ``credentials/import`` call with its own
+        Idempotency-Key; counts aggregate across chunks.
         """
         db_path = _temp_db_path()
         with tempfile.TemporaryDirectory() as workspace:
             _seed_db(db_path, workspace)
-            # Lower the per-mapping batch cap to exercise the async switch
-            import sqlite3
-
-            conn = sqlite3.connect(db_path)
-            conn.execute(
-                "UPDATE provider_group_mapping SET max_size = 500 "
-                "WHERE provider_name = 'deepseek'"
-            )
-            conn.commit()
-            conn.close()
-
-            keys = [f"sk-key-{i:04d}" for i in range(501)]
+            keys = [f"sk-key-{i:05d}" for i in range(5001)]
             _write_valid_keys(workspace, "deepseek", keys)
 
             from web.push import PushService
 
             svc = PushService(db_path=db_path, workspace=workspace)
 
-            mock_response = MagicMock()
-            mock_response.status_code = 200
-            mock_response.json.return_value = {
-                "code": 0,
-                "data": {
-                    "task_type": "KEY_IMPORT",
-                    "added_count": 501,
-                    "ignored_count": 0,
-                    "total_in_group": 501,
-                },
-            }
+            def _resp(n: int) -> MagicMock:
+                resp = MagicMock()
+                resp.status_code = 200
+                resp.json.return_value = {
+                    "code": 0,
+                    "data": {"credentials_added": n, "credentials_duplicated": 0},
+                }
+                return resp
 
-            with patch("web.push.requests.post", return_value=mock_response) as mock_post:
+            with patch(
+                "web.push.requests.post",
+                side_effect=[_resp(5000), _resp(1)],
+            ) as mock_post:
                 svc.push_valid_keys("deepseek", "run-test-007")
 
-                call_url = mock_post.call_args[0][0]
-                self.assertIn("/api/keys/add-async", call_url)
+                self.assertEqual(mock_post.call_count, 2)
+                for call in mock_post.call_args_list:
+                    self.assertIn(
+                        "/api/groups/2/credentials/import", call[0][0]
+                    )
+                # Distinct Idempotency-Key per chunk
+                keys_seen = [
+                    call[1]["headers"]["Idempotency-Key"]
+                    for call in mock_post.call_args_list
+                ]
+                self.assertNotEqual(keys_seen[0], keys_seen[1])
 
-    def test_push_valid_keys_default_max_size_uses_add_multiple(self) -> None:
-        """A 1000-key batch stays on add-multiple with the default 10000 cap."""
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute(
+                "SELECT * FROM push_logs WHERE run_id = ?", ("run-test-007",)
+            )
+            row = cursor.fetchone()
+            conn.close()
+            self.assertIsNotNone(row)
+            self.assertEqual(row["status"], "success")
+            self.assertEqual(row["added_count"], 5001)
+
+    def test_push_valid_keys_1000_keys_single_import(self) -> None:
+        """A 1000-key batch fits one v2 import call (cap is 5000 lines)."""
         db_path = _temp_db_path()
         with tempfile.TemporaryDirectory() as workspace:
             _seed_db(db_path, workspace)
@@ -348,14 +359,14 @@ class TestPushServiceBasic(unittest.TestCase):
             mock_response.status_code = 200
             mock_response.json.return_value = {
                 "code": 0,
-                "data": {"added_count": 1000, "ignored_count": 0},
+                "data": {"credentials_added": 1000, "credentials_duplicated": 0},
             }
 
             with patch("web.push.requests.post", return_value=mock_response) as mock_post:
                 svc.push_valid_keys("deepseek", "run-test-008")
 
                 call_url = mock_post.call_args[0][0]
-                self.assertIn("/api/keys/add-multiple", call_url)
+                self.assertIn("/api/groups/2/credentials/import", call_url)
 
     def test_push_valid_keys_network_error_retried(self) -> None:
         """When network error occurs (ConnectionError), retry and succeed."""
@@ -380,7 +391,7 @@ class TestPushServiceBasic(unittest.TestCase):
                 resp.status_code = 200
                 resp.json.return_value = {
                     "code": 0,
-                    "data": {"added_count": 1, "ignored_count": 0, "total_in_group": 1},
+                    "data": {"credentials_added": 1, "credentials_duplicated": 0},
                 }
                 return resp
 
@@ -507,18 +518,21 @@ class TestPushServiceRealGptLoad(unittest.TestCase):
             self.skipTest(f"gpt-load unreachable: {e}")
 
     def test_real_push_and_cleanup(self) -> None:
-        """Push a test key to gpt-load, verify, then clean up."""
+        """Push a test key to gpt-load v2, verify, then clean up."""
         import uuid
 
         import requests
 
         test_key = f"sk-test-{uuid.uuid4().hex[:12]}"
 
-        # Push
+        # Push (v2 import contract)
         push_resp = requests.post(
-            f"{self._GPT_LOAD_URL}/api/keys/add-multiple",
-            json={"group_id": self._TEST_GROUP_ID, "keys_text": test_key},
-            headers={"Authorization": f"Bearer {self._GPT_LOAD_AUTH}"},
+            f"{self._GPT_LOAD_URL}/api/groups/{self._TEST_GROUP_ID}/credentials/import",
+            json={"credentials": test_key},
+            headers={
+                "Authorization": f"Bearer {self._GPT_LOAD_AUTH}",
+                "Idempotency-Key": str(uuid.uuid4()),
+            },
             timeout=10,
         )
         self.assertEqual(push_resp.status_code, 200)
@@ -526,18 +540,25 @@ class TestPushServiceRealGptLoad(unittest.TestCase):
         self.assertEqual(data.get("code"), 0)
         self.assertIsNotNone(data.get("data"))
 
-        added = data["data"].get("added_count", 0)
+        added = data["data"].get("credentials_added", 0)
         self.assertGreater(added, 0, "Test key should be newly added")
 
-        # Cleanup: delete the test key
-        del_resp = requests.post(
-            f"{self._GPT_LOAD_URL}/api/keys/delete-multiple",
-            json={"group_id": self._TEST_GROUP_ID, "keys_text": test_key},
+        # Cleanup: find and delete the test credential
+        list_resp = requests.get(
+            f"{self._GPT_LOAD_URL}/api/groups/{self._TEST_GROUP_ID}/credentials",
             headers={"Authorization": f"Bearer {self._GPT_LOAD_AUTH}"},
             timeout=10,
         )
-        # deletion may return non-200 on some servers; log but don't assert
-        self.assertIn(del_resp.status_code, (200, 404), "Delete should succeed")
+        if list_resp.status_code == 200:
+            items = (list_resp.json().get("data") or {}).get("items") or []
+            for item in items:
+                if "sk-t" in str(item.get("mask", "")):
+                    requests.delete(
+                        f"{self._GPT_LOAD_URL}/api/groups/{self._TEST_GROUP_ID}"
+                        f"/credentials/{item['credential_id']}",
+                        headers={"Authorization": f"Bearer {self._GPT_LOAD_AUTH}"},
+                        timeout=10,
+                    )
 
 
 if __name__ == "__main__":

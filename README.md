@@ -831,8 +831,8 @@ pipeline into a long-running service:
 - **Scheduled scans** — per-provider cron schedules (default `0 3 * * *`
   daily) via APScheduler; manual "run now" per provider; anti-overlap guard.
 - **Automatic push to gpt-load** — after a scan finishes, validated keys are
-  pushed to a gpt-load instance group (`POST /api/keys/add-multiple`,
-  idempotent dedup). Each provider's push target (instance URL + group +
+  pushed to a gpt-load v2 instance group
+  (`POST /api/groups/{id}/credentials/import`, idempotent dedup). Each provider's push target (instance URL + group +
   `max_size` batch cap, default 10000) is configurable in the UI.
 - **Automatic push to the Tavily key pool (tavily-hikari)** — after each
   tavily scan completes, validated keys are batch-pushed to a tavily-hikari

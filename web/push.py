@@ -13,6 +13,7 @@ import os
 import sqlite3
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,10 @@ logger = get_logger("web.push")
 # Each mapping can override this (provider_group_mapping.max_size, default
 # 10000) via the push-config UI / PUT /api/gpt-load/mappings/{provider}.
 _DEFAULT_MAX_KEYS_PER_PUSH: int = 10000
+# gpt-load v2 rejects an import with more than 5000 credential lines
+# (maxCredentialLines in internal/control/group_write.go), so larger pushes
+# are chunked at this size.
+_IMPORT_CHUNK_SIZE: int = 5000
 _MAX_RETRIES: int = 3
 _RETRY_BACKOFF_BASE: float = 1.0  # seconds
 _RETRY_BACKOFF_MULTIPLIER: float = 3.0
@@ -48,7 +53,7 @@ class PushService:
         1. ``push_valid_keys(provider, run_id)`` — called from scan thread
         2. Looks up provider → gpt-load group mapping in DB
         3. Reads valid-keys.txt from workspace providers dir
-        4. POSTs to gpt-load ``/api/keys/add-multiple`` (or add-async for >500 keys)
+        4. POSTs to gpt-load v2 ``/api/groups/{id}/credentials/import``
         5. Writes result to ``push_logs`` table
     """
 
@@ -294,78 +299,88 @@ class PushService:
         keys: list[str],
         max_size: int = 10000,
     ) -> dict[str, Any]:
-        """POST keys to gpt-load with retry on 5xx / network errors.
+        """POST keys to gpt-load v2 with retry on 429/5xx / network errors.
 
-        Batches larger than *max_size* (per-mapping configuration, default
-        10000) use the async import endpoint.
+        v2 replaced v1's ``/api/keys/add-multiple`` / ``add-async`` with
+        ``POST /api/groups/{group_id}/credentials/import`` — body
+        ``{"credentials": "<newline-separated keys>"}`` plus a UUIDv4
+        ``Idempotency-Key`` header, capped at 5000 lines per call, so larger
+        pushes are chunked. *max_size* is accepted for backward compatibility
+        but no longer selects an endpoint (v2 has no async import).
 
         Returns:
             dict with keys: ``status`` ("success"/"failed"), ``added_count``,
             ``ignored_count``, ``error_message`` (optional).
         """
-        keys_count = len(keys)
-        # Large batches use async endpoint
-        if keys_count > max_size:
-            endpoint = "/api/keys/add-async"
-        else:
-            endpoint = "/api/keys/add-multiple"
+        url = f"{base_url}/api/groups/{group_id}/credentials/import"
+        total_added = 0
+        total_ignored = 0
 
-        url = f"{base_url}{endpoint}"
-        body: dict[str, Any] = {
-            "group_id": group_id,
-            "keys_text": "\n".join(keys),
-        }
-        headers = {
-            "Authorization": f"Bearer {auth_key}",
-            "Content-Type": "application/json",
-        }
+        for start in range(0, len(keys), _IMPORT_CHUNK_SIZE):
+            chunk = keys[start : start + _IMPORT_CHUNK_SIZE]
+            # One idempotency key per chunk, constant across its retries, so
+            # a retried import cannot double-apply server-side.
+            idempotency_key = str(uuid.uuid4())
+            body: dict[str, Any] = {"credentials": "\n".join(chunk)}
+            headers = {
+                "Authorization": f"Bearer {auth_key}",
+                "Content-Type": "application/json",
+                "Idempotency-Key": idempotency_key,
+            }
 
-        last_error: str | None = None
+            last_error: str | None = None
+            chunk_done = False
 
-        for attempt in range(1 + _MAX_RETRIES):  # initial + retries
-            try:
-                resp = requests.post(url, json=body, headers=headers, timeout=30)
+            for attempt in range(1 + _MAX_RETRIES):  # initial + retries
+                try:
+                    resp = requests.post(url, json=body, headers=headers, timeout=60)
 
-                if resp.status_code == 200:
-                    data = resp.json()
-                    inner = data.get("data", {})
-                    return {
-                        "status": "success",
-                        "added_count": int(inner.get("added_count", 0)),
-                        "ignored_count": int(inner.get("ignored_count", 0)),
-                    }
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        inner = data.get("data", {})
+                        total_added += int(inner.get("credentials_added", 0))
+                        total_ignored += int(inner.get("credentials_duplicated", 0))
+                        chunk_done = True
+                        break
 
-                # 5xx or 4xx (except 429)
-                last_error = f"HTTP {resp.status_code}: {resp.text[:200]}"
-                if resp.status_code < 500 and resp.status_code != 429:
-                    # Non-retryable 4xx
-                    break
+                    # 5xx or 4xx (except 429)
+                    last_error = f"HTTP {resp.status_code}: {resp.text[:200]}"
+                    if resp.status_code < 500 and resp.status_code != 429:
+                        # Non-retryable 4xx
+                        break
 
-            except requests.ConnectionError as exc:
-                last_error = f"ConnectionError: {exc}"
-            except requests.Timeout as exc:
-                last_error = f"Timeout: {exc}"
-            except requests.RequestException as exc:
-                last_error = f"{type(exc).__name__}: {exc}"
-                # Generic request exception — retry
-            except Exception as exc:
-                last_error = f"{type(exc).__name__}: {exc}"
-                break  # Unexpected errors are not retried
+                except requests.ConnectionError as exc:
+                    last_error = f"ConnectionError: {exc}"
+                except requests.Timeout as exc:
+                    last_error = f"Timeout: {exc}"
+                except requests.RequestException as exc:
+                    last_error = f"{type(exc).__name__}: {exc}"
+                    # Generic request exception — retry
+                except Exception as exc:
+                    last_error = f"{type(exc).__name__}: {exc}"
+                    break  # Unexpected errors are not retried
 
-            # Retry with backoff
-            if attempt < _MAX_RETRIES:
-                delay = _RETRY_BACKOFF_BASE * (_RETRY_BACKOFF_MULTIPLIER ** attempt)
-                logger.warning(
-                    f"Push attempt {attempt + 1} failed ({last_error}), "
-                    f"retrying in {delay:.1f}s..."
-                )
-                time.sleep(delay)
+                # Retry with backoff
+                if attempt < _MAX_RETRIES:
+                    delay = _RETRY_BACKOFF_BASE * (_RETRY_BACKOFF_MULTIPLIER ** attempt)
+                    logger.warning(
+                        f"Push attempt {attempt + 1} failed ({last_error}), "
+                        f"retrying in {delay:.1f}s..."
+                    )
+                    time.sleep(delay)
+
+            if not chunk_done:
+                return {
+                    "status": "failed",
+                    "added_count": total_added,
+                    "ignored_count": total_ignored,
+                    "error_message": last_error or "Unknown error",
+                }
 
         return {
-            "status": "failed",
-            "added_count": 0,
-            "ignored_count": 0,
-            "error_message": last_error or "Unknown error",
+            "status": "success",
+            "added_count": total_added,
+            "ignored_count": total_ignored,
         }
 
     def _write_push_log(
