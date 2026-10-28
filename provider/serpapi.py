@@ -130,6 +130,11 @@ class SerpapiProvider(AIBaseProvider):
             if isinstance(data, dict) and any(
                 data.get(field) for field in ("plan_name", "account_id", "account_status")
             ):
+                if self._is_quota_exhausted(data):
+                    # Leaked keys are farmed by many parties: one measured at
+                    # >90% usage dies within days in the proxy pool (same
+                    # rationale as the tavily 10% floor, 2026-10-28).
+                    return CheckResult.fail(ErrorReason.NO_QUOTA)
                 return CheckResult.success(message="SerpApi account endpoint accepted key")
 
             return CheckResult.fail(ErrorReason.UNKNOWN)
@@ -155,6 +160,21 @@ class SerpapiProvider(AIBaseProvider):
             return CheckResult.fail(ErrorReason.SERVER_ERROR)
 
         return CheckResult.fail(ErrorReason.UNKNOWN)
+
+    @staticmethod
+    def _is_quota_exhausted(data: dict) -> bool:
+        """True when the account has no searches left, or under 10% of the
+        monthly plan remains (``total_searches_left`` already includes extra
+        credits, so it is the exhaustion signal)."""
+        total_left = data.get("total_searches_left")
+        if isinstance(total_left, (int, float)):
+            if total_left <= 0:
+                return True
+            monthly = data.get("searches_per_month")
+            if isinstance(monthly, (int, float)) and monthly > 0:
+                if total_left < 0.1 * monthly:
+                    return True
+        return False
 
     @staticmethod
     def _message_text(message: str) -> str:

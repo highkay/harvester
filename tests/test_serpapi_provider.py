@@ -97,6 +97,26 @@ class TestSerpapiProviderCheck(unittest.TestCase):
         # Success message must never carry the echoed key
         self.assertNotIn("0123456789abcdef", result.message or "")
 
+    def test_check_zero_searches_left_returns_no_quota(self):
+        payload = dict(_ACCOUNT_JSON, total_searches_left=0, plan_searches_left=0)
+        with _patch_request(FakeResponse(200, json.dumps(payload))):
+            result = self.provider.check(token="0123456789abcdef0123456789abcdef")
+        self.assertFalse(result.ok)
+        self.assertEqual(result.reason, ErrorReason.NO_QUOTA)
+
+    def test_check_nearly_exhausted_plan_returns_no_quota(self):
+        """Under 10% of the monthly plan remaining → NO_QUOTA (same floor as tavily)."""
+        payload = dict(
+            _ACCOUNT_JSON,
+            searches_per_month=30000,
+            plan_searches_left=1000,
+            total_searches_left=1000,
+        )
+        with _patch_request(FakeResponse(200, json.dumps(payload))):
+            result = self.provider.check(token="0123456789abcdef0123456789abcdef")
+        self.assertFalse(result.ok)
+        self.assertEqual(result.reason, ErrorReason.NO_QUOTA)
+
     def test_check_uses_account_endpoint_and_query_param(self):
         with _patch_request(FakeResponse(200, json.dumps(_ACCOUNT_JSON))) as req_mock:
             self.provider.check(token="0123456789abcdef0123456789abcdef")
