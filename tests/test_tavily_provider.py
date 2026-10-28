@@ -274,6 +274,39 @@ class TestTavilyProviderCheck(unittest.TestCase):
             result = self.provider.check(token="tvly-dev-testkey0123456789ABCDEF")
         self.assertEqual(result.reason, ErrorReason.NO_QUOTA)
 
+    def test_check_nearly_exhausted_plan_returns_no_quota(self):
+        """Plan at >90% usage (<10% remaining) is NO_QUOTA — leaked keys that
+        close to the cap die after a couple of real proxy requests."""
+        payload = {
+            "account": {
+                "plan_usage": 950,
+                "plan_limit": 1000,
+                "paygo_usage": 0,
+                "paygo_limit": None,
+            }
+        }
+        with _patch_request(FakeResponse(200, json.dumps(payload))):
+            result = self.provider.check(token="tvly-dev-testkey0123456789ABCDEF")
+        self.assertEqual(result.reason, ErrorReason.NO_QUOTA)
+        self.assertFalse(result.ok)
+
+    def test_check_nearly_exhausted_with_paygo_stays_valid(self):
+        """Near-exhausted plan + remaining paygo balance → not NO_QUOTA."""
+        payload = {
+            "account": {
+                "plan_usage": 999,
+                "plan_limit": 1000,
+                "paygo_usage": 10,
+                "paygo_limit": 500,
+            }
+        }
+        self.assertFalse(TavilyProvider._is_quota_nearly_exhausted(payload))
+
+    def test_check_90_percent_boundary_stays_valid(self):
+        """Exactly 10% remaining is still usable (floor is strictly below)."""
+        payload = {"account": {"plan_usage": 900, "plan_limit": 1000}}
+        self.assertFalse(TavilyProvider._is_quota_nearly_exhausted(payload))
+
     def test_check_exhausted_with_paygo_is_valid(self):
         """Plan exhausted but paygo credits available → the /search probe decides."""
         patcher, _ = _patch_two_stage(

@@ -264,6 +264,13 @@ class TavilyProvider(AIBaseProvider):
             if self._is_quota_exhausted(data):
                 return CheckResult.fail(ErrorReason.NO_QUOTA)
 
+            if self._is_quota_nearly_exhausted(data):
+                # A leaked free key is farmed by many parties: one measured
+                # at >90% usage dies after a couple of real proxy requests
+                # (prod 2026-10-28: exhausted hikari tavily keys median ~2
+                # requests before dying). Treat <10% remaining as unusable.
+                return CheckResult.fail(ErrorReason.NO_QUOTA)
+
             return CheckResult.success(message="Tavily usage endpoint accepted key with remaining quota")
 
         if code == 401 or re.findall(r"invalid\s+(api\s+)?key|unauthorized|unauthenticated", text, flags=re.I):
@@ -317,6 +324,36 @@ class TavilyProvider(AIBaseProvider):
             key_usage = key_info.get("usage")
             if isinstance(key_limit, (int, float)) and isinstance(key_usage, (int, float)):
                 if key_usage >= key_limit:
+                    return True
+
+        return False
+
+    @staticmethod
+    def _is_quota_nearly_exhausted(data: dict) -> bool:
+        """True when less than 10% of the plan/key quota remains.
+
+        Pay-as-you-go balance (``paygo_usage < paygo_limit``) overrides, same
+        as in ``_is_quota_exhausted``.
+        """
+        account = data.get("account")
+        if isinstance(account, dict):
+            plan_limit = account.get("plan_limit")
+            plan_usage = account.get("plan_usage")
+            if isinstance(plan_limit, (int, float)) and isinstance(plan_usage, (int, float)) and plan_limit > 0:
+                if plan_limit - plan_usage < 0.1 * plan_limit:
+                    paygo_limit = account.get("paygo_limit")
+                    paygo_usage = account.get("paygo_usage")
+                    if isinstance(paygo_limit, (int, float)) and isinstance(paygo_usage, (int, float)):
+                        if paygo_usage < paygo_limit:
+                            return False
+                    return True
+
+        key_info = data.get("key")
+        if isinstance(key_info, dict):
+            key_limit = key_info.get("limit")
+            key_usage = key_info.get("usage")
+            if isinstance(key_limit, (int, float)) and isinstance(key_usage, (int, float)) and key_limit > 0:
+                if key_limit - key_usage < 0.1 * key_limit:
                     return True
 
         return False
