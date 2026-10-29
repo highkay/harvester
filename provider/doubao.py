@@ -28,11 +28,14 @@ class DoubaoProvider(OpenAILikeProvider):
                 "model_path": "/api/v3/models",
                 # Ark ids are versioned: real probes target per-deployment
                 # endpoint ids (ep-XXXXXXXXXXXXXX-XXXXX, see model_pattern) or
-                # version-suffixed model names. "doubao-pro-32k" is the legacy
-                # alias, kept as-is (no live probe available to pick a current
-                # one) — a 404 on it means "endpoint/model unknown", which
+                # version-suffixed model names. Measured 2026-10-29
+                # (.omo/evidence/magpie-coverage/wave0-cn.md, probe b): the
+                # pay-as-you-go /api/v3 catalog's latest seed-2.1-pro id is
+                # doubao-seed-2-1-pro-260915; the previous default
+                # (doubao-pro-32k) is a legacy alias with no live probe. A 404
+                # on the probe id means "endpoint/model unknown", which
                 # _judge routes to NO_MODEL (wait-check), not INVALID_KEY.
-                "default_model": "doubao-pro-32k",
+                "default_model": "doubao-seed-2-1-pro-260915",
                 "model_pattern": r"ep-[0-9]{14}-[a-z0-9]{5}",
             },
         )

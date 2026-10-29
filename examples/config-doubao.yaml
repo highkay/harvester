@@ -1,0 +1,132 @@
+# Doubao (Volcengine Ark) scan configuration (task: doubao)
+# Endpoint: https://ark.cn-beijing.volces.com (pay-as-you-go /api/v3, mainland CN)
+# Key shape MEASURED 2026-10-29 (lane sampler over GitHub code search,
+# text_matches, shapes only): every captured real literal is a UUID v4 —
+# lowercase hex 8-4-4-4-12 (16/16 samples in ARK_API_KEY / volces Bearer
+# contexts). Corpus: "ARK_API_KEY" total_count 59,904-60,928 (2026-10-29,
+# two measurements same day); volcengine_ark_api_key is under GitHub push
+# protection (partner notification), so fresh supply is suppressed and the
+# residual corpus is mostly old/bypassed commits — expect low yield, weekly
+# floor cadence.
+# Results are written to ./data-doubao/providers/doubao/*.txt
+
+global:
+  workspace: "./data-doubao"
+  max_retries_requeued: 3
+  # Per-run corpus bound (house rule since the 2026-10-24 wave).
+  max_links_per_run: 9000
+  proxy: ""
+  github_credentials:
+    sessions:
+      - "your_github_session_here"
+    tokens:
+      - "your_github_token_here"
+    strategy: "round_robin"
+  user_agents:
+    - "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
+
+pipeline:
+  threads:
+    search: 1
+    gather: 4
+    check: 2
+    inspect: 1
+  queue_sizes:
+    search: 100000
+    gather: 200000
+    check: 500000
+    inspect: 1000000
+
+monitoring:
+  update_interval: 2.0
+  error_threshold: 0.1
+  queue_threshold: 1000000
+  memory_threshold: 1073741824
+  response_threshold: 5.0
+
+persistence:
+  batch_size: 50  # flush every 50 items (or save_interval seconds); 1 = a write+log per item
+  save_interval: 5
+  queue_interval: 60
+  snapshot_interval: 300
+  auto_restore: false  # clean start (replay ratchets the corpus)
+  shutdown_timeout: 30
+  format: txt
+
+ratelimits:
+  github_api:
+    base_rate: 0.15
+    burst_limit: 3
+    adaptive: true
+  doubao:
+    # Hardened-provider pace: 0.2 req/s = 5 s/key.
+    base_rate: 0.2
+    burst_limit: 2
+    adaptive: true
+
+tasks:
+  - name: doubao
+    enabled: true
+    provider_type: doubao
+    use_api: true
+    # Pagination depth left at 1000 (inert: `_max_pages()` clamps to
+    # API_MAX_PAGES=10); the corpus is bounded by global.max_links_per_run.
+    max_pages: 1000
+    search_types: [code]
+    stages:
+      search: true
+      gather: true
+      check: true
+      inspect: true
+    api:
+      base_url: https://ark.cn-beijing.volces.com
+      completion_path: /api/v3/chat/completions
+      model_path: /api/v3/models
+      # Measured 2026-10-29 (wave0-cn.md probe b): latest seed-2.1-pro id in
+      # the pay-as-you-go /api/v3 catalog. A 404 on it routes to NO_MODEL
+      # (wait-check), never INVALID_KEY — provider/doubao.py pins that.
+      default_model: doubao-seed-2-1-pro-260915
+      auth_key: Authorization
+      extra_headers: {}
+      api_version: ""
+      timeout: 30
+      retries: 3
+      use_proxy: false  # CN endpoint — connect directly
+    patterns:
+      # Ark keys are UUID v4 (measured 2026-10-29: 16/16 captured literals
+      # lowercase hex 8-4-4-4-12, no sk-/AK- prefixed forms). The task-level
+      # pattern fires only on ARK_API_KEY / VOLCENGINE_API_KEY env-name
+      # assignments; the lookahead drops the all-zeros placeholder UUID
+      # (00000000-0000-0000-0000-000000000000). The hex charset itself
+      # already rejects word placeholders like "your-ark-key-here".
+      # Domain-anchored conditions override with a Bearer/quoted variadic.
+      key_pattern: >-
+        (?i)(?:ark[_-]?api[_-]?key|volcengine[_-]?api[_-]?key)["'\]]{0,2}\s*[:=]\s*["']?((?!00000000-0000)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})["']?
+      address_pattern: ""
+      endpoint_pattern: ""
+      model_pattern: ""
+    conditions:
+      # Each GitHub API search query has its own 1000-result window.
+      - query: '"ARK_API_KEY"'
+      - query: '"VOLCENGINE_API_KEY"'
+      # Domain-anchored blobs: allow Bearer/quoted UUID keys without the env
+      # name. ep- deployment ids can't self-match ('p' is not hex).
+      - query: '"ark.cn-beijing.volces.com"'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|["']\s*)((?!00000000-0000)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})
+      - query: '"ark.cn-beijing.volces.com" "Authorization"'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|["']\s*)((?!00000000-0000)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})
+      - query: '"ARK_API_KEY" extension:env'
+      - query: '"ARK_API_KEY" extension:yaml'
+      - query: '"ARK_API_KEY" extension:json'
+      - query: '"VOLCENGINE_API_KEY" extension:env'
+    rate_limit:
+      base_rate: 0.2
+      burst_limit: 2
+      adaptive: true
+    storage:
+      directory: ""
+      plan: ""
