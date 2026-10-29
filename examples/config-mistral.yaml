@@ -1,0 +1,146 @@
+# Mistral scan configuration (task: mistral)
+# Endpoint: https://api.mistral.ai/v1   (La Plateforme, international)
+# Gate: GET /v1/models answers 401 {"detail":"Invalid API Key"} for no-key and
+# bad-key (measured 2026-10-29 from prod socks exits 1090/1091/1080) - a real
+# application-level auth gate, not a public trap and not a WAF page.
+# Measured keys carry NO prefix (4/4 samples: 32 chars, [A-Za-z0-9]), so the
+# pattern is env-anchored (MISTRAL_API_KEY) plus domain-anchored
+# (api.mistral.ai); a bare 32-char alnum string is not greppable on its own.
+# Results are written to ./data-mistral/providers/mistral/*.txt
+
+global:
+  workspace: "./data-mistral"
+  max_retries_requeued: 3
+  # Per-run corpus bound (house rule since the 2026-10-24 wave).
+  max_links_per_run: 9000
+  proxy: ""
+  github_credentials:
+    sessions:
+      - "your_github_session_here"
+    tokens:
+      - "your_github_token_here"
+    strategy: "round_robin"
+  user_agents:
+    - "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
+
+pipeline:
+  threads:
+    search: 1
+    gather: 4
+    check: 2
+    inspect: 1
+  queue_sizes:
+    search: 100000
+    gather: 200000
+    check: 500000
+    inspect: 1000000
+
+monitoring:
+  update_interval: 2.0
+  error_threshold: 0.1
+  queue_threshold: 1000000
+  memory_threshold: 1073741824
+  response_threshold: 5.0
+
+persistence:
+  batch_size: 50  # flush every 50 items (or save_interval seconds); 1 = a write+log per item
+  save_interval: 5
+  queue_interval: 60
+  snapshot_interval: 300
+  auto_restore: false  # clean start (replay ratchets the corpus)
+  shutdown_timeout: 30
+  format: txt
+
+ratelimits:
+  github_api:
+    base_rate: 0.15
+    burst_limit: 3
+    adaptive: true
+  mistral:
+    # Hardened-provider pace: 0.2 req/s = 5 s/key.
+    base_rate: 0.2
+    burst_limit: 2
+    adaptive: true
+
+tasks:
+  - name: mistral
+    enabled: true
+    provider_type: mistral
+    use_api: true
+    # Pagination depth left at 1000 (inert: `_max_pages()` clamps to
+    # API_MAX_PAGES=10); the corpus is bounded by global.max_links_per_run.
+    max_pages: 1000
+    search_types: [code]
+    stages:
+      search: true
+      gather: true
+      check: true
+      inspect: true
+    api:
+      base_url: https://api.mistral.ai/v1
+      completion_path: /chat/completions
+      model_path: /models
+      # Liveness UNVERIFIED: wave-0 (2026-10-29) probed the auth layer only
+      # (no live key), so "mistral-small-latest" is an assumption. A retired
+      # id answers 404/422 -> NO_MODEL / BAD_REQUEST (wait-check), never
+      # INVALID_KEY; the pilot run confirms it.
+      default_model: mistral-small-latest
+      auth_key: Authorization
+      extra_headers: {}
+      api_version: ""
+      timeout: 30
+      retries: 3
+      use_proxy: true  # api.mistral.ai is reached through the egress pool
+    patterns:
+      # Measured 2026-10-29: 4/4 real values were exactly 32 chars of mixed
+      # [A-Za-z0-9], no prefix, no '-' or '_'. The env name is the anchor
+      # (a bare 32-char alnum string collides with hashes and ids); the
+      # domain-anchored conditions below widen to Bearer/quoted forms.
+      # The corpus is placeholder-heavy (your_mistral_api_key, XXXXXXXXX,
+      # <mistral token>), hence the placeholder lookahead; the trailing
+      # guard stops a 32-char prefix of a longer token from being captured.
+      key_pattern: >-
+        (?i)(?:mistral[_-]?api[_-]?key)["'\]]{0,2}\s*[:=]\s*["']?(?!(?:your|test|dummy|example|placeholder|changeme|fake|sample|xxx))([A-Za-z0-9]{32})(?![A-Za-z0-9])["']?
+      address_pattern: ""
+      endpoint_pattern: ""
+      model_pattern: ""
+    conditions:
+      # Each GitHub API search query has its own 1000-result window.
+      - query: '"MISTRAL_API_KEY"'
+      - query: '"MISTRAL_API_KEY="'
+      - query: '"MISTRAL_API_KEY:"'
+      - query: '"mistral_api_key"'
+      - query: '"MISTRAL_API_KEY" filename:.env'
+      - query: '"MISTRAL_API_KEY" language:Python'
+      - query: '"MISTRAL_API_KEY" language:Shell'
+      - query: '"MISTRAL_API_KEY" language:YAML'
+      - query: '"MISTRAL_API_KEY" language:JavaScript'
+      - query: '"MISTRAL_API_KEY" language:JSON'
+      - query: '"MISTRAL_API_KEY" language:Go'
+      - query: '"MISTRAL_API_KEY" language:Java'
+      # Domain-anchored blobs: a prefix-less 32-char body is only greppable
+      # next to the endpoint host. Bearer and quoted forms only — a bare
+      # 32-char alnum run in these blobs is much more often a hash or id.
+      - query: '"api.mistral.ai" "Bearer"'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|["']\s*)(?!(?:your|test|dummy|example|placeholder|changeme|fake|sample|xxx))([A-Za-z0-9]{32})(?![A-Za-z0-9])["']?
+      - query: '"api.mistral.ai" "Authorization"'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|["']\s*)(?!(?:your|test|dummy|example|placeholder|changeme|fake|sample|xxx))([A-Za-z0-9]{32})(?![A-Za-z0-9])["']?
+      - query: '"api.mistral.ai" extension:env'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|["']\s*)(?!(?:your|test|dummy|example|placeholder|changeme|fake|sample|xxx))([A-Za-z0-9]{32})(?![A-Za-z0-9])["']?
+      - query: '"api.mistral.ai" extension:yaml'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|["']\s*)(?!(?:your|test|dummy|example|placeholder|changeme|fake|sample|xxx))([A-Za-z0-9]{32})(?![A-Za-z0-9])["']?
+    rate_limit:
+      base_rate: 0.2
+      burst_limit: 2
+      adaptive: true
+    storage:
+      directory: ""
+      plan: ""
