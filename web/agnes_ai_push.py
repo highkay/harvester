@@ -37,7 +37,7 @@ logger = get_logger("web.agnes_ai_push")
 # ---------------------------------------------------------------------------
 
 _DEFAULT_BASE_URL: str = "http://107.172.141.203:43001"
-_DEFAULT_GROUP_ID: int = 19
+_DEFAULT_GROUP_ID: int = 5
 _PROVIDER_NAME: str = "agnes-ai"
 # Measured on prod 2026-09-27/28: the fnos->rn WAN path (rn gpt-load at
 # 107.172.141.203:43001, a genuinely remote VPS — its group list is disjoint

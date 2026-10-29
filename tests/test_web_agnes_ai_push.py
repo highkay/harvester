@@ -376,7 +376,7 @@ class TestAgnesAIPushServiceBasic(unittest.TestCase):
             self.assertEqual(row2["status"], "failed")
 
     def test_push_env_defaults_when_unset(self) -> None:
-        """No AGNES_LOAD_* env → default base url and group id 19."""
+        """No AGNES_LOAD_* env → default base url and group id 5 (RN v2)."""
         db_path = _temp_db_path()
         with tempfile.TemporaryDirectory() as workspace:
             _init_schema(db_path)
@@ -385,7 +385,7 @@ class TestAgnesAIPushServiceBasic(unittest.TestCase):
                 svc = AgnesAIPushService(db_path=db_path, workspace=workspace)
 
             self.assertEqual(svc._base_url, "http://107.172.141.203:43001")
-            self.assertEqual(svc._group_id, 19)
+            self.assertEqual(svc._group_id, 5)
 
     def test_push_skips_non_agnes_ai_provider(self) -> None:
         """provider_name != agnes-ai → no POST and no push_logs row."""
