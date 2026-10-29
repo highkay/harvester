@@ -142,15 +142,31 @@ class GeminiProvider(AIBaseProvider):
     def _judge_models(self, code: int, message: str) -> CheckResult:
         """Judge Gemini models.list response."""
         if code == 200:
+            body = trim(message)
+            if not body:
+                # An EMPTY 200 body is a transport/proxy artefact (a truncated
+                # connection or a transparent proxy exit), NOT a key verdict.
+                # The old path returned UNKNOWN, which CheckStage files in
+                # invalid-keys.txt — a PERMANENT discard — and this branch
+                # returns from inside the retry loop, so a single truncation
+                # was final. SERVER_ERROR is retryable, so the key lands in the
+                # recoverable wait-check-keys.txt bucket instead. Same fix as
+                # OpenAILikeProvider._judge (todo3-gemini.md risk 3).
+                return CheckResult.fail(ErrorReason.SERVER_ERROR)
             try:
-                data = json.loads(message)
+                data = json.loads(body)
             except Exception:
-                return CheckResult.fail(ErrorReason.UNKNOWN)
+                # Present-but-unparseable 200 (an HTML captive/error page served
+                # by a proxy exit): no key verdict can be made here either, so
+                # it is retryable for the same reason as the empty body above.
+                return CheckResult.fail(ErrorReason.SERVER_ERROR)
 
             models = data.get("models", []) if isinstance(data, dict) else []
             if isinstance(models, list):
                 return CheckResult.success()
 
+            # Parsed JSON whose `models` is not a list: the body was read but the
+            # verdict is genuinely unknowable — unchanged (UNKNOWN).
             return CheckResult.fail(ErrorReason.UNKNOWN)
 
         return self._judge(code=code, message=message)

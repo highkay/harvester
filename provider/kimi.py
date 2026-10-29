@@ -112,7 +112,8 @@ class KimiProvider(OpenAILikeProvider):
             return CheckResult.fail(ErrorReason.TIMEOUT if message == "timeout" else ErrorReason.NETWORK_ERROR)
 
         if code == 200:
-            return CheckResult.success()
+            # Do not believe the status line alone: read the body (see _judge).
+            return self._judge(code=code, message=message)
 
         if code == 402:
             return CheckResult.fail(ErrorReason.NO_QUOTA)
@@ -165,15 +166,31 @@ class KimiProvider(OpenAILikeProvider):
     def _judge_models(self, code: int, message: str) -> CheckResult:
         """Judge Kimi models.list response."""
         if code == 200:
+            body = trim(message)
+            if not body:
+                # An EMPTY 200 body is a transport/proxy artefact (a truncated
+                # connection or a transparent proxy exit), NOT a key verdict.
+                # The old path returned UNKNOWN, which CheckStage files in
+                # invalid-keys.txt — a PERMANENT discard — and this branch
+                # returns from inside the retry loop, so a single truncation
+                # was final. SERVER_ERROR is retryable, so the key lands in the
+                # recoverable wait-check-keys.txt bucket instead. Same fix as
+                # OpenAILikeProvider._judge (review-kimi.md D1, 2026-10-29).
+                return CheckResult.fail(ErrorReason.SERVER_ERROR)
             try:
-                data = json.loads(message)
+                data = json.loads(body)
             except Exception:
-                return CheckResult.fail(ErrorReason.UNKNOWN)
+                # Present-but-unparseable 200 (an HTML captive/error page served
+                # by a proxy exit): no key verdict can be made here either, so
+                # it is retryable for the same reason as the empty body above.
+                return CheckResult.fail(ErrorReason.SERVER_ERROR)
 
             models = data.get("data", []) if isinstance(data, dict) else []
             if isinstance(models, list):
                 return CheckResult.success()
 
+            # Parsed JSON whose `data` is not a list: the body was read but the
+            # verdict is genuinely unknowable — unchanged (UNKNOWN).
             return CheckResult.fail(ErrorReason.UNKNOWN)
 
         if code == 401:
@@ -199,7 +216,24 @@ class KimiProvider(OpenAILikeProvider):
         message = trim(message)
 
         if code == 200:
-            return CheckResult.success()
+            # A 200 is not automatically a valid key: wrapper gateways answer
+            # HTTP 200 + an error object, and the old blanket success pooled
+            # that body as VALID, which web/push.py then ships to gpt-load.
+            # Reuse the openai_like guard instead: it splits an error payload
+            # by flavour (auth marker -> INVALID_KEY, quota marker -> NO_QUOTA,
+            # anything else -> BAD_REQUEST, i.e. the recoverable wait-check
+            # bucket), treats an empty body as a retryable transport artefact
+            # and keeps a clean completion body as success
+            # (review-kimi.md D2, 2026-10-29).
+            result = super()._judge(code=code, message=message)
+            if not result.available and result.reason == ErrorReason.UNKNOWN:
+                # openai_like leaves a present-but-unparseable 200 (proxy
+                # interstitial) as UNKNOWN -> invalid-keys.txt. _judge_models
+                # classifies that same shape as retryable; keep the two probes
+                # aligned so a hijacked chat answer cannot permanently burn a
+                # key that authenticated on /models one call earlier.
+                return CheckResult.fail(ErrorReason.SERVER_ERROR)
+            return result
 
         # Auth passed, but the model id or plan is wrong. Docs + measurement on
         # api.kimi.com/coding/v1 (2026-09-21): an unknown model id answers 401

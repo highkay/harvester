@@ -2,9 +2,9 @@
 
 """Unit tests for the Gemini provider (provider/gemini.py).
 
-The provider is pre-existing and unmodified by this landing; these tests pin
-the verdict taxonomy that the wave-1 config and the scheduler seed rely on, all
-of it measured 2026-10-29 (`.omo/evidence/magpie-coverage/wave0-us.md` §(c)):
+These tests pin the verdict taxonomy that the wave-1 config and the scheduler
+seed rely on, all of it measured 2026-10-29
+(`.omo/evidence/magpie-coverage/wave0-us.md` §(c)):
 
   - the check path is the models.list gate (``GET /v1beta/models?pageSize=1``
     with ``x-goog-api-key``), never a chat completion and never a model id;
@@ -12,14 +12,19 @@ of it measured 2026-10-29 (`.omo/evidence/magpie-coverage/wave0-us.md` §(c)):
     forms alike), never 200 — so the list endpoint is NOT a public trap;
   - a 200 carrying a ``models`` list means valid.
 
-Two classifications are PINNED AS THEY SHIP (provider/gemini.py is out of scope
-for this landing) and recorded as risks in docs/agents/providers/gemini.md:
+One classification is PINNED AS SHIPPED and recorded as a risk in
+docs/agents/providers/gemini.md:
 
   - a 429 whose body carries ``RESOURCE_EXHAUSTED`` maps to ``NO_QUOTA`` (the
     no-quota bucket), not ``RATE_LIMITED`` — a free-tier per-minute limit is
-    therefore filed as quota instead of retryable;
-  - an unparseable 200 body maps to ``UNKNOWN`` (CheckStage files UNKNOWN in
-    invalid-keys.txt, a permanent discard) rather than a retryable verdict.
+    therefore filed as quota instead of retryable.
+
+The 200-with-unparseable-body risk from that landing was fixed by the todo-17
+judge hardening (same fix as OpenAILikeProvider._judge's empty-200 case): an
+empty or unparseable 200 body is a transport/proxy artefact, not a key verdict,
+so it now maps to the retryable ``SERVER_ERROR`` (CheckStage routes it to the
+recoverable wait-check bucket) instead of ``UNKNOWN`` (invalid-keys.txt, a
+permanent discard).
 """
 
 from __future__ import annotations
@@ -352,16 +357,18 @@ class TestGeminiVerdicts(unittest.TestCase):
             self.assertEqual(result.reason, expected)
             self.assertTrue(result.reason.is_retryable())
 
-    def test_200_unparseable_body_is_unknown_known_risk(self):
-        # PINNED AS SHIPPED (see module docstring): an unparseable 200 body
-        # (e.g. a proxy interstitial) is UNKNOWN, which CheckStage files in
-        # invalid-keys.txt. Recorded as a risk in
-        # docs/agents/providers/gemini.md; provider/gemini.py is out of scope
-        # for this landing. Update this test together with that fix.
-        for body in ("", "<html><body>Attention Required!</body></html>"):
-            result, _ = _check(response=FakeResponse(200, body))
-            self.assertFalse(result.available)
-            self.assertEqual(result.reason, ErrorReason.UNKNOWN)
+    def test_200_empty_or_unparseable_body_is_retryable_server_error(self):
+        # Todo-17 fix (todo3-gemini.md risk 3, see module docstring): a
+        # truncated/HTML 200 body is a transport/proxy artefact, not a key
+        # verdict. UNKNOWN used to file the key into invalid-keys.txt
+        # permanently; SERVER_ERROR routes it to the recoverable
+        # wait-check-keys.txt bucket.
+        for body in ("", "   ", "<html><body>Attention Required!</body></html>"):
+            with self.subTest(body=repr(body)):
+                result, _ = _check(response=FakeResponse(200, body))
+                self.assertFalse(result.available)
+                self.assertEqual(result.reason, ErrorReason.SERVER_ERROR)
+                self.assertTrue(result.reason.is_retryable())
 
     def test_200_without_models_key_is_treated_as_valid(self):
         # The shipped shape check is only "200 + JSON object": an empty model

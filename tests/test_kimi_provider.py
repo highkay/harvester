@@ -10,7 +10,7 @@ import unittest
 from unittest import mock
 
 from core.enums import ErrorReason
-from core.models import CheckResult, Condition, Patterns
+from core.models import Condition, Patterns
 from provider.kimi import KimiProvider
 from provider.openai_like import OpenAILikeProvider
 from provider.registry import ProviderRegistry, get_available_providers
@@ -180,6 +180,20 @@ class TestKimiProviderCheck(unittest.TestCase):
         self.assertFalse(result.available)
         self.assertEqual(result.reason, ErrorReason.SERVER_ERROR)
 
+    def test_check_models_200_empty_or_unparseable_body_is_retryable_server_error(self):
+        # D1 (review-kimi.md 2026-10-29): a truncated/HTML 200 from the models
+        # gate is a transport artefact, not a key verdict. UNKNOWN used to file
+        # the key into invalid-keys.txt permanently; SERVER_ERROR routes it to
+        # the recoverable wait-check-keys.txt bucket.
+        for body in ("", "   ", "<html><body>Attention Required!</body></html>"):
+            with self.subTest(body=repr(body)):
+                with _patch_request(FakeResponse(200, body)):
+                    result = self.provider.check(token="sk-truncated123456789012")
+
+                self.assertFalse(result.available)
+                self.assertEqual(result.reason, ErrorReason.SERVER_ERROR)
+                self.assertTrue(result.reason.is_retryable())
+
     def test_check_models_ok_then_402_no_quota(self):
         # Models gate passes (200) but the chat probe surfaces 402 Payment
         # Required -> zero balance keys must be filtered to NO_QUOTA, not valid.
@@ -217,6 +231,51 @@ class TestKimiProviderCheck(unittest.TestCase):
             result = self.provider.check(token="sk-withbalance")
 
         self.assertTrue(result.available)
+
+    def test_check_models_ok_then_chat_200_error_body_is_split_by_flavour(self):
+        # D2 (review-kimi.md 2026-10-29): the chat probe must read the body —
+        # a 200 carrying an error object is NOT a valid key (it used to be
+        # pooled as VALID and pushed to gpt-load). Both error shapes (dict and
+        # plain string, the native-Ollama form) split by the openai_like
+        # markers: auth -> INVALID_KEY, quota -> NO_QUOTA, else BAD_REQUEST
+        # (the recoverable wait-check bucket).
+        cases = (
+            ('{"error":{"message":"Incorrect API key provided","type":"invalid_request_error"}}', ErrorReason.INVALID_KEY),
+            ('{"error":"Unauthorized: invalid api key"}', ErrorReason.INVALID_KEY),
+            ('{"error":{"message":"Insufficient Balance","type":"insufficient_quota"}}', ErrorReason.NO_QUOTA),
+            ('{"error":"insufficient credits for this request"}', ErrorReason.NO_QUOTA),
+            ('{"error":{"message":"upstream gateway exploded"}}', ErrorReason.BAD_REQUEST),
+            ("{\"error\":\"model 'kimi-k3' not found, try pulling it first\"}", ErrorReason.BAD_REQUEST),
+        )
+        for body, expected in cases:
+            with self.subTest(expected=expected.value):
+                with mock.patch(
+                    "provider.kimi.request",
+                    side_effect=[FakeResponse(200, MODELS_RESPONSE), FakeResponse(200, body)],
+                ):
+                    result = self.provider.check(token="sk-chaterror1234567890")
+
+                self.assertFalse(result.available)
+                self.assertEqual(result.reason, expected)
+                self.assertNotEqual(result.reason, ErrorReason.UNKNOWN)
+
+    def test_check_models_ok_then_chat_200_empty_or_html_body_is_retryable_server_error(self):
+        # D2 companion: a truncated/HTML 200 on the chat probe is a transport
+        # artefact, not a key verdict — the key authenticated on /models one
+        # call earlier and must NOT be permanently burned into invalid-keys.txt
+        # (_judge_models classifies this same shape as retryable, so the two
+        # probes stay aligned).
+        for body in ("", "   ", "<html><body>Attention Required!</body></html>"):
+            with self.subTest(body=repr(body)):
+                with mock.patch(
+                    "provider.kimi.request",
+                    side_effect=[FakeResponse(200, MODELS_RESPONSE), FakeResponse(200, body)],
+                ):
+                    result = self.provider.check(token="sk-chattruncated12345678")
+
+                self.assertFalse(result.available)
+                self.assertEqual(result.reason, ErrorReason.SERVER_ERROR)
+                self.assertTrue(result.reason.is_retryable())
 
     def test_check_requests_bypass_proxy(self):
         # Domestic endpoint configured with use_proxy=False must never be
