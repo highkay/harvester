@@ -145,7 +145,7 @@ _DEFAULT_SCHEDULES: tuple[tuple[str, str, str], ...] = (
     # and 0.9-1.0k search pages. Daily→weekly had already cost only ~20 keys per
     # fortnight (qwen-cn 66→3, deepseek 18→0, mimo-cn 3→0), so the house weekly
     # floor is the correct cadence; the depth bound lives in each config
-    # (max_pages 3 / max_links_per_run 12000). Day names are spelled out for the
+    # (max_pages 1000 / max_links_per_run 9000). Day names are spelled out for the
     # APScheduler footgun (numeric dow: 0=mon, not 0=sun).
     ("deepseek", "0 2 * * sun", "examples/config-deepseek.yaml"),
     ("kimi", "0 4 * * mon", "examples/config-kimi.yaml"),
@@ -268,6 +268,38 @@ _DEFAULT_SCHEDULES: tuple[tuple[str, str, str], ...] = (
     # 2026-10-19: 22:00 → 18:00 sat — exa moved to 22:00 daily; 18:00 sat is
     # empty (brave moved to 20:00).
     ("opencode", "0 18 * * sat", "examples/config-opencode.yaml"),
+    # CommandCode relay keys - weekly floor. 2026-10-29 wave-0 verdict:
+    # /provider/v1/models is a public trap (same 18,461-byte 200 for
+    # no-key/bad-key), so the judge is a minimal chat probe. Monday 05:00
+    # sits between kimi 04:00 (capped ~45 min) and serpapi 06:00.
+    ("commandcode", "0 5 * * mon", "examples/config-commandcode.yaml"),
+    # ClinePass (api.cline.bot) - weekly floor. 2026-10-29 wave-0 verdict:
+    # /api/v1/models is a public trap (same 41,064-byte 200 for
+    # no-key/bad-key across both socks exits), so the judge is a minimal
+    # chat probe. Saturday 23:00 sits after mimo-sg 15:00 and opencode 18:00.
+    ("clinepass", "0 23 * * sat", "examples/config-clinepass.yaml"),
+    # SiliconFlow (api.siliconflow.cn) - weekly floor. Wave-0 (2026-10-29): the
+    # /v1/models auth gate is clean (401 for no-key and bad-key), free tier
+    # confirmed by the docs' server-rendered text. Saturday 05:00 is empty.
+    ("siliconflow", "0 5 * * sat", "examples/config-siliconflow.yaml"),
+    # Mistral (api.mistral.ai/v1) - weekly floor. Wave-0 (2026-10-29): no-key
+    # and bad-key both answer 401 {"detail":"Invalid API Key"} from both prod
+    # socks exits, so the models endpoint is a real application-level gate.
+    # Sunday 05:00 sits after deepseek 02:00 (capped) and before kimi 04:00's
+    # tail is gone; serpapi 06:00 mon/wed/fri is not on Sunday.
+    ("mistral", "0 5 * * sun", "examples/config-mistral.yaml"),
+    # Gemini (generativelanguage.googleapis.com) - weekly floor. Wave-0
+    # (2026-10-29): the /v1beta/models list gate is clean (403 for no-key, 400
+    # API_KEY_INVALID for any bad key — never 200), so the existing provider's
+    # list-gate check is sound. Friday 05:00 sits after Thursday's openrouter
+    # (07:30) chain and before serpapi's 06:00 window.
+    ("gemini", "0 5 * * fri", "examples/config-gemini.yaml"),
+    # Doubao (Volcengine Ark, CN endpoint) - weekly floor. Wave-0
+    # (2026-10-29): /api/v3/models and chat are clean auth gates (401 for
+    # no-key and bad-key); keys are UUID v4. volcengine_ark_api_key is under
+    # GitHub push protection, so fresh supply is suppressed — expect low
+    # yield. Tuesday 05:00 sits before mimo-cn 06:00 tue.
+    ("doubao", "0 5 * * tue", "examples/config-doubao.yaml"),
 )
 
 

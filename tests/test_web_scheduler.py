@@ -56,7 +56,7 @@ class TestCronValidation(unittest.TestCase):
 class TestSeedData(unittest.TestCase):
     """Given an empty schedule_config table,
     When init_scheduler is called,
-    Then 21 default provider schedules are inserted.
+    Then 27 default provider schedules are inserted.
     """
 
     _EXPECTED_PROVIDERS = frozenset(
@@ -90,6 +90,31 @@ class TestSeedData(unittest.TestCase):
             # 2026-09-28: opencode seeded — endpoint live-verified the same
             # day (public /models list, auth-gated chat probe).
             "opencode",
+            # 2026-10-29: commandcode seeded — /provider/v1/models is a public
+            # trap (same 18,461-byte 200 for no-key/bad-key); the judge is a
+            # minimal chat probe (401 UNAUTHORIZED = invalid).
+            "commandcode",
+            # 2026-10-29: clinepass seeded — /api/v1/models is a public
+            # trap (same 41,064-byte 200 for no-key/bad-key on both exits);
+            # the judge is a minimal chat probe (401 = invalid).
+            "clinepass",
+            # 2026-10-29 wave-1: siliconflow seeded — /v1/models is a clean
+            # auth gate (401 for no-key and bad-key, measured wave-0); the
+            # free tier is confirmed by the docs' server-rendered text.
+            "siliconflow",
+            # 2026-10-29 wave-1: gemini seeded — the /v1beta/models list gate
+            # is clean (403 no-key, 400 API_KEY_INVALID for every bad key on
+            # both exits, query and header forms; never 200).
+            "gemini",
+            # 2026-10-29 wave-1: doubao seeded - ark.cn-beijing.volces.com
+            # /api/v3 is a clean 401 auth gate; keys are UUID v4 (measured
+            # 2026-10-29); volcengine_ark_api_key is GitHub push-protected,
+            # so supply is suppressed and the cadence is the weekly floor.
+            "doubao",
+            # 2026-10-29 wave-1: mistral seeded - /v1/models answers 401
+            # {"detail":"Invalid API Key"} for no-key and bad-key from both
+            # prod socks exits (a real application gate, not a trap).
+            "mistral",
         }
     )
     _EXPECTED_CRONS = {
@@ -138,6 +163,24 @@ class TestSeedData(unittest.TestCase):
         "openrouter": "30 7 * * thu",
         "nvidia": "50 11 * * *",
         "opencode": "0 18 * * sat",
+        # 2026-10-29 wave-1: commandcode weekly floor; Monday 05:00 sits
+        # between kimi 04:00 (capped ~45 min) and serpapi 06:00.
+        "commandcode": "0 5 * * mon",
+        # 2026-10-29 wave-1: clinepass weekly floor; Saturday 23:00 sits
+        # after mimo-sg 15:00 and opencode 18:00.
+        "clinepass": "0 23 * * sat",
+        # 2026-10-29 wave-1: siliconflow weekly floor; Saturday 05:00 sits
+        # before mimo-sg 15:00 and opencode 18:00.
+        "siliconflow": "0 5 * * sat",
+        # 2026-10-29 wave-1: gemini weekly floor; Friday 05:00 sits before
+        # serpapi's 06:00 window and after the Thursday chain.
+        "gemini": "0 5 * * fri",
+        # 2026-10-29 wave-1: doubao weekly floor; Tuesday 05:00 sits before
+        # mimo-cn 06:00 tue. Push protection suppresses fresh supply.
+        "doubao": "0 5 * * tue",
+        # 2026-10-29 wave-1: mistral weekly floor; Sunday 05:00 follows
+        # deepseek 02:00 (capped) with no same-window overlap.
+        "mistral": "0 5 * * sun",
     }
     _EXPECTED_CONFIG_FILES = {
         "deepseek": "examples/config-deepseek.yaml",
@@ -161,6 +204,12 @@ class TestSeedData(unittest.TestCase):
         "openrouter": "examples/config-openrouter.yaml",
         "nvidia": "examples/config-nvidia.yaml",
         "opencode": "examples/config-opencode.yaml",
+        "commandcode": "examples/config-commandcode.yaml",
+        "clinepass": "examples/config-clinepass.yaml",
+        "siliconflow": "examples/config-siliconflow.yaml",
+        "gemini": "examples/config-gemini.yaml",
+        "doubao": "examples/config-doubao.yaml",
+        "mistral": "examples/config-mistral.yaml",
     }
 
     def test_seeds_defaults_on_empty_table(self) -> None:
@@ -186,7 +235,7 @@ class TestSeedData(unittest.TestCase):
                 settings = _make_settings(db_path)
                 svc = await init_scheduler(settings)
 
-                # -- Then: 21 default rows inserted --
+                # -- Then: 27 default rows inserted --
                 db2 = await get_db(db_path)
                 cursor2 = await db2.execute(
                     "SELECT provider_name, cron_expression, enabled, config_file "

@@ -11,6 +11,8 @@ from .base import AIBaseProvider
 from .bedrock import BedrockProvider
 from .brave import BraveProvider
 from .cerebras import CerebrasProvider
+from .commandcode import CommandCodeProvider
+from .clinepass import ClinepassProvider
 from .doubao import DoubaoProvider
 from .exa import ExaProvider
 from .gemini import GeminiProvider
@@ -20,8 +22,10 @@ from .gooeyai import GooeyAIProvider
 from .grok import GrokProvider
 from .groq import GroqProvider
 from .deepseek import DeepSeekProvider
+from .huawei_maas import HuaweiMaasProvider
 from .kimi import KimiProvider
 from .mimo import MiMoProvider
+from .mistral import MistralProvider
 from .modelscope import ModelScopeProvider
 from .ollama import OllamaProvider
 from .opencode import OpenCodeProvider
@@ -31,6 +35,7 @@ from .openrouter import OpenRouterProvider
 from .qianfan import QianFanProvider
 from .qwen import QwenProvider
 from .serpapi import SerpapiProvider
+from .siliconflow import SiliconFlowProvider
 from .stabilityai import StabilityAIProvider
 from .tavily import TavilyProvider
 from .vertex import VertexProvider
@@ -45,6 +50,8 @@ __all__ = [
     "BedrockProvider",
     "BraveProvider",
     "CerebrasProvider",
+    "CommandCodeProvider",
+    "ClinepassProvider",
     "DoubaoProvider",
     "ExaProvider",
     "GeminiProvider",
@@ -52,8 +59,10 @@ __all__ = [
     "GrokProvider",
     "GroqProvider",
     "DeepSeekProvider",
+    "HuaweiMaasProvider",
     "KimiProvider",
     "MiMoProvider",
+    "MistralProvider",
     "ModelScopeProvider",
     "OpenCodeProvider",
     "GLMProvider",
@@ -61,6 +70,7 @@ __all__ = [
     "QianFanProvider",
     "QwenProvider",
     "OpenRouterProvider",
+    "SiliconFlowProvider",
     "StabilityAIProvider",
     "TavilyProvider",
     "VertexProvider",

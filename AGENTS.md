@@ -31,6 +31,12 @@ The same table lives in `docs/agents/README.md`.
 | Provider: ollama | `docs/agents/providers/ollama.md` | ollama work: why 0 new keys, GitHub code-search semantics, `/v1/models` is public, gpt-load wedge |
 | Provider: tavily (+ hikari push) | `docs/agents/providers/tavily.md` | tavily work: `/usage` 200 is not usable, per-exit bulk 429 blocks, wait-pool recovery, hikari target |
 | Provider: brave | `docs/agents/providers/brave.md` | brave scans/validation/push or its config preset |
+| Provider: commandcode | `docs/agents/providers/commandcode.md` | commandcode scans/validation/push: `/provider/v1/models` public trap (identical 18,461-byte 200), chat-probe judge, undetermined key shape |
+| Provider: clinepass | `docs/agents/providers/clinepass.md` | clinepass scans/validation/push: `/api/v1/models` public trap (identical 41,064-byte 200), chat-probe judge, probe id from public recommended-models catalog |
+| Provider: siliconflow | `docs/agents/providers/siliconflow.md` | siliconflow scans/validation/push: `sk-`+48-lowercase corpus shape, clean `/v1/models` 401 gate, 404/20012→NO_MODEL wait routing, free-tier docs evidence |
+| Provider: gemini | `docs/agents/providers/gemini.md` | gemini scans/validation: `/v1beta/models` list gate is real (403 no-key, 400 API_KEY_INVALID for bad keys), width-39 `AIza` corpus shape, `RESOURCE_EXHAUSTED`→NO_QUOTA pin |
+| Provider: doubao (Volcengine Ark) | `docs/agents/providers/doubao.md` | doubao scans/validation/push: UUID-v4 corpus shape, clean `/api/v3` 401 gate, 404→NO_MODEL wait routing, push-protection supply suppression |
+| Provider: mistral | `docs/agents/providers/mistral.md` | mistral scans/validation: real `/v1/models` 401 gate (no-key and bad-key alike), prefix-less 32-alnum corpus shape (env+domain anchored pattern), unverified `mistral-small-latest` probe id, 429 rate-limit vs quota split |
 | Provider: exa | `docs/agents/providers/exa.md` | exa scans/validation/push, plan/quota handling or its config preset |
 | Infra: egress routing | `docs/agents/egress.md` | changing `_pick_proxy`, `HARVESTER_PROXY*`, the egress pool, exit failover or compose proxy env |
 | Audit: 2026-09-28 yield cull | `docs/agents/audits/2026-09-28-yield-cull.md` | deciding whether to enable/disable a provider (cull rationale) |
@@ -89,8 +95,11 @@ not on fnos:
 ssh admin@fnos
 cd /home/admin/harvester
 git fetch origin && git pull origin main                   # bring in the new compose/image ref
-docker pull ghcr.1ms.run/highkay/harvester:latest          # GHCR via the CN mirror
-docker tag ghcr.1ms.run/highkay/harvester:latest ghcr.io/highkay/harvester:latest
+docker pull ghcr.io/highkay/harvester:latest               # direct pull FIRST (measured 2026-10-29)
+# Only if that pull fails: check the docker daemon's proxy config (the daemon,
+# not the shell, needs HTTP_PROXY/HTTPS_PROXY), then fall back to the CN mirror:
+#   docker pull ghcr.1ms.run/highkay/harvester:latest
+#   docker tag ghcr.1ms.run/highkay/harvester:latest ghcr.io/highkay/harvester:latest
 cp docker-compose.hostnet.yml docker-compose.yml           # fnos runs host networking
 docker compose up -d
 curl -s http://localhost:8002/health                       # expect {"status":"ok"}

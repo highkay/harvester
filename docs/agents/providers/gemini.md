@@ -60,8 +60,9 @@ vs 200 models list.
 
 ## Known behaviour (pinned as shipped, not changed here)
 
-`provider/gemini.py` is out of scope for this landing, so three classifications
-are recorded as risks rather than fixed:
+`provider/gemini.py` was out of scope for the landing that added this doc, so
+the classifications below were recorded as risks. Two of the three are still
+shipped as-is; the 200-body one was fixed afterwards by `91b410e`:
 
 - **403 carrying `PERMISSION_DENIED` → `INVALID_KEY`**. Google attaches that
   status to its "unregistered callers" 403 too, so a proxy/edge 403 of that
@@ -72,12 +73,14 @@ are recorded as risks rather than fixed:
   `RATE_LIMITED`. A free-tier per-minute limit therefore files the key as quota
   instead of retryable; the key is not discarded as invalid. A 429 without the
   quota markers does fall through to `RATE_LIMITED` (retryable).
-- **An unparseable 200 body → `UNKNOWN`**. CheckStage files `UNKNOWN` in
-  `invalid-keys.txt`, i.e. a permanent discard; a proxy interstitial served
-  with 200 would burn a live key. The openai_like family already fixed this to
-  `SERVER_ERROR` (empty body) — gemini has not, and is a candidate follow-up.
+- **An empty or unparseable 200 body → `SERVER_ERROR`** (retryable), fixed by
+  `91b410e` for gemini (same fix the openai_like family already had). A proxy
+  interstitial served with 200 — or a truncated body — lands the key in
+  `wait-check-keys.txt` instead of the permanent `invalid-keys.txt` discard the
+  old `UNKNOWN` verdict caused. Only a PARSED JSON body whose `models` is not a
+  list still returns `UNKNOWN`.
 
-`tests/test_gemini_provider.py` pins all three behaviours with a note to update
+`tests/test_gemini_provider.py` pins these behaviours with a note to update
 the test together with any fix.
 
 ## Ops

@@ -64,6 +64,35 @@ def get_default_config() -> Dict[str, Any]:
         r"(?i)(?:Bearer\s+|[\"']\s*)?"
         r"(sk-(?!(?:ant|proj|svcacct)-)[A-Za-z0-9]{16,})"
     )
+    # SiliconFlow: measured 2026-10-29 over SILICONFLOW_API_KEY /
+    # api.siliconflow.cn / "siliconflow" "sk-" fragments — sk- + 48 lowercase
+    # alnum (11 of 12 non-placeholder hits), floor 32, no upper bound (serpapi
+    # fixed-width lesson). Placeholder names are excluded by name.
+    siliconflow_domain_pattern = (
+        r'(?i)(?:Bearer\s+|[\"\']\s*)?'
+        r"(sk-(?!(?:your|test|dummy|example|placeholder|changeme|xxx|fake|sample))[A-Za-z0-9]{32,})"
+    )
+    # Mistral: measured 2026-10-29 over MISTRAL_API_KEY / filename:.env /
+    # language: fragments - 4/4 real values were exactly 32 chars of mixed
+    # [A-Za-z0-9], with no prefix. A prefix-less 32-char alnum string is not
+    # greppable on its own, so the env name is the anchor here and the domain
+    # anchor (api.mistral.ai) widens to Bearer/quoted forms below. The corpus
+    # is placeholder-heavy (your_mistral_api_key / XXXXX / <mistral token>),
+    # hence the lookahead; the trailing guard stops capture of a 32-char
+    # prefix of a longer token.
+    mistral_task_pattern = (
+        r"(?i)(?:mistral[_-]?api[_-]?key)"
+        r"[\"'\]]{0,2}\s*[:=]\s*[\"']?"
+        r"(?!(?:your|test|dummy|example|placeholder|changeme|fake|sample|xxx))"
+        r"([A-Za-z0-9]{32})(?![A-Za-z0-9])"
+        r"[\"']?"
+    )
+    mistral_domain_pattern = (
+        r"(?i)(?:Bearer\s+|[\"']\s*)"
+        r"(?!(?:your|test|dummy|example|placeholder|changeme|fake|sample|xxx))"
+        r"([A-Za-z0-9]{32})(?![A-Za-z0-9])"
+        r"[\"']?"
+    )
     mimo_task_pattern = (
         r"(?i)(?:mimo[_-]?(?:api[_-]?)?key|XIAOMIMIMO[_-]?API[_-]?KEY|"
         r"MIMO_API_KEY|MIMO_TOKEN)"
@@ -500,6 +529,320 @@ def get_default_config() -> Dict[str, Any]:
                 },
             },
             {
+                "name": "commandcode",
+                "enabled": False,
+                "provider_type": "commandcode",
+                "use_api": True,
+                "max_pages": 1000,
+                "stages": {
+                    "search": True,
+                    "gather": True,
+                    "check": True,
+                    "inspect": True,
+                },
+                "extras": {},
+                "api": {
+                    "base_url": "https://api.commandcode.ai/provider/v1",
+                    "completion_path": "/chat/completions",
+                    "model_path": "/models",
+                    # Probe model id from the PUBLIC catalog (fetched
+                    # 2026-10-29): the models list is a trap (same 18,461-byte
+                    # 200 for no-key/bad-key) - fine for picking a probe
+                    # target, never for judging a key.
+                    "default_model": "google/gemini-3.1-flash-lite",
+                    "auth_key": "Authorization",
+                    "extra_headers": {},
+                    "api_version": "",
+                    "timeout": 30,
+                    "retries": 3,
+                    "use_proxy": True,
+                },
+                "patterns": {
+                    # Key shape undetermined (wave-0 2026-10-29: docs have
+                    # zero sk- hits; corpus sampling found no real literals),
+                    # so env-anchored extraction with a wide body class +
+                    # placeholder guard. Lockstep with
+                    # examples/config-commandcode.yaml.
+                    "key_pattern": (
+                        r"(?i)(?:commandcode[_-]?api[_-]?key|cmd[_-]?api[_-]?key)"
+                        r'["\'\]]{0,2}\s*[:=]\s*["\']?'
+                        r"((?!your[_-])[A-Za-z0-9_\-]{20,})[\"']?"
+                    ),
+                    "address_pattern": "",
+                    "endpoint_pattern": "",
+                    "model_pattern": "",
+                },
+                "conditions": [
+                    {"query": '"COMMANDCODE_API_KEY"'},
+                    {"query": '"CMD_API_KEY"'},
+                    {
+                        "query": '"api.commandcode.ai"',
+                        "patterns": {
+                            "key_pattern": (
+                                r'(?i)(?:Bearer\s+|["\']\s*)'
+                                r"((?!your[_-])[A-Za-z0-9_\-]{20,})[\"']?"
+                            )
+                        },
+                    },
+                    {
+                        "query": '"api.commandcode.ai" "Authorization"',
+                        "patterns": {
+                            "key_pattern": (
+                                r'(?i)(?:Bearer\s+|["\']\s*)'
+                                r"((?!your[_-])[A-Za-z0-9_\-]{20,})[\"']?"
+                            )
+                        },
+                    },
+                    {"query": '"CMD_API_KEY" extension:env'},
+                    {"query": '"COMMANDCODE_API_KEY" extension:env'},
+                    {"query": '"COMMANDCODE_API_KEY" extension:yaml'},
+                ],
+                "rate_limit": {"base_rate": 0.2, "burst_limit": 2, "adaptive": True},
+                "storage": {
+                    "directory": "",
+                    "plan": "",
+                },
+            },
+            {
+                "name": "clinepass",
+                "enabled": False,
+                "provider_type": "clinepass",
+                "use_api": True,
+                "max_pages": 1000,
+                "stages": {
+                    "search": True,
+                    "gather": True,
+                    "check": True,
+                    "inspect": True,
+                },
+                "extras": {},
+                "api": {
+                    "base_url": "https://api.cline.bot/api/v1",
+                    "completion_path": "/chat/completions",
+                    "model_path": "/models",
+                    # Probe model id from the PUBLIC catalog
+                    # /api/v1/ai/cline/recommended-models (fetched
+                    # 2026-10-29): prefer a cline-free/* text id. The models
+                    # list is a trap (same 41,064-byte 200 for no-key/bad-key)
+                    # - fine for picking a probe target, never for judging.
+                    "default_model": "cline-free/solar-mini4",
+                    "auth_key": "Authorization",
+                    "extra_headers": {},
+                    "api_version": "",
+                    "timeout": 30,
+                    "retries": 3,
+                    "use_proxy": True,
+                },
+                "patterns": {
+                    # Key shape undetermined (wave-0 2026-10-29: docs have
+                    # zero sk- hits; corpus sampling found no real literals),
+                    # so env-anchored extraction with a wide body class +
+                    # placeholder guard. Lockstep with
+                    # examples/config-clinepass.yaml.
+                    "key_pattern": (
+                        r"(?i)(?:clinepass[_-]?api[_-]?key|cline[_-]?api[_-]?key)"
+                        r'["\'\]]{0,2}\s*[:=]\s*["\']?'
+                        r"((?!your[_-])[A-Za-z0-9_\-]{20,})[\"']?"
+                    ),
+                    "address_pattern": "",
+                    "endpoint_pattern": "",
+                    "model_pattern": "",
+                },
+                "conditions": [
+                    {"query": '"CLINEPASS_API_KEY"'},
+                    {"query": '"CLINE_API_KEY"'},
+                    {
+                        "query": '"api.cline.bot"',
+                        "patterns": {
+                            "key_pattern": (
+                                r'(?i)(?:Bearer\s+|["\']\s*)'
+                                r"((?!your[_-])[A-Za-z0-9_\-]{20,})[\"']?"
+                            )
+                        },
+                    },
+                    {
+                        "query": '"api.cline.bot" "Authorization"',
+                        "patterns": {
+                            "key_pattern": (
+                                r'(?i)(?:Bearer\s+|["\']\s*)'
+                                r"((?!your[_-])[A-Za-z0-9_\-]{20,})[\"']?"
+                            )
+                        },
+                    },
+                    {"query": '"CLINEPASS_API_KEY" extension:env'},
+                    {"query": '"CLINE_API_KEY" extension:env'},
+                    {"query": '"CLINEPASS_API_KEY" extension:yaml'},
+                ],
+                "rate_limit": {"base_rate": 0.2, "burst_limit": 2, "adaptive": True},
+                "storage": {
+                    "directory": "",
+                    "plan": "",
+                },
+            },
+            {
+                "name": "huawei-maas",
+                "enabled": False,
+                "provider_type": "huawei-maas",
+                "use_api": True,
+                "max_pages": 1000,
+                "stages": {
+                    "search": True,
+                    "gather": True,
+                    "check": True,
+                    "inspect": True,
+                },
+                "extras": {},
+                "api": {
+                    "base_url": "https://api.modelarts-maas.com/openai/v1",
+                    "completion_path": "/chat/completions",
+                    "model_path": "/models",
+                    # UNVERIFIED probe id (wave-0 2026-10-29: gate confirmed,
+                    # no real key to list /models with). A wrong id answers
+                    # 404 -> NO_MODEL (wait-check), never INVALID_KEY.
+                    "default_model": "DeepSeek-V3.1",
+                    "auth_key": "Authorization",
+                    "extra_headers": {},
+                    "api_version": "",
+                    "timeout": 30,
+                    "retries": 3,
+                    "use_proxy": False,
+                },
+                "patterns": {
+                    # Key shape UNDETERMINED (wave-0 2026-10-29: three anchors
+                    # x 10 samples carried zero real key literals), so
+                    # env-anchored extraction with a WIDE body class +
+                    # placeholder guard; the domain anchor
+                    # (api.modelarts-maas.com) is the real filter. Lockstep
+                    # with examples/config-huawei-maas.yaml.
+                    "key_pattern": (
+                        r"(?i)(?:huawei[_-]?maas[_-]?(?:api[_-]?)?key|maas[_-]?api[_-]?key)"
+                        r'["\'\]]{0,2}\s*[:=]\s*["\']?'
+                        r"((?!your[_-])[A-Za-z0-9_\-]{20,})[\"']?"
+                    ),
+                    "address_pattern": "",
+                    "endpoint_pattern": "",
+                    "model_pattern": "",
+                },
+                "conditions": [
+                    {"query": '"MAAS_API_KEY" "modelarts"'},
+                    {"query": '"MAAS_API_KEY" "modelarts-maas"'},
+                    {"query": '"HUAWEI_MAAS_API_KEY"'},
+                    {
+                        "query": '"api.modelarts-maas.com"',
+                        "patterns": {
+                            "key_pattern": (
+                                r'(?i)(?:Bearer\s+|["\']\s*)?'
+                                r"((?!your[_-])[A-Za-z0-9_\-]{20,})"
+                            )
+                        },
+                    },
+                    {
+                        "query": '"api.modelarts-maas.com" "Authorization"',
+                        "patterns": {
+                            "key_pattern": (
+                                r'(?i)(?:Bearer\s+|["\']\s*)?'
+                                r"((?!your[_-])[A-Za-z0-9_\-]{20,})"
+                            )
+                        },
+                    },
+                    {"query": '"MAAS_API_KEY" "modelarts-maas" extension:env'},
+                    {
+                        "query": '"api.modelarts-maas.com" extension:yaml',
+                        "patterns": {
+                            "key_pattern": (
+                                r'(?i)(?:Bearer\s+|["\']\s*)?'
+                                r"((?!your[_-])[A-Za-z0-9_\-]{20,})"
+                            )
+                        },
+                    },
+                ],
+                "rate_limit": {"base_rate": 0.2, "burst_limit": 2, "adaptive": True},
+                "storage": {
+                    "directory": "",
+                    "plan": "",
+                },
+            },
+            {
+                "name": "doubao",
+                "enabled": False,
+                "provider_type": "doubao",
+                "use_api": True,
+                "max_pages": 1000,
+                "stages": {
+                    "search": True,
+                    "gather": True,
+                    "check": True,
+                    "inspect": True,
+                },
+                "extras": {},
+                "api": {
+                    "base_url": "https://ark.cn-beijing.volces.com",
+                    "completion_path": "/api/v3/chat/completions",
+                    "model_path": "/api/v3/models",
+                    # Measured 2026-10-29 (wave0-cn.md probe b): latest
+                    # seed-2.1-pro id in the pay-as-you-go /api/v3 catalog.
+                    # A 404 on it routes to NO_MODEL (wait-check), never
+                    # INVALID_KEY - provider/doubao.py pins that.
+                    "default_model": "doubao-seed-2-1-pro-260915",
+                    "auth_key": "Authorization",
+                    "extra_headers": {},
+                    "api_version": "",
+                    "timeout": 30,
+                    "retries": 3,
+                    "use_proxy": False,  # CN endpoint - connect directly
+                },
+                "patterns": {
+                    # Ark keys are UUID v4 (measured 2026-10-29: 16/16
+                    # captured literals lowercase hex 8-4-4-4-12). Env-anchored
+                    # extraction; the lookahead drops the all-zeros placeholder
+                    # UUID. Lockstep with examples/config-doubao.yaml.
+                    "key_pattern": (
+                        r"(?i)(?:ark[_-]?api[_-]?key|volcengine[_-]?api[_-]?key)"
+                        r'["\'\]]{0,2}\s*[:=]\s*["\']?'
+                        r"((?!00000000-0000)[0-9a-f]{8}-[0-9a-f]{4}-"
+                        r"[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})[\"']?"
+                    ),
+                    "address_pattern": "",
+                    "endpoint_pattern": "",
+                    "model_pattern": "",
+                },
+                "conditions": [
+                    {"query": '"ARK_API_KEY"'},
+                    {"query": '"VOLCENGINE_API_KEY"'},
+                    {
+                        "query": '"ark.cn-beijing.volces.com"',
+                        "patterns": {
+                            "key_pattern": (
+                                r"(?i)(?:Bearer\s+|[\"']\s*)"
+                                r"((?!00000000-0000)[0-9a-f]{8}-[0-9a-f]{4}-"
+                                r"[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
+                            )
+                        },
+                    },
+                    {
+                        "query": '"ark.cn-beijing.volces.com" "Authorization"',
+                        "patterns": {
+                            "key_pattern": (
+                                r"(?i)(?:Bearer\s+|[\"']\s*)"
+                                r"((?!00000000-0000)[0-9a-f]{8}-[0-9a-f]{4}-"
+                                r"[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
+                            )
+                        },
+                    },
+                    {"query": '"ARK_API_KEY" extension:env'},
+                    {"query": '"ARK_API_KEY" extension:yaml'},
+                    {"query": '"ARK_API_KEY" extension:json'},
+                    {"query": '"VOLCENGINE_API_KEY" extension:env'},
+                ],
+                # Lockstep with the hardened providers: 0.2 req/s = 1 per 5 s.
+                # Keep lockstep with examples/config-doubao.yaml.
+                "rate_limit": {"base_rate": 0.2, "burst_limit": 2, "adaptive": True},
+                "storage": {
+                    "directory": "",
+                    "plan": "",
+                },
+            },
+            {
                 "name": "exa",
                 "enabled": False,
                 "provider_type": "exa",
@@ -710,6 +1053,87 @@ def get_default_config() -> Dict[str, Any]:
                     },
                 ],
                 "rate_limit": {"base_rate": 2.0, "burst_limit": 10, "adaptive": True},
+                "storage": {
+                    "directory": "",
+                    "plan": "",
+                },
+            },
+            {
+                "name": "siliconflow",
+                "enabled": False,
+                "provider_type": "siliconflow",
+                "use_api": True,
+                "max_pages": 1000,
+                "stages": {
+                    "search": True,
+                    "gather": True,
+                    "check": True,
+                    "inspect": True,
+                },
+                "extras": {},
+                "api": {
+                    "base_url": "https://api.siliconflow.cn",
+                    "completion_path": "/v1/chat/completions",
+                    "model_path": "/v1/models",
+                    # UNVERIFIED probe id (wave-0 2026-10-29: the free-model
+                    # list is login-walled). A wrong id answers 404 / 400 code
+                    # 20012 -> NO_MODEL (wait-check), never INVALID_KEY.
+                    "default_model": "Qwen/Qwen2.5-7B-Instruct",
+                    "auth_key": "Authorization",
+                    "extra_headers": {},
+                    "api_version": "",
+                    "timeout": 30,
+                    "retries": 3,
+                    "use_proxy": False,
+                },
+                "patterns": {
+                    # Measured 2026-10-29: sk- + 48 lowercase alnum (11 of 12
+                    # non-placeholder corpus hits), floor 32, no upper bound
+                    # (serpapi fixed-width lesson). Env-anchored only at task
+                    # level; domain dorks widen below. Lockstep with
+                    # examples/config-siliconflow.yaml.
+                    "key_pattern": (
+                        r"(?i)(?:siliconflow[_-]?(?:api[_-]?)?key)"
+                        r'["\'\]]{0,2}\s*[:=]\s*["\']?'
+                        r"(sk-(?!(?:your|test|dummy|example|placeholder|changeme|xxx|fake|sample))[A-Za-z0-9]{32,})[\"']?"
+                    ),
+                    "address_pattern": "",
+                    "endpoint_pattern": "",
+                    "model_pattern": "",
+                },
+                "conditions": [
+                    {"query": '"SILICONFLOW_API_KEY"'},
+                    {"query": '"SILICONFLOW_API_KEY="'},
+                    {"query": '"SILICONFLOW_API_KEY:"'},
+                    {"query": '"siliconflow_api_key"'},
+                    {
+                        "query": '"api.siliconflow.cn"',
+                        "patterns": {"key_pattern": siliconflow_domain_pattern},
+                    },
+                    {
+                        "query": '"api.siliconflow.cn" "Authorization"',
+                        "patterns": {"key_pattern": siliconflow_domain_pattern},
+                    },
+                    {
+                        "query": '"siliconflow" "sk-"',
+                        "patterns": {"key_pattern": siliconflow_domain_pattern},
+                    },
+                    {"query": '"SILICONFLOW_API_KEY" language:Python'},
+                    {
+                        "query": '"api.siliconflow.cn" extension:env',
+                        "patterns": {"key_pattern": siliconflow_domain_pattern},
+                    },
+                    {
+                        "query": '"siliconflow" extension:yaml',
+                        "patterns": {"key_pattern": siliconflow_domain_pattern},
+                    },
+                    {
+                        "query": '"siliconflow" extension:json',
+                        "patterns": {"key_pattern": siliconflow_domain_pattern},
+                    },
+                ],
+                # Hardened-provider pace: 0.2 req/s = 5 s/key.
+                "rate_limit": {"base_rate": 0.2, "burst_limit": 2, "adaptive": True},
                 "storage": {
                     "directory": "",
                     "plan": "",
@@ -1076,6 +1500,81 @@ def get_default_config() -> Dict[str, Any]:
                     },
                     {"query": '"mimo" extension:yaml'},
                 ],
+                "rate_limit": {"base_rate": 0.2, "burst_limit": 2, "adaptive": True},
+                "storage": {
+                    "directory": "",
+                    "plan": "",
+                },
+            },
+            {
+                "name": "mistral",
+                "enabled": False,
+                "provider_type": "mistral",
+                "use_api": True,
+                "max_pages": 1000,
+                "stages": {
+                    "search": True,
+                    "gather": True,
+                    "check": True,
+                    "inspect": True,
+                },
+                "extras": {},
+                "api": {
+                    "base_url": "https://api.mistral.ai/v1",
+                    "completion_path": "/chat/completions",
+                    "model_path": "/models",
+                    # Probe-model liveness UNVERIFIED (wave-0 2026-10-29 probed
+                    # the auth layer only). A retired id answers 404/422 ->
+                    # NO_MODEL / BAD_REQUEST (wait-check), never INVALID_KEY.
+                    "default_model": "mistral-small-latest",
+                    "auth_key": "Authorization",
+                    "extra_headers": {},
+                    "api_version": "",
+                    "timeout": 30,
+                    "retries": 3,
+                    "use_proxy": True,
+                },
+                "patterns": {
+                    # Measured 2026-10-29: 32-char mixed alnum, no prefix.
+                    # Env-anchored only at task level; the domain-anchored
+                    # conditions widen to Bearer/quoted forms. Lockstep with
+                    # examples/config-mistral.yaml.
+                    "key_pattern": mistral_task_pattern,
+                    "address_pattern": "",
+                    "endpoint_pattern": "",
+                    "model_pattern": "",
+                },
+                "conditions": [
+                    {"query": '"MISTRAL_API_KEY"'},
+                    {"query": '"MISTRAL_API_KEY="'},
+                    {"query": '"MISTRAL_API_KEY:"'},
+                    {"query": '"mistral_api_key"'},
+                    {"query": '"MISTRAL_API_KEY" filename:.env'},
+                    {"query": '"MISTRAL_API_KEY" language:Python'},
+                    {"query": '"MISTRAL_API_KEY" language:Shell'},
+                    {"query": '"MISTRAL_API_KEY" language:YAML'},
+                    {"query": '"MISTRAL_API_KEY" language:JavaScript'},
+                    {"query": '"MISTRAL_API_KEY" language:JSON'},
+                    {"query": '"MISTRAL_API_KEY" language:Go'},
+                    {"query": '"MISTRAL_API_KEY" language:Java'},
+                    {
+                        "query": '"api.mistral.ai" "Bearer"',
+                        "patterns": {"key_pattern": mistral_domain_pattern},
+                    },
+                    {
+                        "query": '"api.mistral.ai" "Authorization"',
+                        "patterns": {"key_pattern": mistral_domain_pattern},
+                    },
+                    {
+                        "query": '"api.mistral.ai" extension:env',
+                        "patterns": {"key_pattern": mistral_domain_pattern},
+                    },
+                    {
+                        "query": '"api.mistral.ai" extension:yaml',
+                        "patterns": {"key_pattern": mistral_domain_pattern},
+                    },
+                ],
+                # Hardened-provider pace: 0.2 req/s = 5 s/key.
                 "rate_limit": {"base_rate": 0.2, "burst_limit": 2, "adaptive": True},
                 "storage": {
                     "directory": "",
