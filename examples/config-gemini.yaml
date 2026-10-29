@@ -1,0 +1,134 @@
+# Google Gemini scan configuration (task: gemini)
+# Endpoint: https://generativelanguage.googleapis.com   (international, proxied)
+#
+# Validation is the lightweight models.list gate (GET /v1beta/models?pageSize=1)
+# in provider/gemini.py — the provider is NOT modified by this landing. Wave-0
+# (2026-10-29) proved the gate is not a public trap: no key -> 403, any bad key
+# -> 400 API_KEY_INVALID across query + x-goog-api-key header forms, never 200.
+# Results are written to ./data-gemini/providers/gemini/*.txt
+
+global:
+  workspace: "./data-gemini"
+  max_retries_requeued: 3
+  # Per-run corpus bound (house rule since the 2026-10-24 wave).
+  max_links_per_run: 9000
+  proxy: ""
+  github_credentials:
+    sessions:
+      - "your_github_session_here"
+    tokens:
+      - "your_github_token_here"
+    strategy: "round_robin"
+  user_agents:
+    - "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
+
+pipeline:
+  threads:
+    search: 1
+    gather: 4
+    check: 2
+    inspect: 1
+  queue_sizes:
+    search: 100000
+    gather: 200000
+    check: 500000
+    inspect: 1000000
+
+monitoring:
+  update_interval: 2.0
+  error_threshold: 0.1
+  queue_threshold: 1000000
+  memory_threshold: 1073741824
+  response_threshold: 5.0
+
+persistence:
+  batch_size: 50  # flush every 50 items (or save_interval seconds); 1 = a write+log per item
+  save_interval: 5
+  queue_interval: 60
+  snapshot_interval: 300
+  auto_restore: false  # clean start (replay ratchets the corpus)
+  shutdown_timeout: 30
+  format: txt
+
+ratelimits:
+  github_api:
+    base_rate: 0.15
+    burst_limit: 3
+    adaptive: true
+  gemini:
+    # Hardened-provider pace: 0.2 req/s = 5 s/key. The free tier is
+    # rate-limited, so the burst is kept small too.
+    base_rate: 0.2
+    burst_limit: 2
+    adaptive: true
+
+tasks:
+  - name: gemini
+    enabled: true
+    provider_type: gemini
+    use_api: true
+    # Pagination depth left at 1000 (inert: `_max_pages()` clamps to
+    # API_MAX_PAGES=10); the corpus is bounded by global.max_links_per_run.
+    max_pages: 1000
+    search_types: [code]
+    stages:
+      search: true
+      gather: true
+      check: true
+      inspect: true
+    api:
+      base_url: https://generativelanguage.googleapis.com
+      completion_path: /v1beta/models
+      model_path: /v1beta/models
+      # Same default as the config/defaults.py gemini preset. The check path
+      # is the models.list gate and never sends a model id, so this value only
+      # matters to inspect(); it is not a validity signal.
+      default_model: gemini-3.5-flash
+      # The provider injects its own x-goog-api-key header from the token;
+      # auth_key stays empty on purpose (mirrors the defaults preset).
+      auth_key: ""
+      extra_headers: {}
+      api_version: ""
+      timeout: 30
+      retries: 3
+      use_proxy: true  # international endpoint — route through egress
+    patterns:
+      # MEASURED shape (wave-0 2026-10-29, AIzaSy corpus): 27 of 28 unique
+      # samples are width 39 (AIza + 35), 'Sy' at positions 5-6 on all 28,
+      # charset includes '-' and '_'. This is the config/defaults.py gemini
+      # preset EXACTLY — candidate B (AIzaSy[A-Za-z0-9_-]{33}) hit the same
+      # 27/28 keys, i.e. no measurable precision gain, so the wider prefix is
+      # kept. Zero capture groups (house rule for a naked prefix pattern):
+      # findall returns the whole key. Env/domain dorks below narrow the search
+      # queries; the pattern body stays prefix-anchored.
+      key_pattern: AIza[0-9A-Za-z_-]{35}
+      address_pattern: ""
+      endpoint_pattern: ""
+      model_pattern: ""
+    conditions:
+      # Env-name dorks: the GEMINI_API_KEY anchor keeps env assignments (the
+      # main real-key source) in play.
+      - query: '"GEMINI_API_KEY"'
+      - query: '"GEMINI_API_KEY="'
+      - query: '"GEMINI_API_KEY:"'
+      - query: '"GEMINI_API_KEY" extension:env'
+      - query: '"GEMINI_API_KEY" language:Python'
+      # Domain-named dorks: blobs that reference the Generative Language host
+      # (client configs, Firebase/Expo app files, Kotlin/JS snippets).
+      - query: '"generativelanguage.googleapis.com"'
+      - query: '"generativelanguage.googleapis.com" "AIza"'
+      - query: '"generativelanguage.googleapis.com" "Authorization"'
+      - query: '"generativelanguage.googleapis.com" extension:yaml'
+      - query: '"generativelanguage.googleapis.com" extension:json'
+      - query: '"generativelanguage.googleapis.com" language:Python'
+      # Broad AIza surface (large corpus: measured ~2.44M hits for "AIza");
+      # the prefix pattern filters at extraction.
+      - query: '"AIza" "gemini"'
+      - query: '"AIza" language:JavaScript'
+    rate_limit:
+      base_rate: 0.2
+      burst_limit: 2
+      adaptive: true
+    storage:
+      directory: ""
+      plan: ""
