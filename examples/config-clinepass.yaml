@@ -1,0 +1,127 @@
+# ClinePass scan configuration (task: clinepass)
+# Endpoint: https://api.cline.bot/api/v1
+# Judge: /api/v1/models is a PUBLIC trap (measured 2026-10-29: no-key and
+# bad-key both receive the same 41,064-byte 200 across both socks exits), so
+# validation is a minimal chat completion (max_tokens=1) — a bad key answers
+# 401 {"error":"Unauthorized: ..."}.
+# Results are written to ./data-clinepass/providers/clinepass/*.txt
+
+global:
+  workspace: "./data-clinepass"
+  max_retries_requeued: 3
+  # Per-run corpus bound (house rule since the 2026-10-24 wave).
+  max_links_per_run: 9000
+  proxy: ""
+  github_credentials:
+    sessions:
+      - "your_github_session_here"
+    tokens:
+      - "your_github_token_here"
+    strategy: "round_robin"
+  user_agents:
+    - "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
+
+pipeline:
+  threads:
+    search: 1
+    gather: 4
+    check: 2
+    inspect: 1
+  queue_sizes:
+    search: 100000
+    gather: 200000
+    check: 500000
+    inspect: 1000000
+
+monitoring:
+  update_interval: 2.0
+  error_threshold: 0.1
+  queue_threshold: 1000000
+  memory_threshold: 1073741824
+  response_threshold: 5.0
+
+persistence:
+  batch_size: 50  # flush every 50 items (or save_interval seconds); 1 = a write+log per item
+  save_interval: 5
+  queue_interval: 60
+  snapshot_interval: 300
+  auto_restore: false  # clean start (replay ratchets the corpus)
+  shutdown_timeout: 30
+  format: txt
+
+ratelimits:
+  github_api:
+    base_rate: 0.15
+    burst_limit: 3
+    adaptive: true
+  clinepass:
+    # Hardened-provider pace: 0.2 req/s = 5 s/key.
+    base_rate: 0.2
+    burst_limit: 2
+    adaptive: true
+
+tasks:
+  - name: clinepass
+    enabled: true
+    provider_type: clinepass
+    use_api: true
+    # Pagination depth left at 1000 (inert: `_max_pages()` clamps to
+    # API_MAX_PAGES=10); the corpus is bounded by global.max_links_per_run.
+    max_pages: 1000
+    search_types: [code]
+    stages:
+      search: true
+      gather: true
+      check: true
+      inspect: true
+    api:
+      base_url: https://api.cline.bot/api/v1
+      completion_path: /chat/completions
+      model_path: /models
+      # Probe model id from the PUBLIC catalog
+      # (GET /api/v1/ai/cline/recommended-models, fetched 2026-10-29):
+      # prefer a cline-free/* id; solar-mini4 is a text model. The catalog
+      # is public, so the id proves nothing about any key.
+      default_model: cline-free/solar-mini4
+      auth_key: Authorization
+      extra_headers: {}
+      api_version: ""
+      timeout: 30
+      retries: 3
+      use_proxy: true  # route via egress pool
+    patterns:
+      # Key shape is UNDETERMINED (wave-0 2026-10-29: official docs have zero
+      # sk- hits; 4 queries x 10 samples carried no real key literal), so the
+      # task-level pattern only fires on CLINEPASS_API_KEY / CLINE_API_KEY
+      # env-name assignments, with a wide body class and a placeholder guard.
+      # Domain-anchored conditions override with a Bearer/quoted variadic.
+      key_pattern: >-
+        (?i)(?:clinepass[_-]?api[_-]?key|cline[_-]?api[_-]?key)["'\]]{0,2}\s*[:=]\s*["']?((?!your[_-])[A-Za-z0-9_\-]{20,})["']?
+      address_pattern: ""
+      endpoint_pattern: ""
+      model_pattern: ""
+    conditions:
+      # Each GitHub API search query has its own 1000-result window.
+      - query: '"CLINEPASS_API_KEY"'
+      - query: '"CLINE_API_KEY"'
+      # Domain-anchored blobs: allow Bearer/quoted keys without the env name.
+      # The 20-char floor keeps the header name ("Authorization", 13 chars)
+      # from self-matching.
+      - query: '"api.cline.bot"'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|["']\s*)((?!your[_-])[A-Za-z0-9_\-]{20,})["']?
+      - query: '"api.cline.bot" "Authorization"'
+        patterns:
+          key_pattern: >-
+            (?i)(?:Bearer\s+|["']\s*)((?!your[_-])[A-Za-z0-9_\-]{20,})["']?
+      - query: '"CLINEPASS_API_KEY" extension:env'
+      - query: '"CLINE_API_KEY" extension:env'
+      - query: '"CLINEPASS_API_KEY" extension:yaml'
+    rate_limit:
+      base_rate: 0.2
+      burst_limit: 2
+      adaptive: true
+    storage:
+      directory: ""
+      plan: ""
