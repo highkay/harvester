@@ -31,6 +31,9 @@ env/
 ENV/
 .venv/
 .env/
+.env
+.env.*
+!.env.example
 
 # IDE and editor files
 .vscode/
@@ -111,3 +114,4 @@ tests/
 queue_state/
 providers/
 .issues/
+.omo/
