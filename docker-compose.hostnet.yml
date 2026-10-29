@@ -7,7 +7,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.web
-    image: harvester-web:latest
+    image: ghcr.io/highkay/harvester:latest
     container_name: harvester-web
     network_mode: host  # 2026-09-21: bypass docker NAT — container-direct egress to api.z.ai was lossy (host-direct 5/5 fast)
     # ports:            # host networking: the app binds WEB_PORT directly

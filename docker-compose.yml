@@ -7,7 +7,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.web
-    image: harvester-web:latest
+    image: ghcr.io/highkay/harvester:latest
     container_name: harvester-web
     ports:
       - "8000:8000"

@@ -21,9 +21,14 @@ keys to configured targets (gpt-load / TavilyProxyManager / local token store).
 | **Production** | `admin@fnos` (SSH) | `http://<fnos-ip>:8002` | `/home/admin/harvester` | docker compose, data lives in `./data`, DB `data/harvester.db` (has 5 tokens, 40 push_logs) |
 | **Dev / backup** | this workstation (Windows, `F:\git\harvester`) | `http://127.0.0.1:8000` | `F:\git\harvester` | local docker compose from this repo |
 
-Production container: `harvester-web` (image built locally on fnos via
-`docker compose up -d --build`). fnos git state is often **ahead of
-`origin/main` by local commits** (verify with `git status` before assuming).
+Production container: `harvester-web`. As of 2026-10-29 the image is built by
+CI on every push to `main` (or a manual `workflow_dispatch`) and published as
+`ghcr.io/highkay/harvester:latest` + `sha-<sha7>` (see
+`.github/workflows/release-image.yml`). Both compose files now set
+`image: ghcr.io/highkay/harvester:latest`, with the `build:` block retained as a
+local fallback, so fnos no longer needs a local `docker build`. fnos git state
+is often **ahead of `origin/main` by local commits** (verify with `git status`
+before assuming).
 fnos has local edits to `Dockerfile.web` /
 `docker-compose.yml` and a `docker-compose.yml.bak.20260812` backup — do not
 clobber those blindly.
@@ -41,21 +46,30 @@ restore `Dockerfile.web`, then `cp docker-compose.hostnet.yml docker-compose.yml
 recreate/build reads them).
 ### How to deploy to production (fnos)
 
+Primary path — the image is built by CI (push to `main` / `workflow_dispatch`),
+not on fnos:
+
 ```bash
 ssh admin@fnos
 cd /home/admin/harvester
-git fetch origin && git log --oneline origin/main..HEAD   # review local-only commits first
-git pull origin main                                       # then bring in remote
-docker compose up -d --build                               # rebuild + restart
+git fetch origin && git pull origin main                   # bring in the new compose/image ref
+docker pull ghcr.1ms.run/highkay/harvester:latest          # GHCR via the CN mirror
+docker tag ghcr.1ms.run/highkay/harvester:latest ghcr.io/highkay/harvester:latest
+cp docker-compose.hostnet.yml docker-compose.yml           # fnos runs host networking
+docker compose up -d
 curl -s http://localhost:8002/health                       # expect {"status":"ok"}
 ```
 
 Before pulling, review fnos-local commits (`git log origin/main..HEAD`) so the
-update preserves intentional local changes (reverts, port/volume tweaks).
+update preserves intentional local changes, and reconcile drift (see the warning
+above) before the pull. Re-applying the hostnet `cp` is idempotent and keeps
+prod from reverting to bridge networking.
 
-**Working recipe (2026-09-23 — `--build` is broken on fnos, see the ops section)**:
-the fnos repo dir is NOT a bind-mount for code (only `./data:/app/data` is), so a
-deployed container is `image + whatever was cp'd`. Align + publish with:
+**Emergency-only fallback (2026-09-23 cp-overlay recipe — superseded by the CI
+image flow above; use it only when GHCR is unreachable or a fix must ship
+without waiting for CI)**. The fnos repo dir is NOT a bind-mount for code (only
+`./data:/app/data` is), so a deployed container is `image + whatever was cp'd`.
+Align + publish with:
 
 ```bash
 # on fnos, in /home/admin/harvester (repo must equal the SHA you validated)
