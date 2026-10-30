@@ -71,6 +71,13 @@ never a key discard. The pilot run must confirm the id against a live key's
 ## Ops
 
 - `use_proxy: true` — api.mistral.ai is reached through the egress pool.
+- Egress pin (2026-10-30): plain `socks5://` to api.mistral.ai fails with
+  SSLError, so every check lands in the retryable `network_error` bucket
+  (run `179860a9` wedged at wait-check, 0 invalid); `socks5h://` (remote DNS)
+  answers 401 for a bogus key (measured on all three exits 1080/1090/1091).
+  Both compose files now default `HARVESTER_PROXY_MISTRAL` to
+  `socks5h://192.168.1.18:1090` so mistral pins a dedicated socks5h host
+  instead of inheriting the global plain socks5 rotation.
 - `rate_limit` 0.2/2 (hardened-provider pace, 5 s per key).
 - `global.max_links_per_run: 9000`, `search_types: [code]`.
 - Schedule seed: `0 5 * * sun` (weekly floor). Sunday 05:00 follows deepseek
