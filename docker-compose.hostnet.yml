@@ -77,6 +77,7 @@ services:
       # keep tavily on 1090/1091. Empty = inherit HARVESTER_PROXY.
       - HARVESTER_PROXY_TAVILY=${HARVESTER_PROXY_TAVILY:-}
       - HARVESTER_PROXY_BRAVE=${HARVESTER_PROXY_BRAVE:-socks5h://192.168.1.18:1080,socks5h://192.168.1.18:1090,socks5h://192.168.1.18:1091}  # socks5h = remote DNS; direct blocked, plain socks5 DNS-poisoned (t8-egress.md)
+      - HARVESTER_PROXY_MISTRAL=${HARVESTER_PROXY_MISTRAL:-socks5h://192.168.1.18:1090}  # socks5h = remote DNS; plain socks5 → SSLError → network_error (measured 2026-10-30, f3-qa.md §3)
       # Exa override — T2 measured api.exa.ai reachable on EVERY path (direct
       # + socks5/socks5h trio; bogus key → exact 401 everywhere), so NO proxy
       # pin is needed. Empty = inherit HARVESTER_PROXY.
