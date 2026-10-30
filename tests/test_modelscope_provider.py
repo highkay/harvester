@@ -43,6 +43,16 @@ _USERS_ME_401 = {
 
 _USERS_ME_URL = "https://modelscope.cn/openapi/v1/users/me"
 
+_COMPLETION_OK = json.dumps(
+    {
+        "id": "chatcmpl-123",
+        "object": "chat.completion",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "hi"}}],
+    }
+)
+
+_INFERENCE_URL = "https://api-inference.modelscope.cn/v1/chat/completions"
+
 UA_PATCH = "provider.openai_like.get_user_agent"
 SLEEP_PATCH = "provider.modelscope.time.sleep"
 
@@ -189,13 +199,121 @@ class TestModelScopeProviderCheck(unittest.TestCase):
         self.assertEqual(result.reason, ErrorReason.INVALID_KEY)
 
     def test_check_uses_hub_me_endpoint(self):
-        with _patch_request(FakeResponse(200, json.dumps(_USERS_ME_OK))) as req_mock:
+        with mock.patch(
+            "provider.modelscope.request",
+            side_effect=[
+                FakeResponse(200, json.dumps(_USERS_ME_OK)),
+                FakeResponse(200, _COMPLETION_OK),
+            ],
+        ) as req_mock:
             self.provider.check(token="ms-faketoken1234567890abcdef")
 
-        self.assertEqual(req_mock.call_args.args[0], "GET")
-        self.assertEqual(req_mock.call_args.args[1], _USERS_ME_URL)
-        headers = req_mock.call_args.kwargs["headers"]
+        self.assertEqual(len(req_mock.call_args_list), 2)
+        first = req_mock.call_args_list[0]
+        self.assertEqual(first.args[0], "GET")
+        self.assertEqual(first.args[1], _USERS_ME_URL)
+        headers = first.kwargs["headers"]
         self.assertEqual(headers["authorization"], "Bearer ms-faketoken1234567890abcdef")
+
+
+class TestModelScopeInferenceProbe(unittest.TestCase):
+    """Chat probe: the hub account gate passes, but only a real completion counts."""
+
+    def setUp(self):
+        self.provider = ModelScopeProvider(conditions=[_make_condition()], retries=3, timeout=5)
+        self._patchers = [
+            mock.patch(UA_PATCH, return_value="test-agent"),
+            mock.patch(SLEEP_PATCH),
+        ]
+        for patcher in self._patchers:
+            patcher.start()
+
+    def tearDown(self):
+        for patcher in self._patchers:
+            patcher.stop()
+
+    def _gate_then(self, probe_response):
+        """Patch the two-stage flow: users/me gate OK, then the probe response."""
+        return mock.patch(
+            "provider.modelscope.request",
+            side_effect=[FakeResponse(200, json.dumps(_USERS_ME_OK)), probe_response],
+        )
+
+    def test_valid_chat_completion(self):
+        with self._gate_then(FakeResponse(200, _COMPLETION_OK)):
+            result = self.provider.check(token="ms-faketoken1234567890abcdef")
+
+        self.assertTrue(result.available)
+
+    def test_chat_401_invalid_key(self):
+        with self._gate_then(FakeResponse(401, '{"error":{"message":"unauthorized"}}')):
+            result = self.provider.check(token="ms-faketoken1234567890abcdef")
+
+        self.assertFalse(result.available)
+        self.assertEqual(result.reason, ErrorReason.INVALID_KEY)
+
+    def test_chat_403_invalid_key(self):
+        # No inference permission on an otherwise-authenticated token is useless
+        # to the pool: 403 -> INVALID_KEY (user-approved 2026-10-30), not NO_ACCESS.
+        with self._gate_then(FakeResponse(403, '{"message":"Forbidden"}')):
+            result = self.provider.check(token="ms-faketoken1234567890abcdef")
+
+        self.assertFalse(result.available)
+        self.assertEqual(result.reason, ErrorReason.INVALID_KEY)
+
+    def test_chat_429_quota_no_quota(self):
+        body = '{"error":{"message":"insufficient quota","type":"insufficient_quota"}}'
+        with self._gate_then(FakeResponse(429, body)):
+            result = self.provider.check(token="ms-faketoken1234567890abcdef")
+
+        self.assertFalse(result.available)
+        self.assertEqual(result.reason, ErrorReason.NO_QUOTA)
+
+    def test_chat_429_rate_limit(self):
+        with self._gate_then(FakeResponse(429, '{"error":{"type":"rate_limit_exceeded"}}')):
+            result = self.provider.check(token="ms-faketoken1234567890abcdef")
+
+        self.assertFalse(result.available)
+        self.assertEqual(result.reason, ErrorReason.RATE_LIMITED)
+
+    def test_chat_404_no_model(self):
+        # The probe model id disappeared upstream -> wait-check, not invalid.
+        with self._gate_then(FakeResponse(404, '{"error":{"message":"model not found"}}')):
+            result = self.provider.check(token="ms-faketoken1234567890abcdef")
+
+        self.assertFalse(result.available)
+        self.assertEqual(result.reason, ErrorReason.NO_MODEL)
+
+    def test_chat_garbage_200_retryable_never_unknown(self):
+        # Empty/unparseable 200 body: no key verdict possible -> retryable
+        # SERVER_ERROR (wait-check), never UNKNOWN (permanent discard).
+        for body in ("", "   ", "<html>captive portal</html>"):
+            with self.subTest(body=repr(body)):
+                with self._gate_then(FakeResponse(200, body)):
+                    result = self.provider.check(token="ms-faketoken1234567890abcdef")
+
+                self.assertFalse(result.available)
+                self.assertEqual(result.reason, ErrorReason.SERVER_ERROR)
+                self.assertTrue(result.reason.is_retryable())
+
+    def test_chat_probe_posts_minimal_completion(self):
+        with mock.patch(
+            "provider.modelscope.request",
+            side_effect=[
+                FakeResponse(200, json.dumps(_USERS_ME_OK)),
+                FakeResponse(200, _COMPLETION_OK),
+            ],
+        ) as req_mock:
+            result = self.provider.check(token="ms-faketoken1234567890abcdef")
+
+        self.assertTrue(result.available)
+        self.assertEqual(req_mock.call_count, 2)
+        probe = req_mock.call_args_list[1]
+        self.assertEqual(probe.args[0], "POST")
+        self.assertEqual(probe.args[1], _INFERENCE_URL)
+        payload = json.loads(probe.kwargs["data"].decode("utf8"))
+        self.assertEqual(payload["model"], self.provider._PROBE_MODEL)
+        self.assertEqual(payload["max_tokens"], 1)
 
 
 class TestModelScopeRedaction(unittest.TestCase):
