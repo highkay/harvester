@@ -55,11 +55,25 @@ is not hex, so the UUID pattern cannot capture them.
 - `VOLCENGINE_API_KEY` anchor measured 5,752 hits (2026-10-29); env-anchored
   extraction covers both names.
 
-## Push / wiring
+## Capability tiers and push wiring (2026-11-02)
 
-Scheduled (seed row in `web/scheduler.py`); gpt-load group wiring lands with
-the wave-3 wiring todo (plan todo 20), validation model
-`doubao-seed-2-1-pro-260915`.
+- `capability_tiers`: `seed` probes `doubao-seed-2-1-pro-260915`;
+  `thirdparty` probes `deepseek-v4-1-flash-261017` (Ark model list fetched
+  2026-11-02). The cheap gate runs first, then every tier gets its own
+  `max_tokens=1` completion probe.
+- Only an OK tier admits the key to `valid-keys-<tier>.txt`; the union
+  `valid-keys.txt` still receives every valid key. A non-OK tier never
+  cancels another tier's OK result. If no tier is OK but at least one is
+  RETRYABLE, the key goes to wait-check rather than permanent invalid.
+- fnos mappings: base `doubao` -> group 24, `doubao:seed` -> group 27,
+  `doubao:thirdparty` -> group 28. With tier files present, push fans out
+  to the tier groups and does not also push the union. A legacy run with
+  only the union file still uses the base group when every tier file is
+  empty or absent.
+- Production measurement on the first five harvested keys: two seed-only,
+  one dual-tier, one seed-OK/thirdparty-RETRYABLE, one dead. The real
+  tiered push added four keys to group 27 and one to group 28. Evidence:
+  `.omo/evidence/capability-20261030/prod-measure.md`.
 
 ## References
 
