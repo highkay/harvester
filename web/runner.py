@@ -12,6 +12,7 @@ push module can consume.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import sqlite3
@@ -54,6 +55,12 @@ _PUSH_RECOVERY_WINDOW_HOURS = 24
 # finally block, and no legitimate scan keeps one around for an hour after
 # the process that wrote it is gone.
 _RUNTIME_ORPHAN_AGE_SECONDS = 3600
+
+# Per-run metrics live under the workspace as one JSON file per run, keyed by
+# run_id. The yield-audit CLI (scripts/audit_yield.py) reads them best-effort
+# to expose gather/verdict counters and later cache hits; the directory is
+# created lazily and a write failure must never fail the run.
+_RUN_METRICS_DIR_NAME = "run-metrics"
 
 # ---------------------------------------------------------------------------
 # Workspace helper
@@ -509,6 +516,20 @@ class PipelineRunner:
                 f"links={links_total} materials={materials_total} "
                 f"duration={duration}s"
             )
+
+            # 5.5. Per-run JSON metrics (yield-audit bridge): snapshot this
+            # run's gather/verdict counters and persist them best-effort. A
+            # metrics-write failure must never fail or affect the run outcome
+            # — the audit CLI reads these files as optional enrichment.
+            try:
+                self._persist_run_metrics(
+                    self._capture_run_metrics(app, run_id, provider_name)
+                )
+            except Exception as exc:  # noqa: BLE001 — metrics must never fail the scan
+                logger.warning(
+                    f"Run metrics capture failed: provider={provider_name} "
+                    f"run_id={run_id} error={exc}"
+                )
 
             # 6. Record newly-added valid keys (delta since scan start) for
             # the dashboard. Best-effort — a capture failure must never fail
@@ -1307,6 +1328,89 @@ class PipelineRunner:
             return totals
         except Exception:
             return {}
+
+    def _verdict_counter_snapshot(self, app: Any) -> dict[str, int]:
+        """Check-stage verdict buckets of this run (enrichment, {} on failure).
+
+        Reads the same ``task_manager.stats().resource`` the existing
+        :meth:`_count_valid_keys` / :meth:`_count_total_keys_checked` consume —
+        ``valid`` / ``invalid`` / ``no_quota`` / ``wait_check`` / ``material``.
+        ``total`` is recomputed from the four verdict buckets so the JSON stays
+        consistent even for a mock resource without ``BaseKeyStats.total``.
+        Never raises.
+        """
+        try:
+            if app is None or app.task_manager is None:
+                return {}
+            stats = app.task_manager.stats()
+            resource = getattr(stats, "resource", None)
+            if resource is None:
+                return {}
+            snapshot: dict[str, int] = {}
+            for name in ("valid", "invalid", "no_quota", "wait_check", "material"):
+                try:
+                    snapshot[name] = int(getattr(resource, name))
+                except (AttributeError, TypeError, ValueError):
+                    snapshot[name] = 0
+            snapshot["total"] = (
+                snapshot["valid"]
+                + snapshot["invalid"]
+                + snapshot["no_quota"]
+                + snapshot["wait_check"]
+            )
+            return snapshot
+        except Exception:  # noqa: BLE001 — enrichment-only, snapshot must not raise
+            return {}
+
+    def _capture_run_metrics(
+        self, app: Any, run_id: str, provider_name: str
+    ) -> dict[str, Any]:
+        """Assemble this run's per-run JSON metrics payload (never raises).
+
+        Gather counters come from :meth:`_gather_counter_snapshot` and verdict
+        buckets from :meth:`_verdict_counter_snapshot`. ``cache_hits`` and
+        ``live_probes`` are the extension points for the terminal-verdict cache
+        (todo 6): today every checked verdict is a live probe and nothing hits
+        the cache, so ``cache_hits`` stays 0 and ``live_probes`` equals the
+        checked total.
+        """
+        verdict = self._verdict_counter_snapshot(app)
+        checked = verdict.get("total", 0)
+        return {
+            "schema_version": 1,
+            "run_id": run_id,
+            "provider_name": provider_name,
+            "captured_at": time.time(),
+            "gather": self._gather_counter_snapshot(app),
+            "verdict": verdict,
+            "checked": checked,
+            "live_probes": checked,
+            "cache_hits": 0,
+        }
+
+    def _persist_run_metrics(self, metrics: dict[str, Any]) -> bool:
+        """Write *metrics* to ``{workspace}/run-metrics/{run_id}.json``.
+
+        Best-effort: returns False (never raises) on any serialisation or I/O
+        failure, so a metrics-write problem can never fail or affect the run
+        outcome — the audit CLI treats these files as optional enrichment.
+        """
+        try:
+            run_id = str(metrics.get("run_id", "unknown"))
+            metrics_dir = Path(self._workspace) / _RUN_METRICS_DIR_NAME
+            metrics_dir.mkdir(parents=True, exist_ok=True)
+            dest = metrics_dir / f"{run_id}.json"
+            dest.write_text(
+                json.dumps(metrics, sort_keys=True, indent=2),
+                encoding="utf-8",
+            )
+            return True
+        except (OSError, TypeError, ValueError) as exc:
+            logger.warning(
+                "run metrics write failed: "
+                f"run_id={metrics.get('run_id')} error={exc}"
+            )
+            return False
 
     def _search_tail_summary(self, app: Any) -> str | None:
         """This run's dork-tail guard summary, or None when it never fired.
