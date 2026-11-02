@@ -44,7 +44,7 @@ _QUOTA_EXHAUSTED = re.compile(
     r"exceeded_current_quota|insufficient[_ ]?quota|quota[_ ]?exhausted|"
     r"quota[_ -]?exceeded|insufficient[_ ]?(?:balance|credits?|funds)|"
     r"credit balance|billing[_ ]?not[_ ]?active|arrearage|out_of_service|good standing",
-    re.I,
+    re.IGNORECASE,
 )
 
 
