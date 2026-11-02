@@ -254,19 +254,30 @@ def _aggregate_metrics(
                 data = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, ValueError, UnicodeDecodeError):
                 continue
+            # Best-effort enrichment: a file that parses but has the wrong
+            # top-level shape (a list, a scalar, or a non-dict ``verdict`` /
+            # ``gather``) is malformed and must be ignored, never raise — the
+            # DB-derived fields (unique_new / placements) report regardless.
+            if not isinstance(data, dict):
+                continue
             agg["runs_with_metrics"] += 1
             for key in ("cache_hits", "live_probes", "checked"):
                 try:
                     agg[key] += int(data.get(key, 0))
                 except (TypeError, ValueError):
                     pass
-            verdict = data.get("verdict") or {}
+            verdict = data.get("verdict")
+            if not isinstance(verdict, dict):
+                verdict = {}
             for key in ("valid", "invalid", "no_quota", "wait_check", "material", "total"):
                 try:
                     agg["verdict"][key] += int(verdict.get(key, 0))
                 except (TypeError, ValueError):
                     pass
-            for name, value in (data.get("gather") or {}).items():
+            gather_data = data.get("gather")
+            if not isinstance(gather_data, dict):
+                gather_data = {}
+            for name, value in gather_data.items():
                 try:
                     gather[name] = gather.get(name, 0) + int(value)
                 except (TypeError, ValueError):

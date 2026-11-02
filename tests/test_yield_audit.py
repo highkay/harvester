@@ -264,6 +264,27 @@ class TestYieldAuditAccounting(unittest.TestCase):
             self.assertEqual(totals["manual_placements"], 5)
             self.assertEqual(totals["machine_hours"], 1.0)
 
+    def test_malformed_metrics_json_ignored_db_rows_still_report(self) -> None:
+        """A wrong-shape metrics JSON must be skipped, never crash the audit —
+        the DB-derived accounting reports regardless (the documented
+        best-effort/no-traceback contract)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            meta = _build_fixture(tmpdir)
+            metrics_dir = Path(tmpdir) / "run-metrics"
+            metrics_dir.mkdir()
+            (metrics_dir / "run-doubao-1.json").write_text("[]", encoding="utf-8")
+            (metrics_dir / "run-other.json").write_text(
+                '{"verdict": "n/a"}', encoding="utf-8"
+            )
+
+            report = _audit.audit(meta["db_path"], [30], _PROVIDERS, workspace=tmpdir)
+
+            doubao = report["windows"]["30"]["providers"]["doubao"]
+            self.assertEqual(doubao["unique_new"], 5)
+            self.assertEqual(doubao["organic_placements"], 5)
+            self.assertEqual(doubao["manual_placements"], 5)
+            self.assertEqual(doubao["metrics"]["runs_with_metrics"], 0)
+
 
 class TestYieldAuditCLI(unittest.TestCase):
     """The CLI prints schema-valid JSON; a missing-schema DB is a clean error."""
@@ -322,6 +343,50 @@ class TestYieldAuditCLI(unittest.TestCase):
             self.assertEqual(proc.stdout, "")
             self.assertIn("missing required table", proc.stderr)
             self.assertNotIn("Traceback", proc.stderr)
+
+
+class TestAggregateMetricsMalformedShapes(unittest.TestCase):
+    """A metrics JSON that parses but has the wrong shape must be skipped or
+    have its malformed sub-fields ignored — never raise."""
+
+    def _aggregate(self, files: dict[str, str]) -> dict:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            metrics_dir = Path(tmpdir) / "run-metrics"
+            metrics_dir.mkdir()
+            for run_id, content in files.items():
+                (metrics_dir / f"{run_id}.json").write_text(content, encoding="utf-8")
+            return _audit._aggregate_metrics(tmpdir, {"doubao": list(files)})
+
+    def test_list_json_is_ignored(self) -> None:
+        doubao = self._aggregate({"run-1": "[]"})["doubao"]
+        self.assertEqual(doubao["runs_with_metrics"], 0)
+        self.assertEqual(doubao["cache_hits"], 0)
+        self.assertEqual(doubao["verdict"]["valid"], 0)
+
+    def test_non_dict_verdict_is_ignored_without_crash(self) -> None:
+        doubao = self._aggregate(
+            {"run-1": '{"verdict": "n/a", "cache_hits": 5}'}
+        )["doubao"]
+        # The file parses as a dict (so it is counted), but the malformed
+        # verdict is treated as empty; the scalar cache_hits still accumulates.
+        self.assertEqual(doubao["runs_with_metrics"], 1)
+        self.assertEqual(doubao["cache_hits"], 5)
+        self.assertEqual(doubao["verdict"]["valid"], 0)
+
+    def test_good_metrics_accumulate_beside_malformed(self) -> None:
+        doubao = self._aggregate(
+            {
+                "bad-list": "[]",
+                "bad-verdict": '{"verdict": "n/a"}',
+                "good": '{"cache_hits": 3, "live_probes": 7, "checked": 7, '
+                '"verdict": {"valid": 2, "total": 2}, '
+                '"gather": {"gather_ok": 5}}',
+            }
+        )["doubao"]
+        self.assertEqual(doubao["runs_with_metrics"], 2)
+        self.assertEqual(doubao["cache_hits"], 3)
+        self.assertEqual(doubao["verdict"]["valid"], 2)
+        self.assertEqual(doubao["gather"]["gather_ok"], 5)
 
 
 if __name__ == "__main__":
