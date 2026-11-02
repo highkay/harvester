@@ -561,6 +561,25 @@ class TestPushServiceCapabilityTiers(unittest.TestCase):
             self.assertIn("/api/groups/4/credentials/import", mock_post.call_args[0][0])
             self.assertIn("sk-union-aaaa", mock_post.call_args[1]["json"]["credentials"])
 
+    def test_legacy_union_file_still_pushes_with_tier_mappings(self) -> None:
+        db_path = _temp_db_path()
+        with tempfile.TemporaryDirectory() as workspace:
+            self._seed(
+                db_path,
+                [("doubao", 4), ("doubao:seed", 5), ("doubao:thirdparty", 6)],
+            )
+            self._write(workspace, "doubao", "valid-keys.txt", ["sk-legacy-aaaa"])
+
+            from web.push import PushService
+
+            svc = PushService(db_path=db_path, workspace=workspace)
+            with patch("web.push.requests.post", return_value=self._ok(1)) as mock_post:
+                svc.push_valid_keys("doubao", "run-legacy-1")
+
+            mock_post.assert_called_once()
+            self.assertIn("/api/groups/4/credentials/import", mock_post.call_args[0][0])
+            self.assertIn("sk-legacy-aaaa", mock_post.call_args[1]["json"]["credentials"])
+
 
 # ---------------------------------------------------------------------------
 # get_push_service singleton tests

@@ -67,8 +67,10 @@ def classify_tier(code: int, message: str) -> str:
         except Exception:
             return TIER_RETRYABLE  # unparseable 200 (proxy/captive page)
         if isinstance(data, dict) and "error" not in data:
-            return TIER_OK
-        return TIER_RETRYABLE  # 200 carrying an error object is not a clean OK
+            choices = data.get("choices")
+            if isinstance(choices, list) and choices:
+                return TIER_OK
+        return TIER_RETRYABLE  # 200 without a real completion is not a clean OK
 
     if code in (401, 403):
         return TIER_NO_ACCESS

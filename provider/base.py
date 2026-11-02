@@ -16,7 +16,7 @@ from search.client import chat
 from tools.logger import get_logger
 from tools.utils import trim
 
-from .capability import TIER_OK, probe_tiers
+from .capability import TIER_OK, TIER_RETRYABLE, probe_tiers
 
 logger = get_logger("provider")
 
@@ -312,21 +312,25 @@ class AIBaseProvider(IProvider):
         """Measure tier outcomes for a gate-passed key and fold into the verdict.
 
         Called by providers ONLY after their cheap gate has already returned
-        ``available``. A key that serves no tier is invalid (the key may
-        authenticate but is unusable for the pool's per-tier groups); a
-        RETRYABLE tier stays out of the usable set without killing the key.
+        ``available``. A key that serves no tier is invalid; if no tier is OK
+        but at least one is RETRYABLE, the key instead stays recoverable
+        (wait-check), matching the stage's transport-failure rule.
         """
         tiers = probe_tiers(self, token)
         result.tiers = tiers
         if not any(outcome == TIER_OK for outcome in tiers.values()):
             result.available = False
-            result.error_reason = ErrorReason.INVALID_KEY
             result.status_code = None
             detail = ", ".join(f"{n}={o}" for n, o in sorted(tiers.items())) or "no tiers probed"
-            result.message = (
-                f"key passed the gate but served no capability tier "
-                f"(pool unusable): {detail}"
-            )
+            if any(outcome == TIER_RETRYABLE for outcome in tiers.values()):
+                result.error_reason = ErrorReason.SERVER_ERROR
+                result.message = f"capability tiers temporarily indeterminate: {detail}"
+            else:
+                result.error_reason = ErrorReason.INVALID_KEY
+                result.message = (
+                    f"key passed the gate but served no capability tier "
+                    f"(pool unusable): {detail}"
+                )
         return result
 
     def get_patterns(self) -> Patterns:

@@ -163,6 +163,14 @@ class PushService:
                 mapped_name = mapping.get("provider_name") or ""
                 tier = mapped_name[len(prefix) :] if mapped_name.startswith(prefix) else ""
                 targets.append((tier, mapping))
+
+            # Recovery compatibility: runs completed before capability tiers
+            # have only valid-keys.txt. Tier mappings must not strand that
+            # union file; use it only when no tier file contains any keys.
+            if not any(self._read_valid_keys(provider_name, tier) for tier, _mapping in targets):
+                base_mapping = self._get_mapping(provider_name)
+                if base_mapping is not None and self._read_valid_keys(provider_name):
+                    return [("", base_mapping)]
             return targets
 
         mapping = self._get_mapping(provider_name)

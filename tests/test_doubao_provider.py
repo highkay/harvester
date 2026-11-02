@@ -287,6 +287,22 @@ class TestDoubaoCapabilityTiers(unittest.TestCase):
         self.assertTrue(result.available)
         self.assertEqual(result.tiers, {"seed": TIER_OK, "thirdparty": TIER_OK})
 
+    def test_all_tiers_retryable_stays_out_of_permanent_invalid(self):
+        provider = DoubaoProvider(
+            conditions=[_make_condition()],
+            capability_tiers=[{"name": "other", "probe_model": "other-model"}],
+        )
+        with mock.patch(CHAT_PATCH, return_value=(200, COMPLETION_OK)), mock.patch(
+            TIER_CHAT_PATCH, return_value=(500, "temporary outage")
+        ):
+            result = provider.check(token=_key())
+
+        self.assertFalse(result.available)
+        self.assertTrue(result.reason.is_retryable())
+
+    def test_empty_completion_object_is_not_a_tier_success(self):
+        self.assertEqual(classify_tier(200, "{}"), TIER_RETRYABLE)
+
 
 class TestDoubaoLiveCheck(unittest.TestCase):
     """Live integration test - only runs if DOUBAO_LIVE_TEST=1 is set."""
