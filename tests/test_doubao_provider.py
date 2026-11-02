@@ -8,6 +8,8 @@ Pins the status-map contract measured 2026-10-29 (wave-0 CN probe pack,
     never INVALID_KEY — a wrong probe id must not condemn the key;
   - 401 AuthenticationError -> INVALID_KEY (the measured bad-key response);
   - 402 / arrearage body -> NO_QUOTA (authentic key without funds);
+  - 403 AccountOverdueError / account overdue / arrearage -> NO_QUOTA, while
+    a plain 403 stays NO_ACCESS;
   - garbage / 5xx -> retryable (SERVER_ERROR family), never a permanent
     discard.
 """
@@ -84,6 +86,19 @@ ARREARAGE_402 = json.dumps(
 )
 QUOTA_429 = json.dumps({"error": {"code": "RateLimitExceeded", "message": "insufficient_quota"}})
 
+# Measured 2026-11-02 (probe-matrix.jsonl, two held samples): an authentic Ark
+# key with an unpaid bill answers 403 AccountOverdueError / type Forbidden.
+OVERDUE_403 = json.dumps(
+    {
+        "error": {
+            "code": "AccountOverdueError",
+            "message": "The request failed because your account has an overdue balance.",
+            "type": "Forbidden",
+        }
+    }
+)
+PLAIN_403 = json.dumps({"error": {"code": "AccessDenied", "message": "forbidden"}})
+
 COMPLETION_OK = json.dumps(
     {
         "id": "chatcmpl-123",
@@ -150,6 +165,30 @@ class TestDoubaoProviderJudge(unittest.TestCase):
         self.assertFalse(result.available)
         self.assertEqual(result.reason, ErrorReason.NO_QUOTA)
 
+    def test_403_account_overdue_error_is_no_quota(self):
+        result = self.provider._judge(403, OVERDUE_403)
+        self.assertFalse(result.available)
+        self.assertEqual(result.reason, ErrorReason.NO_QUOTA)
+
+    def test_403_account_overdue_text_is_no_quota(self):
+        result = self.provider._judge(
+            403, '{"error":{"code":"Forbidden","message":"account overdue, please recharge"}}'
+        )
+        self.assertFalse(result.available)
+        self.assertEqual(result.reason, ErrorReason.NO_QUOTA)
+
+    def test_403_arrearage_body_is_no_quota(self):
+        result = self.provider._judge(
+            403, '{"error":{"code":"Forbidden","message":"Your account is in arrearage"}}'
+        )
+        self.assertFalse(result.available)
+        self.assertEqual(result.reason, ErrorReason.NO_QUOTA)
+
+    def test_403_plain_forbidden_stays_no_access(self):
+        result = self.provider._judge(403, PLAIN_403)
+        self.assertFalse(result.available)
+        self.assertEqual(result.reason, ErrorReason.NO_ACCESS)
+
     def test_429_rate_limit_is_retryable(self):
         result = self.provider._judge(429, '{"error":{"message":"rate_limit_exceeded"}}')
         self.assertFalse(result.available)
@@ -206,6 +245,16 @@ class TestDoubaoProviderCheck(unittest.TestCase):
         self.assertFalse(result.available)
         self.assertEqual(result.reason, ErrorReason.NO_QUOTA)
 
+    def test_check_403_overdue_routes_to_no_quota(self):
+        result = self._check(403, OVERDUE_403)
+        self.assertFalse(result.available)
+        self.assertEqual(result.reason, ErrorReason.NO_QUOTA)
+
+    def test_check_403_plain_forbidden_stays_no_access(self):
+        result = self._check(403, PLAIN_403)
+        self.assertFalse(result.available)
+        self.assertEqual(result.reason, ErrorReason.NO_ACCESS)
+
     def test_check_completion_ok_valid(self):
         result = self._check(200, COMPLETION_OK)
         self.assertTrue(result.available)
@@ -248,6 +297,27 @@ class TestDoubaoCapabilityTiers(unittest.TestCase):
         self.assertEqual(result.reason, ErrorReason.INVALID_KEY)
         self.assertEqual(result.tiers, {})
         tier_chat.assert_not_called()
+
+    def test_overdue_gate_failure_skips_tiers_and_keeps_valid_control(self):
+        # Failure QA: an overdue fixture must never reach valid and must not
+        # spend tier probes; the same transport answering 200 for a funded key
+        # is a positive control proving the verdicts are not both broken.
+        with mock.patch(CHAT_PATCH, return_value=(403, OVERDUE_403)), mock.patch(
+            TIER_CHAT_PATCH
+        ) as tier_chat:
+            overdue = self.provider.check(token=_key())
+
+        self.assertFalse(overdue.available)
+        self.assertEqual(overdue.reason, ErrorReason.NO_QUOTA)
+        tier_chat.assert_not_called()
+
+        with mock.patch(CHAT_PATCH, return_value=(200, COMPLETION_OK)), mock.patch(
+            TIER_CHAT_PATCH, side_effect=[(200, COMPLETION_OK), (200, COMPLETION_OK)]
+        ):
+            control = self.provider.check(token=_key())
+
+        self.assertTrue(control.available)
+        self.assertEqual(control.tiers, {"seed": TIER_OK, "thirdparty": TIER_OK})
 
     def test_tier_outcome_classes(self):
         self.assertEqual(classify_tier(200, COMPLETION_OK), TIER_OK)

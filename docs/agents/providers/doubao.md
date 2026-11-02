@@ -4,32 +4,46 @@ ByteDance Doubao via the Volcengine Ark gateway. The provider code
 (`provider/doubao.py`) predates this wave; 2026-10-29 landed the schedule,
 config, patterns and tests.
 
-## Endpoints and probe model
+## Endpoints, auth gate and probe model
 
 - Base: `https://ark.cn-beijing.volces.com` — CN endpoint, `use_proxy: false`.
-- The provider talks to the pay-as-you-go path `/api/v3` (chat completions +
-  models list). magpie's own presets mark only `/api/v3` as list-capable; the
-  Coding/Agent plan paths serve different catalogs and their model ids
-  (e.g. `ark-code-latest`) must NOT be used as probe models here.
+- The provider talks to the pay-as-you-go path `/api/v3`. **Chat completions
+  (`POST /api/v3/chat/completions`) is the only auth/verdict gate** — the cheap
+  check and every capability-tier probe are chat completions. `/api/v3/models`
+  is inspect-only: no verdict in the pipeline reads its status.
 - Probe model: `doubao-seed-2-1-pro-260915` — measured 2026-10-29
   (wave0-cn.md probe b) as the latest seed-2.1 id in the `/api/v3` catalog
   page (`https://www.volcengine.com/docs/82379/1330310`, 29 dated doubao ids
   harvested). Replaces the legacy `doubao-pro-32k` alias.
+- magpie's own presets mark only `/api/v3` as list-capable; the Coding/Agent
+  plan paths serve different catalogs and their model ids (e.g.
+  `ark-code-latest`) must NOT be used as probe models here.
 
-## Auth gate (measured 2026-10-29)
+## Auth gate (measured 2026-10-29, corrected 2026-11-02)
 
-- `GET /api/v3/models` no key → 401 `AuthenticationError` ("the API key or
-  AK/SK in the request is missing or invalid").
-- Same endpoint with a format-broken key → 401 `AuthenticationError` ("The
-  API key format is incorrect").
-- `POST /api/v3/chat/completions` with a bad key → 401.
-- Clean gate, no public-200 trap.
+- `POST /api/v3/chat/completions` with no key or a format-broken key → 401
+  `AuthenticationError` ("the API key or AK/SK in the request is missing or
+  invalid" / "The API key format is incorrect"). This is the gate the code uses.
+- `GET /api/v3/models` answered 401 for the same two cases, but it is **not**
+  the verdict source; the old wording that called `/models` the auth gate was
+  wrong.
+- Why a `/models` 200 never proves a key is alive: measured 2026-11-02 on the
+  DashScope Coding-plan endpoints (`probe-sksp-candidate.jsonl`), an invalid
+  `sk-sp` key got `/models` 200 on both `coding.dashscope.aliyuncs.com` and
+  `coding-intl.dashscope.aliyuncs.com` while chat answered 401
+  `invalid_api_key`. That measurement is another vendor's plan path, not Ark's,
+  but it is the reason every OpenAI-compatible provider here gates on chat
+  completion and keeps `/models` for inspection only.
 
 ## Status map (pinned by tests/test_doubao_provider.py)
 
 - 404 (unknown deployment / model id) → NO_MODEL → wait-check. A wrong probe
   id never condemns the key.
 - 401 → INVALID_KEY.
+- 403 `AccountOverdueError` / `account overdue` / `arrearage` → NO_QUOTA
+  (measured 2026-11-02 on two held wait-check samples: an authentic key with
+  an unpaid bill answers 403 `AccountOverdueError`, `type: Forbidden`). Plain
+  403 stays NO_ACCESS.
 - 402 / arrearage body → NO_QUOTA (authentic key without funds).
 - 429 `insufficient_quota` → NO_QUOTA; plain `rate_limit_exceeded` →
   RATE_LIMITED (retryable).

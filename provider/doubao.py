@@ -4,6 +4,7 @@
 Doubao provider implementation.
 """
 
+import re
 from typing import List
 
 from core.enums import ErrorReason
@@ -12,6 +13,10 @@ from tools.utils import trim
 
 from .openai_like import OpenAILikeProvider
 from .registry import register_provider
+
+# Ark's 403 body for an authentic but unfunded account. Cover the measured
+# error code plus the natural-language forms seen in the same 403 shape.
+_OVERDUE_MARKERS = re.compile(r"AccountOverdueError|account\s+overdue|arrearage", flags=re.I)
 
 
 class DoubaoProvider(OpenAILikeProvider):
@@ -50,6 +55,16 @@ class DoubaoProvider(OpenAILikeProvider):
             # goes to wait-check (recoverable); INVALID_KEY would be a
             # permanent discard.
             return CheckResult.fail(ErrorReason.NO_MODEL)
+
+        if code == 403 and _OVERDUE_MARKERS.search(message or ""):
+            # Measured 2026-11-02 (probe-matrix.jsonl): an authentic Ark key
+            # with an unpaid bill answers 403 {"code":"AccountOverdueError",
+            # "type":"Forbidden"}. The shared OpenAI-like 403 branch only knows
+            # quota phrases like insufficient_user_quota, so this body fell
+            # through to NO_ACCESS — a recoverable-but-wrong class that keeps
+            # an unfunded key in wait-check instead of the no-quota bucket.
+            # The key is genuine; only its billing state is dead.
+            return CheckResult.fail(ErrorReason.NO_QUOTA)
 
         return super()._judge(code, message)
 
