@@ -201,6 +201,104 @@ class TestQwenProviderCheck(unittest.TestCase):
         self.assertEqual(result.reason, ErrorReason.SERVER_ERROR)
 
 
+class TestQwenCompletionVerdicts(unittest.TestCase):
+    """Completion-probe 200 bodies share the MiMo semantics: an empty body is
+    retryable, a 200 carrying an error splits auth/quota/generic, and an
+    ordinary success body needs no canonical `choices` field."""
+
+    def setUp(self):
+        self._ua_patcher = mock.patch(UA_PATCH, return_value="test-agent")
+        self._ua_patcher.start()
+
+    def tearDown(self):
+        self._ua_patcher.stop()
+
+    def _check_probe(self, probe_body: str):
+        provider = QwenProvider(conditions=[_make_condition()])
+        with mock.patch(
+            "provider.qwen.request",
+            side_effect=[FakeResponse(200, MODELS_RESPONSE), FakeResponse(200, probe_body)],
+        ):
+            return provider.check(token="sk-abcdefghijklmnopqrstuvwxyz123456")
+
+    def test_completion_empty_200_is_retryable_not_valid(self):
+        result = self._check_probe("")
+        self.assertFalse(result.available)
+        self.assertEqual(result.reason, ErrorReason.SERVER_ERROR)
+
+    def test_completion_empty_200_skips_tiers(self):
+        provider = _tier_provider()
+        with mock.patch(
+            "provider.qwen.request",
+            side_effect=[FakeResponse(200, MODELS_RESPONSE), FakeResponse(200, "")],
+        ), mock.patch(TIER_CHAT_PATCH) as tier_chat:
+            result = provider.check(token="sk-empty200")
+
+        self.assertFalse(result.available)
+        self.assertEqual(result.reason, ErrorReason.SERVER_ERROR)
+        self.assertEqual(result.tiers, {})
+        tier_chat.assert_not_called()
+
+    def test_completion_200_auth_error_is_invalid(self):
+        result = self._check_probe(
+            '{"error":{"message":"Incorrect API key provided","code":"invalid_api_key"}}'
+        )
+        self.assertFalse(result.available)
+        self.assertEqual(result.reason, ErrorReason.INVALID_KEY)
+
+    def test_completion_200_quota_error_is_no_quota(self):
+        result = self._check_probe(
+            '{"error":{"message":"insufficient quota","code":"insufficient_quota"}}'
+        )
+        self.assertFalse(result.available)
+        self.assertEqual(result.reason, ErrorReason.NO_QUOTA)
+
+    def test_completion_200_generic_error_is_recoverable(self):
+        result = self._check_probe('{"error":{"message":"upstream model unavailable"}}')
+        self.assertFalse(result.available)
+        self.assertEqual(result.reason, ErrorReason.BAD_REQUEST)
+
+    def test_completion_200_without_choices_is_valid(self):
+        result = self._check_probe('{"object":"chat.completion","data":{"ok":true}}')
+        self.assertTrue(result.available)
+
+
+class TestQwenModelsGateVerdicts(unittest.TestCase):
+    def setUp(self):
+        self._ua_patcher = mock.patch(UA_PATCH, return_value="test-agent")
+        self._ua_patcher.start()
+
+    def tearDown(self):
+        self._ua_patcher.stop()
+
+    def test_models_empty_200_is_retryable(self):
+        provider = QwenProvider(conditions=[_make_condition()])
+        with _patch_request(FakeResponse(200, "")):
+            result = provider.check(token="sk-emptybody")
+
+        self.assertFalse(result.available)
+        self.assertEqual(result.reason, ErrorReason.SERVER_ERROR)
+
+    def test_models_unparseable_200_stays_unknown(self):
+        provider = QwenProvider(conditions=[_make_condition()])
+        with _patch_request(FakeResponse(200, "<html>proxy error</html>")):
+            result = provider.check(token="sk-htmlbody")
+
+        self.assertFalse(result.available)
+        self.assertEqual(result.reason, ErrorReason.UNKNOWN)
+
+    def test_models_403_is_recoverable_no_access(self):
+        provider = _tier_provider()
+        denial = '{"code":"Model.AccessDenied","message":"Access denied for model."}'
+        with _patch_request(FakeResponse(403, denial)), mock.patch(TIER_CHAT_PATCH) as tier_chat:
+            result = provider.check(token="sk-denied")
+
+        self.assertFalse(result.available)
+        self.assertEqual(result.reason, ErrorReason.NO_ACCESS)
+        self.assertEqual(result.tiers, {})
+        tier_chat.assert_not_called()
+
+
 TIER_CHAT_PATCH = "provider.capability.chat"
 
 

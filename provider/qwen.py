@@ -119,7 +119,11 @@ class QwenProvider(OpenAILikeProvider):
             return CheckResult.fail(ErrorReason.TIMEOUT if message == "timeout" else ErrorReason.NETWORK_ERROR)
 
         if code == 200:
-            return CheckResult.success()
+            # Share the OpenAI-like judge: empty 200 -> retryable
+            # SERVER_ERROR, 200+error -> auth/quota/generic split, ordinary
+            # 200 JSON -> valid (no `choices` requirement). A bare success()
+            # here pooled truncated bodies and soft-error JSON as VALID keys.
+            return super()._judge(code=code, message=message)
 
         if code == 402:
             return CheckResult.fail(ErrorReason.NO_QUOTA)
@@ -189,9 +193,17 @@ class QwenProvider(OpenAILikeProvider):
         carries ``code: invalid_api_key`` but may be missing entirely.
         """
         if code == 200:
+            body = trim(message)
+            if not body:
+                # An EMPTY 200 body is a transport/proxy artefact, not a key
+                # verdict; SERVER_ERROR is retryable (wait-check), while the
+                # old UNKNOWN permanently discarded an authenticated key.
+                return CheckResult.fail(ErrorReason.SERVER_ERROR)
             try:
-                data = json.loads(message)
+                data = json.loads(body)
             except Exception:
+                # Present-but-unparseable (e.g. an HTML proxy page) keeps the
+                # historical UNKNOWN classification.
                 return CheckResult.fail(ErrorReason.UNKNOWN)
 
             models = data.get("data", []) if isinstance(data, dict) else []
@@ -200,8 +212,12 @@ class QwenProvider(OpenAILikeProvider):
 
             return CheckResult.fail(ErrorReason.UNKNOWN)
 
-        if code in (401, 403):
+        if code == 401:
             return CheckResult.fail(ErrorReason.INVALID_KEY)
+
+        if code == 403:
+            # Model/account access denial is recoverable, not a dead key.
+            return CheckResult.fail(ErrorReason.NO_ACCESS)
 
         if code == 402:
             return CheckResult.fail(ErrorReason.NO_QUOTA)
@@ -226,7 +242,7 @@ class QwenProvider(OpenAILikeProvider):
         message = trim(message)
 
         if code == 200:
-            return CheckResult.success()
+            return super()._judge(code=code, message=message)
 
         if code == 401 or re.findall(r"invalid_api_key|incorrect api key", message, flags=re.I):
             return CheckResult.fail(ErrorReason.INVALID_KEY)
