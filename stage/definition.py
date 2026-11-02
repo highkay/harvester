@@ -25,8 +25,10 @@ from constant.system import (
     SERVICE_TYPE_GITHUB_WEB,
 )
 from core.enums import ErrorReason, PipelineStage, ResultType
+from core.metrics import StageMetrics
 from core.models import (
     AcquisitionTask,
+    CheckResult,
     CheckTask,
     InspectTask,
     Patterns,
@@ -39,6 +41,7 @@ from constant.capability import TIER_OK, tier_result_type
 from search import client
 from search.github.fetch_store import FetchStore, default_directory
 from search.github.refine.engine import RefineEngine
+from state.models import CheckCacheStats
 from storage.persistence import (
     GATHER_304,
     GATHER_304_EMPTY,
@@ -49,12 +52,13 @@ from storage.persistence import (
     GATHER_OK,
     record_gather_outcome,
 )
+from storage.verdict_cache import VerdictCache, VerdictEntry
 from tools.coordinator import get_user_agent
 from tools.logger import get_logger
 from tools.patterns import extract_github_query_pattern
 from tools.retry import RetryCore
 from tools.state import GithubCredentialLimited
-from tools.utils import get_service_name, handle_exceptions
+from tools.utils import get_service_name, handle_exceptions, trim
 
 from .base import BasePipelineStage, OutputHandler, StageOutput, StageResources
 from .factory import TaskFactory
@@ -1091,6 +1095,52 @@ class AcquisitionStage(BasePipelineStage):
         return None
 
 
+def _tier_fingerprint(provider: IProvider) -> str:
+    """Stable fingerprint of the declared capability-tier probe models.
+
+    Tier sub-results are never cached, but a key verdict measured under one
+    tier declaration must not be reused after the declared probe models change:
+    that changes what the provider actually probes. Malformed declarations
+    degrade to an empty fingerprint instead of breaking the check path.
+    """
+    tiers = getattr(provider, "capability_tiers", None)
+    if not isinstance(tiers, list):
+        return ""
+    parts: list[str] = []
+    for entry in tiers:
+        if not isinstance(entry, dict):
+            continue
+        raw_name = entry.get("name")
+        raw_model = entry.get("probe_model")
+        if not isinstance(raw_name, str) or not isinstance(raw_model, str):
+            continue
+        name = trim(raw_name)
+        model = trim(raw_model)
+        if name and model:
+            parts.append(f"{name}={model}")
+    return "|".join(sorted(parts))
+
+
+@handle_exceptions(default_result=None, log_level="debug")
+def _safe_verdict_lookup(cache: VerdictCache, identity: dict[str, str]) -> VerdictEntry | None:
+    """Cache read that never raises into the scan (miss on any failure)."""
+    return cache.lookup(**identity)
+
+
+@handle_exceptions(default_result=False, log_level="debug")
+def _safe_verdict_store(cache: VerdictCache, identity: dict[str, str], verdict: ErrorReason) -> bool:
+    """Cache write that never raises into the scan (False on any failure)."""
+    return cache.store(verdict=verdict, **identity)
+
+
+# Only these configured tasks may read/write the terminal-verdict cache.
+VERDICT_CACHE_TASKS = frozenset({"mimo-cn", "mimo-sg", "qwen-cn", "qwen-intl", "doubao"})
+
+# The cache contract stores exactly these two explicit terminal verdicts.
+_CACHEABLE_VERDICTS = frozenset({ErrorReason.INVALID_KEY, ErrorReason.NO_QUOTA})
+_CACHEABLE_VERDICT_VALUES = frozenset(verdict.value for verdict in _CACHEABLE_VERDICTS)
+
+
 @register_stage(
     name=PipelineStage.CHECK.value,
     depends_on=[],
@@ -1102,6 +1152,17 @@ class CheckStage(BasePipelineStage):
 
     def __init__(self, resources: StageResources, handler: OutputHandler, **kwargs):
         super().__init__(PipelineStage.CHECK.value, resources, handler, **kwargs)
+        # Terminal-verdict cache accounting for todo-1 run metrics. Every
+        # routed verdict is exactly one live probe or one cache hit, so
+        # checked == live_probes + cache_hits for the run.
+        self._cache_stats_lock = threading.Lock()
+        self._cache_live_probes = 0
+        self._cache_hits = 0
+        self._cache_hits_invalid = 0
+        self._cache_hits_no_quota = 0
+        self._cache_store_failures = 0
+        self._cache_lookups = 0
+        self._cache_summary_logged = False
 
     def _generate_id(self, task: ProviderTask) -> str:
         """Generate unique task identifier for deduplication"""
@@ -1120,6 +1181,176 @@ class CheckStage(BasePipelineStage):
         """Execute check task processing."""
         return self._check_worker(task)
 
+    def cache_metrics(self) -> dict[str, int]:
+        """Thread-safe snapshot of this run's cache accounting."""
+        with self._cache_stats_lock:
+            return {
+                "live_probes": self._cache_live_probes,
+                "cache_hits": self._cache_hits,
+                "cache_hits_invalid": self._cache_hits_invalid,
+                "cache_hits_no_quota": self._cache_hits_no_quota,
+                "store_failures": self._cache_store_failures,
+                "lookups": self._cache_lookups,
+            }
+
+    def get_stats(self) -> StageMetrics:
+        """Stage metrics plus the per-run terminal-verdict cache counters.
+
+        The counters ride on the existing stage metrics object (read by the
+        web run-metrics bridge) instead of a new stats channel. ``vars()`` is
+        used because ``StageMetrics`` is the shared core dataclass and the
+        cache accounting is an additive, stage-specific field.
+        """
+        metrics = super().get_stats()
+        vars(metrics)["cache"] = CheckCacheStats(**self.cache_metrics())
+        return metrics
+
+    def stop(self, timeout: float = DEFAULT_SHUTDOWN_TIMEOUT) -> None:
+        """Stop workers, then emit the one-line cache summary exactly once."""
+        try:
+            super().stop(timeout)
+        finally:
+            self._log_cache_summary_once()
+
+    def _log_cache_summary_once(self) -> None:
+        """One INFO line of cache accounting; never logs keys or task ids."""
+        with self._cache_stats_lock:
+            if self._cache_summary_logged:
+                return
+            if self._cache_lookups == 0:
+                return
+            self._cache_summary_logged = True
+            live_probes = self._cache_live_probes
+            cache_hits = self._cache_hits
+            hits_invalid = self._cache_hits_invalid
+            hits_no_quota = self._cache_hits_no_quota
+            store_failures = self._cache_store_failures
+            lookups = self._cache_lookups
+
+        logger.info(
+            f"[{self.name}] verdict cache: lookups={lookups} live_probes={live_probes} "
+            f"cache_hits={cache_hits} cache_hits_invalid={hits_invalid} "
+            f"cache_hits_no_quota={hits_no_quota} store_failures={store_failures}"
+        )
+
+    def _record_live_probe(self) -> None:
+        with self._cache_stats_lock:
+            self._cache_live_probes += 1
+
+    def _record_cache_hit(self, verdict: str) -> None:
+        with self._cache_stats_lock:
+            self._cache_hits += 1
+            if verdict == ErrorReason.INVALID_KEY.value:
+                self._cache_hits_invalid += 1
+            elif verdict == ErrorReason.NO_QUOTA.value:
+                self._cache_hits_no_quota += 1
+
+    def _record_store_failure(self) -> None:
+        with self._cache_stats_lock:
+            self._cache_store_failures += 1
+
+    def _cache_identity(self, task: CheckTask, provider: IProvider) -> dict[str, str] | None:
+        """Fingerprint inputs for one key: task, key, effective address,
+        endpoint and effective model/tier declaration.
+
+        The effective address is exactly what ``provider.check`` receives:
+        ``task.custom_url or task.service.address``, falling back to the
+        provider's configured base URL. Model/tier fall back to the provider
+        defaults so a config change invalidates the entry.
+        """
+        key = trim(task.service.key)
+        if not key:
+            return None
+        address = trim(task.custom_url) or trim(task.service.address)
+        if not address:
+            default_address = getattr(provider, "_base_url", "")
+            address = trim(default_address) if isinstance(default_address, str) else ""
+        if not address:
+            return None
+        endpoint = trim(task.service.endpoint)
+        if not endpoint:
+            default_endpoint = getattr(provider, "completion_path", "")
+            endpoint = trim(default_endpoint) if isinstance(default_endpoint, str) else ""
+        model = trim(task.service.model)
+        if not model:
+            default_model = getattr(provider, "_default_model", "")
+            model = trim(default_model) if isinstance(default_model, str) else ""
+        return {
+            "task": task.provider,
+            "key": key,
+            "base_url": address,
+            "endpoint": endpoint,
+            "probe_model": model,
+            "tier": _tier_fingerprint(provider),
+        }
+
+    def _store_terminal_verdict(
+        self, cache: VerdictCache, identity: dict[str, str], result: CheckResult
+    ) -> None:
+        """Persist only an explicit gate-level INVALID_KEY / NO_QUOTA.
+
+        Valid results, every other reason and anything derived from capability
+        tier probes are never stored; a False/raising store fails open.
+        """
+        if result.available or getattr(result, "tiers", None):
+            return
+        if result.reason not in _CACHEABLE_VERDICTS:
+            return
+        if not _safe_verdict_store(cache, identity, result.reason):
+            self._record_store_failure()
+
+    def _build_output(self, task: CheckTask, result: CheckResult) -> StageOutput:
+        """Route one check result into the same persistent bucket as before."""
+        # Create output object
+        output = StageOutput(task=task)
+
+        # Handle result based on availability
+        if result.available:
+            # Create inspect task
+            inspect_task = TaskFactory.create_inspect_task(task.provider, task.service)
+            output.add_task(inspect_task, PipelineStage.INSPECT.value)
+
+            # Add valid key to be saved (union file, backward compatible)
+            output.add_result(task.provider, ResultType.VALID.value, [task.service])
+
+            # Capability tiers: only tiers measured OK admit the key into
+            # their per-tier file. A gate-passed-but-zero-tier key never
+            # reaches this branch (the provider marks it invalid).
+            for tier, outcome in result.tiers.items():
+                if outcome == TIER_OK:
+                    output.add_result(task.provider, tier_result_type(tier), [task.service])
+
+        else:
+            # Categorize based on error reason
+            if result.reason == ErrorReason.NO_QUOTA:
+                output.add_result(task.provider, ResultType.NO_QUOTA.value, [task.service])
+
+            elif result.reason in [
+                ErrorReason.NO_MODEL,
+                ErrorReason.NO_ACCESS,
+                ErrorReason.BAD_REQUEST,
+            ] or result.reason.is_retryable():
+                # Retryable verdicts (rate limit / network / timeout / 5xx) are
+                # NOT key verdicts: measured 2026-09-22, ollama.com through the
+                # scan's socks exits answers TLS EOF/timeouts often enough that
+                # filing them as INVALID permanently burned live keys. The wait
+                # pool is recoverable (see the wait-pool recovery recipe).
+                #
+                # BAD_REQUEST is here on purpose too: providers emit it when
+                # the probe itself was rejected rather than the credential —
+                # provider/base.py maps HTTP 400 to BAD_REQUEST, qwen maps a
+                # non-Arrearage 400 to it, deepseek maps 400 to it, and
+                # opencode maps its 401-ModelError (model validated BEFORE
+                # auth) to it. A malformed probe / mismatched model id must
+                # not be a permanent discard. UNKNOWN stays invalid: the
+                # response was parsed but the verdict is genuinely unknowable.
+                output.add_result(task.provider, ResultType.WAIT_CHECK.value, [task.service])
+
+            else:
+                output.add_result(task.provider, ResultType.INVALID.value, [task.service])
+
+        return output
+
     def _check_worker(self, task: CheckTask) -> Optional[StageOutput]:
         """Pure functional check worker implementation"""
         try:
@@ -1128,6 +1359,21 @@ class CheckStage(BasePipelineStage):
             if not provider or not isinstance(provider, IProvider):
                 logger.error(f"[{self.name}] unknown provider: {task.provider}, type: {type(provider)}")
                 return None
+
+            # Terminal-verdict cache lookup happens BEFORE _wait_for_rate_limit:
+            # a hit is a persisted key verdict, not an API request, so it must
+            # not consume a limiter token, sleep, or feed adjust_rate.
+            cache: VerdictCache | None = self.resources.verdict_cache
+            identity: dict[str, str] | None = None
+            if cache is not None and task.provider in VERDICT_CACHE_TASKS:
+                identity = self._cache_identity(task, provider)
+            if cache is not None and identity is not None:
+                with self._cache_stats_lock:
+                    self._cache_lookups += 1
+                entry = _safe_verdict_lookup(cache, identity)
+                if entry is not None and entry.verdict in _CACHEABLE_VERDICT_VALUES:
+                    self._record_cache_hit(entry.verdict)
+                    return self._build_output(task, CheckResult.fail(ErrorReason(entry.verdict)))
 
             # Apply rate limiting
             service_type = get_service_name(task.provider)
@@ -1151,53 +1397,13 @@ class CheckStage(BasePipelineStage):
             # bulk-validation block (and groq's/agnes' egress traps).
             self.resources.limiter.report_result(service_type, not result.reason.is_retryable())
 
-            # Create output object
-            output = StageOutput(task=task)
+            output = self._build_output(task, result)
+            self._record_live_probe()
 
-            # Handle result based on availability
-            if result.available:
-                # Create inspect task
-                inspect_task = TaskFactory.create_inspect_task(task.provider, task.service)
-                output.add_task(inspect_task, PipelineStage.INSPECT.value)
-
-                # Add valid key to be saved (union file, backward compatible)
-                output.add_result(task.provider, ResultType.VALID.value, [task.service])
-
-                # Capability tiers: only tiers measured OK admit the key into
-                # their per-tier file. A gate-passed-but-zero-tier key never
-                # reaches this branch (the provider marks it invalid).
-                for tier, outcome in result.tiers.items():
-                    if outcome == TIER_OK:
-                        output.add_result(task.provider, tier_result_type(tier), [task.service])
-
-            else:
-                # Categorize based on error reason
-                if result.reason == ErrorReason.NO_QUOTA:
-                    output.add_result(task.provider, ResultType.NO_QUOTA.value, [task.service])
-
-                elif result.reason in [
-                    ErrorReason.NO_MODEL,
-                    ErrorReason.NO_ACCESS,
-                    ErrorReason.BAD_REQUEST,
-                ] or result.reason.is_retryable():
-                    # Retryable verdicts (rate limit / network / timeout / 5xx) are
-                    # NOT key verdicts: measured 2026-09-22, ollama.com through the
-                    # scan's socks exits answers TLS EOF/timeouts often enough that
-                    # filing them as INVALID permanently burned live keys. The wait
-                    # pool is recoverable (see the wait-pool recovery recipe).
-                    #
-                    # BAD_REQUEST is here on purpose too: providers emit it when
-                    # the probe itself was rejected rather than the credential —
-                    # provider/base.py maps HTTP 400 to BAD_REQUEST, qwen maps a
-                    # non-Arrearage 400 to it, deepseek maps 400 to it, and
-                    # opencode maps its 401-ModelError (model validated BEFORE
-                    # auth) to it. A malformed probe / mismatched model id must
-                    # not be a permanent discard. UNKNOWN stays invalid: the
-                    # response was parsed but the verdict is genuinely unknowable.
-                    output.add_result(task.provider, ResultType.WAIT_CHECK.value, [task.service])
-
-                else:
-                    output.add_result(task.provider, ResultType.INVALID.value, [task.service])
+            # On a live miss, persist only an explicit gate-level terminal
+            # verdict under the same identity used for the lookup.
+            if cache is not None and identity is not None:
+                self._store_terminal_verdict(cache, identity, result)
 
             return output
 

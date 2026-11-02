@@ -1399,20 +1399,57 @@ class PipelineRunner:
         except (AttributeError, TypeError, ValueError):
             return {}
 
+    def _cache_counter_snapshot(self, app: Any) -> dict[str, int]:
+        """This run's CheckStage verdict-cache counters ({} on failure).
+
+        Reads ``pipeline.stages['check'].get_stats().cache`` — the counters
+        CheckStage keeps per run. Any missing/older stage shape degrades to
+        ``{}`` so the metrics bridge never fails a completion.
+        """
+        try:
+            stages = app.task_manager.pipeline.stages
+            stage = stages.get("check") if isinstance(stages, dict) else None
+            if stage is None:
+                return {}
+            cache = getattr(stage.get_stats(), "cache", None)
+            if cache is None:
+                return {}
+            snapshot: dict[str, int] = {}
+            for name in (
+                "live_probes",
+                "cache_hits",
+                "cache_hits_invalid",
+                "cache_hits_no_quota",
+                "store_failures",
+                "lookups",
+            ):
+                value = getattr(cache, name, None)
+                snapshot[name] = int(value) if isinstance(value, int) else 0
+            return snapshot
+        except (AttributeError, TypeError, ValueError):
+            return {}
+
     def _capture_run_metrics(
         self, app: Any, run_id: str, provider_name: str
     ) -> dict[str, Any]:
         """Assemble this run's per-run JSON metrics payload (never raises).
 
         Gather counters come from :meth:`_gather_counter_snapshot` and verdict
-        buckets from :meth:`_verdict_counter_snapshot`. ``cache_hits`` and
-        ``live_probes`` are the extension points for the terminal-verdict cache
-        (todo 6): today every checked verdict is a live probe and nothing hits
-        the cache, so ``cache_hits`` stays 0 and ``live_probes`` equals the
-        checked total.
+        buckets from :meth:`_verdict_counter_snapshot`. The terminal-verdict
+        cache counters come from :meth:`_cache_counter_snapshot`:
+        ``checked == live_probes + cache_hits`` when the stage is present, and
+        a stage-less/mocked app keeps the pre-cache shape
+        (``live_probes == checked``, ``cache_hits == 0``).
         """
         verdict = self._verdict_counter_snapshot(app)
         checked = verdict.get("total", 0)
+        cache = self._cache_counter_snapshot(app)
+        if cache:
+            live_probes = cache["live_probes"]
+            cache_hits = cache["cache_hits"]
+        else:
+            live_probes = checked
+            cache_hits = 0
         return {
             "schema_version": 1,
             "run_id": run_id,
@@ -1420,9 +1457,10 @@ class PipelineRunner:
             "captured_at": time.time(),
             "gather": self._gather_counter_snapshot(app),
             "verdict": verdict,
-            "checked": checked,
-            "live_probes": checked,
-            "cache_hits": 0,
+            "checked": live_probes + cache_hits,
+            "live_probes": live_probes,
+            "cache_hits": cache_hits,
+            "cache": cache,
         }
 
     def _persist_run_metrics(self, metrics: dict[str, Any]) -> bool:

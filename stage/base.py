@@ -32,11 +32,29 @@ from core.exceptions import RateLimiterDeniedError
 from core.metrics import StageMetrics
 from core.models import ProviderTask
 from core.types import IAuthProvider, IProvider
+from storage.verdict_cache import VerdictCache
 from tools.logger import get_logger
 from tools.ratelimit import RateLimiter
 from tools.retry import ExponentialBackoff, RetryPolicy
 
 logger = get_logger("stage")
+
+
+def _workspace_verdict_cache(config: Config) -> VerdictCache | None:
+    """Build the workspace's single verdict cache, or None when unusable.
+
+    The cache is constructed here, once per shared ``StageResources`` (one
+    object per Pipeline/run), never per key, worker or provider. A non-string
+    workspace (mocked config in stage tests) or a malformed path simply
+    disables caching; construction must never break a stage.
+    """
+    try:
+        workspace = getattr(getattr(config, "global_config", None), "workspace", None)
+        if not isinstance(workspace, str) or not workspace.strip():
+            return None
+        return VerdictCache(workspace)
+    except (OSError, TypeError, ValueError):
+        return None
 
 
 @dataclass
@@ -48,6 +66,13 @@ class StageResources:
     config: Config
     task_configs: Dict[str, TaskConfig]
     auth: IAuthProvider
+    # Terminal-verdict cache shared by every CheckStage worker of this run.
+    # None disables caching (non-target providers and stage test doubles).
+    verdict_cache: VerdictCache | None = None
+
+    def __post_init__(self) -> None:
+        if self.verdict_cache is None:
+            self.verdict_cache = _workspace_verdict_cache(self.config)
 
     def is_enabled(self, provider: str, stage: str) -> bool:
         """Check if stage is enabled for provider"""

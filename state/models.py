@@ -58,6 +58,24 @@ class StatsSource(BaseKeyStats):
 
 
 @dataclass
+class CheckCacheStats(BaseMetrics):
+    """Per-run terminal-verdict cache accounting for CheckStage.
+
+    Every routed check verdict is exactly one live probe or one cache hit, so
+    ``live_probes + cache_hits`` reconciles with the verdict buckets
+    (``total_keys_checked``). The per-verdict counters split cache hits by the
+    stored terminal verdict. Observability only - never a verdict source.
+    """
+
+    live_probes: int = 0
+    cache_hits: int = 0
+    cache_hits_invalid: int = 0
+    cache_hits_no_quota: int = 0
+    store_failures: int = 0
+    lookups: int = 0
+
+
+@dataclass
 class ProviderStatus:
     """Provider status information"""
 

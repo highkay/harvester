@@ -23,7 +23,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from state.models import StatsSource
+from state.models import CheckCacheStats, StatsSource
 from web.runner import PipelineRunner
 
 
@@ -170,6 +170,29 @@ class TestCaptureRunMetrics(unittest.TestCase):
         self.runner = _make_runner(
             Path(self._tmp.name), str(Path(self._tmp.name) / "x.db")
         )
+
+    def test_payload_uses_check_stage_cache_counters(self) -> None:
+        """Todo 6: the CheckStage counters split checked into live + hits."""
+        app = _metrics_app(valid=3, invalid=4, no_quota=1, wait_check=2)
+        cache = CheckCacheStats(
+            live_probes=6,
+            cache_hits=4,
+            cache_hits_invalid=3,
+            cache_hits_no_quota=1,
+        )
+        app.task_manager.pipeline.stages = {
+            "check": SimpleNamespace(get_stats=lambda: SimpleNamespace(cache=cache))
+        }
+
+        payload = self.runner._capture_run_metrics(app, "run-cache", "mimo-cn")
+
+        self.assertEqual(payload["verdict"]["total"], 10)
+        self.assertEqual(payload["checked"], 10)
+        self.assertEqual(payload["live_probes"], 6)
+        self.assertEqual(payload["cache_hits"], 4)
+        self.assertEqual(payload["live_probes"] + payload["cache_hits"], payload["checked"])
+        self.assertEqual(payload["cache"]["cache_hits_invalid"], 3)
+        self.assertEqual(payload["cache"]["cache_hits_no_quota"], 1)
 
     def test_payload_has_gather_verdict_and_cache_extension_points(self) -> None:
         app = _metrics_app(
