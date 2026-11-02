@@ -10,7 +10,7 @@ import unittest
 from unittest import mock
 
 from core.enums import ErrorReason
-from core.models import CheckResult, Condition, Patterns
+from core.models import Condition, Patterns
 from provider.mimo import MiMoProvider
 from provider.openai_like import OpenAILikeProvider
 from provider.registry import ProviderRegistry, get_available_providers
@@ -166,6 +166,123 @@ class TestMiMoProviderCheck(unittest.TestCase):
             result = self.provider.check(token="tp-withbalance")
 
         self.assertTrue(result.available)
+
+    def test_check_models_ok_then_probe_empty_200_is_retryable(self):
+        # A truncated/empty 200 is a transport artefact, NOT a key verdict.
+        # Old behaviour returned valid; SERVER_ERROR routes to wait-check.
+        with mock.patch(
+            "provider.mimo.request",
+            side_effect=[FakeResponse(200, MODELS_RESPONSE), FakeResponse(200, "")],
+        ):
+            result = self.provider.check(token="tp-emptyprobe")
+
+        self.assertFalse(result.available)
+        self.assertEqual(result.reason, ErrorReason.SERVER_ERROR)
+        self.assertTrue(result.reason.is_retryable())
+
+    def test_check_models_ok_then_probe_200_auth_error_is_invalid(self):
+        body = '{"error":{"message":"Invalid API Key","type":"invalid_key"}}'
+        with mock.patch(
+            "provider.mimo.request",
+            side_effect=[FakeResponse(200, MODELS_RESPONSE), FakeResponse(200, body)],
+        ):
+            result = self.provider.check(token="tp-softauth")
+
+        self.assertFalse(result.available)
+        self.assertEqual(result.reason, ErrorReason.INVALID_KEY)
+
+    def test_check_models_ok_then_probe_200_quota_error_is_no_quota(self):
+        body = '{"error":{"message":"You exceeded your current quota"}}'
+        with mock.patch(
+            "provider.mimo.request",
+            side_effect=[FakeResponse(200, MODELS_RESPONSE), FakeResponse(200, body)],
+        ):
+            result = self.provider.check(token="tp-softquota")
+
+        self.assertFalse(result.available)
+        self.assertEqual(result.reason, ErrorReason.NO_QUOTA)
+
+    def test_check_models_ok_then_probe_200_generic_error_is_recoverable(self):
+        body = '{"error":{"message":"upstream gateway exploded"}}'
+        with mock.patch(
+            "provider.mimo.request",
+            side_effect=[FakeResponse(200, MODELS_RESPONSE), FakeResponse(200, body)],
+        ):
+            result = self.provider.check(token="tp-softgeneric")
+
+        self.assertFalse(result.available)
+        self.assertEqual(result.reason, ErrorReason.BAD_REQUEST)
+        # CheckStage routes BAD_REQUEST to wait-check explicitly (is_retryable()
+        # is False for it), so no assertion on is_retryable() here.
+
+    def test_check_models_ok_then_probe_200_without_choices_is_valid(self):
+        # No canonical `choices` requirement: an error-free 200 body from an
+        # OpenAI-compatible gateway must stay valid.
+        with mock.patch(
+            "provider.mimo.request",
+            side_effect=[FakeResponse(200, MODELS_RESPONSE), FakeResponse(200, '{"result":"ok"}')],
+        ):
+            result = self.provider.check(token="tp-unusualbody")
+
+        self.assertTrue(result.available)
+
+    def test_check_models_empty_200_is_retryable(self):
+        with _patch_request(FakeResponse(200, "")):
+            result = self.provider.check(token="tp-emptymodels")
+
+        self.assertFalse(result.available)
+        self.assertEqual(result.reason, ErrorReason.SERVER_ERROR)
+        self.assertTrue(result.reason.is_retryable())
+
+    def test_check_models_html_200_stays_unknown(self):
+        # Present-but-unparseable body keeps the historical UNKNOWN verdict.
+        with _patch_request(FakeResponse(200, "<html>proxy interstitial</html>")):
+            result = self.provider.check(token="tp-htmlmodels")
+
+        self.assertFalse(result.available)
+        self.assertEqual(result.reason, ErrorReason.UNKNOWN)
+
+    def test_check_probe_429_rate_quota_is_rate_limited(self):
+        # `Throttling.RateQuota` contains "quota" but is a refillable rate
+        # limit on a funded account: it must stay recoverable, not terminal.
+        body = '{"error":{"code":"Throttling.RateQuota","message":"Requests rate limit exceeded"}}'
+        with mock.patch(
+            "provider.mimo.request",
+            side_effect=[FakeResponse(200, MODELS_RESPONSE), FakeResponse(429, body)],
+        ):
+            result = self.provider.check(token="tp-ratequota")
+
+        self.assertFalse(result.available)
+        self.assertEqual(result.reason, ErrorReason.RATE_LIMITED)
+        self.assertTrue(result.reason.is_retryable())
+
+    def test_check_probe_429_quota_exhausted_is_no_quota(self):
+        body = '{"error":{"message":"quota exhausted","type":"limitation"}}'
+        with mock.patch(
+            "provider.mimo.request",
+            side_effect=[FakeResponse(200, MODELS_RESPONSE), FakeResponse(429, body)],
+        ):
+            result = self.provider.check(token="tp-quotaexhausted")
+
+        self.assertFalse(result.available)
+        self.assertEqual(result.reason, ErrorReason.NO_QUOTA)
+
+    def test_check_models_429_rate_quota_is_rate_limited(self):
+        body = '{"error":{"code":"Throttling.RateQuota","message":"Requests rate limit exceeded"}}'
+        with _patch_request(FakeResponse(429, body)):
+            result = self.provider.check(token="tp-modelsratequota")
+
+        self.assertFalse(result.available)
+        self.assertEqual(result.reason, ErrorReason.RATE_LIMITED)
+        self.assertTrue(result.reason.is_retryable())
+
+    def test_check_models_429_quota_exhausted_is_no_quota(self):
+        body = '{"error":{"message":"quota exhausted","type":"limitation"}}'
+        with _patch_request(FakeResponse(429, body)):
+            result = self.provider.check(token="tp-modelsquotaexhausted")
+
+        self.assertFalse(result.available)
+        self.assertEqual(result.reason, ErrorReason.NO_QUOTA)
 
 
 class TestMiMoProviderInspect(unittest.TestCase):

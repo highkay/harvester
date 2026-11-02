@@ -36,6 +36,17 @@ from .registry import register_provider
 
 logger = get_logger("provider")
 
+# Balance-exhaustion markers: the only 429 bodies that may land in the terminal
+# no-quota bucket. A bare ``quota`` is deliberately NOT a marker: MiMo's
+# ``Throttling.RateQuota`` is a refillable rate limit on a funded account, and
+# the old bare match filed those keys as permanently unusable.
+_QUOTA_EXHAUSTED = re.compile(
+    r"exceeded_current_quota|insufficient[_ ]?quota|quota[_ ]?exhausted|"
+    r"quota[_ -]?exceeded|insufficient[_ ]?(?:balance|credits?|funds)|"
+    r"credit balance|billing[_ ]?not[_ ]?active|arrearage|out_of_service|good standing",
+    re.I,
+)
+
 
 class MiMoProvider(OpenAILikeProvider):
     """Xiaomi MiMo OpenAI-compatible provider implementation."""
@@ -118,14 +129,18 @@ class MiMoProvider(OpenAILikeProvider):
             return CheckResult.fail(ErrorReason.TIMEOUT if message == "timeout" else ErrorReason.NETWORK_ERROR)
 
         if code == 200:
-            return CheckResult.success()
+            # Route the completion body through the shared OpenAI-like judge:
+            # empty 200 -> retryable SERVER_ERROR, 200+error -> auth/quota/
+            # generic split, ordinary 200 JSON -> valid (no `choices`
+            # requirement). A bare `return success()` here pooled truncated
+            # bodies and soft-error JSON as VALID keys.
+            return super()._judge(code=code, message=message)
 
         if code == 402:
             return CheckResult.fail(ErrorReason.NO_QUOTA)
 
         if code == 429:
-            lowered = trim(message).lower()
-            if re.findall(r"quota|exceeded_current_quota|insufficient", lowered):
+            if _QUOTA_EXHAUSTED.search(message or ""):
                 return CheckResult.fail(ErrorReason.NO_QUOTA)
             return CheckResult.fail(ErrorReason.RATE_LIMITED)
 
@@ -171,9 +186,17 @@ class MiMoProvider(OpenAILikeProvider):
     def _judge_models(self, code: int, message: str) -> CheckResult:
         """Judge MiMo models.list response."""
         if code == 200:
+            body = trim(message)
+            if not body:
+                # An EMPTY 200 body is a transport/proxy artefact, not a key
+                # verdict; SERVER_ERROR is retryable (wait-check), while the
+                # old UNKNOWN permanently discarded an authenticated key.
+                return CheckResult.fail(ErrorReason.SERVER_ERROR)
             try:
-                data = json.loads(message)
+                data = json.loads(body)
             except Exception:
+                # Present-but-unparseable (e.g. an HTML proxy page) keeps the
+                # historical UNKNOWN classification.
                 return CheckResult.fail(ErrorReason.UNKNOWN)
 
             models = data.get("data", []) if isinstance(data, dict) else []
@@ -190,8 +213,9 @@ class MiMoProvider(OpenAILikeProvider):
             return CheckResult.fail(ErrorReason.NO_QUOTA)
 
         if code == 429:
-            lowered = trim(message).lower()
-            if re.findall(r"quota|exceeded_current_quota|insufficient", lowered):
+            # Same explicit exhaustion split as the completion branch;
+            # `Throttling.RateQuota` must stay recoverable.
+            if _QUOTA_EXHAUSTED.search(message or ""):
                 return CheckResult.fail(ErrorReason.NO_QUOTA)
             return CheckResult.fail(ErrorReason.RATE_LIMITED)
 
@@ -205,7 +229,7 @@ class MiMoProvider(OpenAILikeProvider):
         message = trim(message)
 
         if code == 200:
-            return CheckResult.success()
+            return super()._judge(code=code, message=message)
 
         if code == 401 or re.findall(r"invalid_api_key|invalid key", message, flags=re.I):
             return CheckResult.fail(ErrorReason.INVALID_KEY)
