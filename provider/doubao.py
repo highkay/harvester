@@ -16,7 +16,7 @@ from .registry import register_provider
 
 # Ark's 403 body for an authentic but unfunded account. Cover the measured
 # error code plus the natural-language forms seen in the same 403 shape.
-_OVERDUE_MARKERS = re.compile(r"AccountOverdueError|account\s+overdue|arrearage", flags=re.I)
+_OVERDUE_MARKERS = re.compile(r"AccountOverdueError|account\s+overdue|arrearage", flags=re.IGNORECASE)
 
 
 class DoubaoProvider(OpenAILikeProvider):
