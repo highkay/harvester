@@ -62,6 +62,11 @@ _RUNTIME_ORPHAN_AGE_SECONDS = 3600
 # created lazily and a write failure must never fail the run.
 _RUN_METRICS_DIR_NAME = "run-metrics"
 
+# Per-run metrics JSONs are never self-pruned by the scan that wrote them, so
+# the startup sweep bounds the directory: keep the 30-day audit window (the
+# longest retention horizon) and delete anything older.
+_RUN_METRICS_ORPHAN_AGE_SECONDS = 30 * 24 * 3600
+
 # ---------------------------------------------------------------------------
 # Workspace helper
 # ---------------------------------------------------------------------------
@@ -123,6 +128,9 @@ class PipelineRunner:
         # Killed runs leave their generated runtime YAML behind (only the
         # scan thread's finally deletes it) — sweep the orphans at startup.
         self._sweep_orphan_runtime_configs()
+        # Per-run metrics JSONs accumulate one-per-completed-run and are never
+        # self-pruned; trim anything older than the retention horizon.
+        self._sweep_orphan_run_metrics()
         # The per-provider backup prune only runs at the scan start of a
         # RUNNING provider, so disabled/frozen providers kept growing their
         # backup piles forever (measured 2026-10-09: the six culled providers
@@ -525,7 +533,7 @@ class PipelineRunner:
                 self._persist_run_metrics(
                     self._capture_run_metrics(app, run_id, provider_name)
                 )
-            except Exception as exc:  # noqa: BLE001 — metrics must never fail the scan
+            except (OSError, ValueError, TypeError, AttributeError) as exc:
                 logger.warning(
                     f"Run metrics capture failed: provider={provider_name} "
                     f"run_id={run_id} error={exc}"
@@ -1020,6 +1028,35 @@ class PipelineRunner:
             f"from {runtime_dir}"
         )
 
+    def _sweep_orphan_run_metrics(self) -> None:
+        """Delete run-metrics/*.json older than the retention horizon (never raises).
+
+        A run writes one metrics JSON on completion and never prunes them, so
+        a long-lived process grows ``{workspace}/run-metrics/`` forever. The
+        30-day audit window is the longest retention horizon, so anything
+        older than ``_RUN_METRICS_ORPHAN_AGE_SECONDS`` is safely stale. Only
+        ``*.json`` files are candidates; sibling files and a missing/locked
+        directory must never block runner construction.
+        """
+        metrics_dir = Path(self._workspace) / _RUN_METRICS_DIR_NAME
+        cutoff = time.time() - _RUN_METRICS_ORPHAN_AGE_SECONDS
+        removed = 0
+        try:
+            candidates = list(metrics_dir.glob("*.json"))
+        except OSError:
+            return
+        for path in candidates:
+            try:
+                if path.is_file() and path.stat().st_mtime < cutoff:
+                    path.unlink()
+                    removed += 1
+            except OSError:
+                pass
+        logger.info(
+            f"Run-metrics orphan sweep: removed {removed} stale metric(s) "
+            f"from {metrics_dir}"
+        )
+
     def _prune_all_provider_backups(self) -> None:
         """Enforce backup retention across ALL provider dirs (never raises).
 
@@ -1337,7 +1374,7 @@ class PipelineRunner:
         ``valid`` / ``invalid`` / ``no_quota`` / ``wait_check`` / ``material``.
         ``total`` is recomputed from the four verdict buckets so the JSON stays
         consistent even for a mock resource without ``BaseKeyStats.total``.
-        Never raises.
+        Degrades to ``{}`` on attribute/type/value errors.
         """
         try:
             if app is None or app.task_manager is None:
@@ -1359,7 +1396,7 @@ class PipelineRunner:
                 + snapshot["wait_check"]
             )
             return snapshot
-        except Exception:  # noqa: BLE001 — enrichment-only, snapshot must not raise
+        except (AttributeError, TypeError, ValueError):
             return {}
 
     def _capture_run_metrics(

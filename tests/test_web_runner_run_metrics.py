@@ -14,8 +14,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sqlite3
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -131,8 +133,11 @@ def _run_execute(runner: PipelineRunner, app: MagicMock, run_id: str) -> None:
 
 class TestVerdictCounterSnapshot(unittest.TestCase):
     def setUp(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            self.runner = _make_runner(Path(tmpdir), str(Path(tmpdir) / "x.db"))
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.runner = _make_runner(
+            Path(self._tmp.name), str(Path(self._tmp.name) / "x.db")
+        )
 
     def test_reads_verdict_buckets_and_recomputes_total(self) -> None:
         app = _metrics_app(
@@ -160,8 +165,11 @@ class TestVerdictCounterSnapshot(unittest.TestCase):
 
 class TestCaptureRunMetrics(unittest.TestCase):
     def setUp(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            self.runner = _make_runner(Path(tmpdir), str(Path(tmpdir) / "x.db"))
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.runner = _make_runner(
+            Path(self._tmp.name), str(Path(self._tmp.name) / "x.db")
+        )
 
     def test_payload_has_gather_verdict_and_cache_extension_points(self) -> None:
         app = _metrics_app(
@@ -214,14 +222,12 @@ class TestPersistRunMetrics(unittest.TestCase):
 class TestRunMetricsEndToEnd(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
         workdir = Path(self._tmp.name)
         self.workdir = workdir
         self.db_path = str(workdir / "harvester.db")
         _init_db(self.db_path)
         self.runner = _make_runner(workdir, self.db_path)
-
-    def tearDown(self) -> None:
-        self._tmp.cleanup()
 
     def _metrics_path(self, run_id: str) -> Path:
         return self.workdir / "run-metrics" / f"{run_id}.json"
@@ -286,6 +292,47 @@ class TestRunMetricsEndToEnd(unittest.TestCase):
         self.assertEqual(payload["cache_hits"], 0)
         self.assertEqual(payload["live_probes"], 0)
         self.assertEqual(payload["verdict"], {})
+
+
+class TestSweepOrphanRunMetrics(unittest.TestCase):
+    """Given a run-metrics dir of completed runs,
+    When the startup sweep runs,
+    Then stale (older than the retention horizon) JSON is deleted, fresh JSON
+    and non-JSON siblings survive, and a missing/unreadable dir never raises."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.workdir = Path(self._tmp.name)
+        self.runner = _make_runner(self.workdir, str(self.workdir / "x.db"))
+
+    def _mk(self, name: str, age_seconds: float) -> Path:
+        metrics_dir = self.workdir / "run-metrics"
+        metrics_dir.mkdir(parents=True, exist_ok=True)
+        path = metrics_dir / name
+        path.write_text("{}", encoding="utf-8")
+        stale = time.time() - age_seconds
+        os.utime(path, (stale, stale))
+        return path
+
+    def test_deletes_stale_retains_fresh_and_non_json(self) -> None:
+        old = self._mk("old.json", 31 * 24 * 3600)
+        fresh = self._mk("fresh.json", 0)
+        other = self.workdir / "run-metrics" / "notes.txt"
+        other.write_text("not json", encoding="utf-8")
+
+        self.runner._sweep_orphan_run_metrics()
+
+        self.assertFalse(old.exists(), "stale metrics JSON must be removed")
+        self.assertTrue(fresh.exists(), "fresh metrics JSON must be retained")
+        self.assertTrue(other.exists(), "non-JSON siblings are never touched")
+
+    def test_survives_missing_metrics_dir(self) -> None:
+        self.runner._sweep_orphan_run_metrics()  # must not raise
+
+    def test_never_raises_on_glob_error(self) -> None:
+        with patch("pathlib.Path.glob", side_effect=OSError("boom")):
+            self.runner._sweep_orphan_run_metrics()  # must not raise
 
 
 if __name__ == "__main__":
