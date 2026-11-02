@@ -15,6 +15,7 @@ import unittest
 from unittest import mock
 
 from config.schemas import StageConfig, TaskConfig
+from constant.capability import TIER_NO_MODEL, TIER_OK, TIER_RETRYABLE, tier_result_type
 from core.enums import ErrorReason, PipelineStage, ResultType
 from core.models import CheckResult, CheckTask, Service
 from provider.ollama import OllamaProvider
@@ -146,6 +147,36 @@ class TestCheckStageLimiterFeedback(unittest.TestCase):
                 bucket = self._bucket_after(result)
 
                 self.assertAlmostEqual(bucket.rate, self.BASE_RATE)
+
+
+class TestCheckStageCapabilityTierRouting(unittest.TestCase):
+    """A valid key is admitted to the union file plus each OK tier only;
+    a RETRYABLE/no-access/no-model tier never admits the key."""
+
+    def test_partial_tier_lands_only_in_ok_tier_file(self):
+        result = CheckResult.success()
+        result.tiers = {"seed": TIER_OK, "thirdparty": TIER_NO_MODEL}
+
+        output = _run(result)
+        kinds = [kind for _provider, kind, _data in output.results]
+        self.assertEqual(kinds, [ResultType.VALID.value, tier_result_type("seed")])
+
+    def test_union_file_keeps_working_with_tiers(self):
+        result = CheckResult.success()
+        result.tiers = {"seed": TIER_OK}
+
+        output = _run(result)
+        kinds = set(kind for _provider, kind, _data in output.results)
+        self.assertIn(ResultType.VALID.value, kinds)
+        self.assertIn(tier_result_type("seed"), kinds)
+
+    def test_retryable_tier_never_admits_key(self):
+        result = CheckResult.success()
+        result.tiers = {"seed": TIER_RETRYABLE}
+
+        output = _run(result)
+        kinds = [kind for _provider, kind, _data in output.results]
+        self.assertEqual(kinds, [ResultType.VALID.value])
 
 
 if __name__ == "__main__":

@@ -54,12 +54,21 @@ class DoubaoProvider(OpenAILikeProvider):
         return super()._judge(code, message)
 
     def check(self, token: str, address: str = "", endpoint: str = "", model: str = "") -> CheckResult:
-        """Check Doubao token validity."""
+        """Check Doubao token validity.
+
+        Cheap gate first (a single chat completion on the default model, the
+        current OpenAILike gate). For a key that passes AND has
+        ``capability_tiers`` declared, measure each tier with one
+        ``max_tokens=1`` chat completion.
+        """
         model = trim(model)
         if not model:
             model = self._default_model
 
-        return super().check(token=token, address=address, endpoint=endpoint, model=model)
+        result = super().check(token=token, address=address, endpoint=endpoint, model=model)
+        if result.available and self._capability_tiers:
+            result = self._apply_capability_tiers(token, result)
+        return result
 
 
 register_provider("doubao", DoubaoProvider)

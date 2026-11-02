@@ -35,6 +35,7 @@ from core.models import (
     Service,
 )
 from core.types import IProvider
+from constant.capability import TIER_OK, tier_result_type
 from search import client
 from search.github.fetch_store import FetchStore, default_directory
 from search.github.refine.engine import RefineEngine
@@ -1159,8 +1160,15 @@ class CheckStage(BasePipelineStage):
                 inspect_task = TaskFactory.create_inspect_task(task.provider, task.service)
                 output.add_task(inspect_task, PipelineStage.INSPECT.value)
 
-                # Add valid key to be saved
+                # Add valid key to be saved (union file, backward compatible)
                 output.add_result(task.provider, ResultType.VALID.value, [task.service])
+
+                # Capability tiers: only tiers measured OK admit the key into
+                # their per-tier file. A gate-passed-but-zero-tier key never
+                # reaches this branch (the provider marks it invalid).
+                for tier, outcome in result.tiers.items():
+                    if outcome == TIER_OK:
+                        output.add_result(task.provider, tier_result_type(tier), [task.service])
 
             else:
                 # Categorize based on error reason

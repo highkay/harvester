@@ -453,6 +453,8 @@ class TaskConfig:
     patterns: Patterns = field(default_factory=Patterns)
     conditions: List[Condition] = field(default_factory=list)
     rate_limit: RateLimitConfig = field(default_factory=RateLimitConfig)
+    # Capability tiers: list of {name, probe_model}; empty = no tier probing.
+    capability_tiers: List[Dict[str, str]] = field(default_factory=list)
 
     def __post_init__(self):
         if not self.search_types:

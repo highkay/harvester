@@ -13,6 +13,8 @@ Key Features:
 - Validation integration
 """
 
+from __future__ import annotations
+
 import os
 from typing import Any, Dict
 
@@ -27,6 +29,7 @@ from .schemas import (
     CredentialsConfig,
     DisplayConfig,
     DisplayContextConfig,
+    GithubTransportConfig,
     GlobalConfig,
     LoadBalanceStrategy,
     MonitoringConfig,
@@ -181,14 +184,13 @@ class ConfigLoader:
             github_transport=self._parse_github_transport(data.get("github_transport", {})),
         )
 
-    def _parse_github_transport(self, data: Dict[str, Any]) -> "GithubTransportConfig":
+    def _parse_github_transport(self, data: Dict[str, Any]) -> GithubTransportConfig:
         """Parse GitHub transport enhancements (edge pool / DoH / cache)."""
         from config.schemas import (
             DohConfig,
             EdgePoolConfig,
             GithubCacheConfig,
             GithubIndexConfig,
-            GithubTransportConfig,
         )
 
         if not isinstance(data, dict):
@@ -450,6 +452,7 @@ class ConfigLoader:
             patterns=patterns,
             conditions=conditions,
             rate_limit=rate_limit,
+            capability_tiers=data.get("capability_tiers") or [],
         )
 
     def _create_default_config(self) -> None:

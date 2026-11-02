@@ -9,7 +9,6 @@ Then keys are read from valid-keys.txt, pushed to gpt-load, and push_logs is wri
 
 from __future__ import annotations
 
-import json
 import os
 import sqlite3
 import tempfile
@@ -17,7 +16,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from web.crypto import decrypt_str, encrypt_str
+from web.crypto import encrypt_str
 from web.db import init_db as _init_db_async
 
 
@@ -458,6 +457,109 @@ class TestPushServiceBasic(unittest.TestCase):
             self.assertIsNotNone(row)
             self.assertEqual(row["status"], "failed")
             self.assertIsNotNone(row["error_message"])
+
+
+# ---------------------------------------------------------------------------
+# get_push_service singleton tests
+# ---------------------------------------------------------------------------
+
+
+class TestPushServiceCapabilityTiers(unittest.TestCase):
+    """Provider:tier mappings fan out per tier file; a provider with no tier
+    mapping keeps today's single-group path."""
+
+    @staticmethod
+    def _seed(db_path: str, mappings: list[tuple[str, int]]) -> None:
+        _run_async(_init_db_async(db_path))
+        conn = sqlite3.connect(db_path)
+        try:
+            auth_enc = encrypt_str("test-auth-key-for-push")
+            conn.execute(
+                "INSERT INTO gpt_load_config (name, base_url, auth_key_encrypted) "
+                "VALUES (?, ?, ?)",
+                ("test-gptload", "http://127.0.0.1:19999", auth_enc),
+            )
+            for name, group_id in mappings:
+                conn.execute(
+                    "INSERT INTO provider_group_mapping "
+                    "(provider_name, gpt_load_config_id, group_id, group_name) "
+                    "VALUES (?, 1, ?, ?)",
+                    (name, group_id, name),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _write(workspace: str, provider: str, filename: str, keys: list[str]) -> None:
+        provider_dir = Path(workspace) / "providers" / provider
+        provider_dir.mkdir(parents=True, exist_ok=True)
+        (provider_dir / filename).write_text("\n".join(keys), encoding="utf-8")
+
+    @staticmethod
+    def _ok(added: int = 1) -> MagicMock:
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = {
+            "code": 0,
+            "data": {"credentials_added": added, "credentials_duplicated": 0},
+        }
+        return resp
+
+    def test_tier_mapping_resolves_to_tier_group(self) -> None:
+        db_path = _temp_db_path()
+        with tempfile.TemporaryDirectory() as workspace:
+            self._seed(db_path, [("doubao:seed", 5)])
+            self._write(workspace, "doubao", "valid-keys-seed.txt", ["sk-seed-aaaa"])
+
+            from web.push import PushService
+
+            svc = PushService(db_path=db_path, workspace=workspace)
+            with patch("web.push.requests.post", return_value=self._ok(1)) as mock_post:
+                svc.push_valid_keys("doubao:seed", "run-tier-1")
+
+            mock_post.assert_called_once()
+            self.assertIn("/api/groups/5/credentials/import", mock_post.call_args[0][0])
+            self.assertIn("sk-seed-aaaa", mock_post.call_args[1]["json"]["credentials"])
+
+    def test_fanout_per_tier_and_union_not_pushed(self) -> None:
+        db_path = _temp_db_path()
+        with tempfile.TemporaryDirectory() as workspace:
+            self._seed(db_path, [("doubao:seed", 5), ("doubao:thirdparty", 6)])
+            self._write(workspace, "doubao", "valid-keys-seed.txt", ["sk-seed-aaaa"])
+            self._write(workspace, "doubao", "valid-keys-thirdparty.txt", ["sk-tp-bbbb"])
+            self._write(workspace, "doubao", "valid-keys.txt", ["sk-union-cccc"])
+
+            from web.push import PushService
+
+            svc = PushService(db_path=db_path, workspace=workspace)
+            with patch("web.push.requests.post", return_value=self._ok(1)) as mock_post:
+                svc.push_valid_keys("doubao", "run-tier-2")
+
+            self.assertEqual(mock_post.call_count, 2)
+            urls = [call[0][0] for call in mock_post.call_args_list]
+            self.assertTrue(any("/api/groups/5/" in url for url in urls), urls)
+            self.assertTrue(any("/api/groups/6/" in url for url in urls), urls)
+            bodies = "".join(call[1]["json"]["credentials"] for call in mock_post.call_args_list)
+            self.assertIn("sk-seed-aaaa", bodies)
+            self.assertIn("sk-tp-bbbb", bodies)
+            self.assertNotIn("sk-union-cccc", bodies)
+
+    def test_no_tier_mapping_uses_single_group(self) -> None:
+        db_path = _temp_db_path()
+        with tempfile.TemporaryDirectory() as workspace:
+            self._seed(db_path, [("doubao", 4)])
+            self._write(workspace, "doubao", "valid-keys.txt", ["sk-union-aaaa"])
+
+            from web.push import PushService
+
+            svc = PushService(db_path=db_path, workspace=workspace)
+            with patch("web.push.requests.post", return_value=self._ok(1)) as mock_post:
+                svc.push_valid_keys("doubao", "run-tier-3")
+
+            mock_post.assert_called_once()
+            self.assertIn("/api/groups/4/credentials/import", mock_post.call_args[0][0])
+            self.assertIn("sk-union-aaaa", mock_post.call_args[1]["json"]["credentials"])
 
 
 # ---------------------------------------------------------------------------

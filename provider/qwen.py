@@ -71,7 +71,14 @@ class QwenProvider(OpenAILikeProvider):
         # Models endpoint passed, but DashScope returns 200 there for
         # zero-balance accounts too. Probe a real chat completion to surface 402.
         model = trim(model) or self._default_model
-        return self._check_completion(base_url=base_url, headers=headers, model=model, timeout=timeout, retries=retries)
+        result = self._check_completion(
+            base_url=base_url, headers=headers, model=model, timeout=timeout, retries=retries
+        )
+
+        # Capability tiers (optional): only for keys that PASSED the two gates.
+        if result.available and self._capability_tiers:
+            result = self._apply_capability_tiers(token, result)
+        return result
 
     def _check_completion(
         self, base_url: str, headers: dict, model: str, timeout: int, retries: int

@@ -86,6 +86,17 @@ tasks:
     # which drops further search tasks at worker entry.
     max_pages: 1000
     search_types: [code]
+    # Capability tiers (mirrors config-qwen.yaml with the intl base_url):
+    # flagship/legacy = the qwen family; thirdparty = a non-qwen model
+    # currently served on Bailian (deepseek-v4.1-flash-1017, fetched
+    # 2026-11-02 from the Bailian text-generation model list).
+    capability_tiers:
+      - name: flagship
+        probe_model: qwen3.8-max-0902
+      - name: legacy
+        probe_model: qwen-turbo
+      - name: thirdparty
+        probe_model: deepseek-v4.1-flash-1017
     stages:
       search: true
       gather: true

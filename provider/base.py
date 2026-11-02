@@ -16,6 +16,8 @@ from search.client import chat
 from tools.logger import get_logger
 from tools.utils import trim
 
+from .capability import TIER_OK, probe_tiers
+
 logger = get_logger("provider")
 
 
@@ -26,6 +28,25 @@ def _normalize_path(value: str, strict: bool = True) -> str:
 
     pattern = r"[^a-zA-Z0-9_\-]" if strict else r"[^a-zA-Z0-9_\-/\\]"
     return re.sub(pattern, "-", value, flags=re.I).strip("-").lower()
+
+
+def _parse_capability_tiers(value) -> List[Dict[str, str]]:
+    """Normalize a ``capability_tiers`` config value into ``{name, probe_model}`` entries.
+
+    Invalid entries (missing either field, non-dict) are dropped so a malformed
+    tier can never abort provider construction or probe a bogus model.
+    """
+    if not isinstance(value, list):
+        return []
+    tiers: List[Dict[str, str]] = []
+    for entry in value:
+        if not isinstance(entry, dict):
+            continue
+        name = trim(entry.get("name", ""))
+        probe_model = trim(entry.get("probe_model", ""))
+        if name and probe_model:
+            tiers.append({"name": name, "probe_model": probe_model})
+    return tiers
 
 
 class AIBaseProvider(IProvider):
@@ -162,6 +183,11 @@ class AIBaseProvider(IProvider):
         # search and extract keys conditions
         self._conditions = list(items)
 
+        # Capability tiers (optional): only the providers that declare them run
+        # tier probing. Popped here so the raw config value never leaks into
+        # self.extras.
+        self._capability_tiers = _parse_capability_tiers(kwargs.pop("capability_tiers", None))
+
         # additional parameters for provider
         self.extras = kwargs
 
@@ -271,6 +297,37 @@ class AIBaseProvider(IProvider):
     def result(self) -> ResultStorage:
         """Result storage metadata for this provider"""
         return self._result
+
+    @property
+    def capability_tiers(self) -> List[Dict[str, str]]:
+        """Declared capability tiers (``[{name, probe_model}]``); empty = disabled."""
+        return self._capability_tiers
+
+    @property
+    def tier_names(self) -> List[str]:
+        """Declared tier names, in config order."""
+        return [entry["name"] for entry in self._capability_tiers]
+
+    def _apply_capability_tiers(self, token: str, result: CheckResult) -> CheckResult:
+        """Measure tier outcomes for a gate-passed key and fold into the verdict.
+
+        Called by providers ONLY after their cheap gate has already returned
+        ``available``. A key that serves no tier is invalid (the key may
+        authenticate but is unusable for the pool's per-tier groups); a
+        RETRYABLE tier stays out of the usable set without killing the key.
+        """
+        tiers = probe_tiers(self, token)
+        result.tiers = tiers
+        if not any(outcome == TIER_OK for outcome in tiers.values()):
+            result.available = False
+            result.error_reason = ErrorReason.INVALID_KEY
+            result.status_code = None
+            detail = ", ".join(f"{n}={o}" for n, o in sorted(tiers.items())) or "no tiers probed"
+            result.message = (
+                f"key passed the gate but served no capability tier "
+                f"(pool unusable): {detail}"
+            )
+        return result
 
     def get_patterns(self) -> Patterns:
         """Get patterns configuration for this provider"""

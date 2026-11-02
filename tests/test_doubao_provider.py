@@ -19,8 +19,16 @@ import os
 import unittest
 from unittest import mock
 
+from constant.capability import (
+    TIER_NO_ACCESS,
+    TIER_NO_MODEL,
+    TIER_NO_QUOTA,
+    TIER_OK,
+    TIER_RETRYABLE,
+)
 from core.enums import ErrorReason
 from core.models import Condition, Patterns
+from provider.capability import classify_tier
 from provider.doubao import DoubaoProvider
 from provider.openai_like import OpenAILikeProvider
 from provider.registry import ProviderRegistry, get_available_providers
@@ -39,6 +47,18 @@ def _make_condition() -> Condition:
 
 def _key() -> str:
     return "7fb7a1c2-4d3e-8f9a-bcde-1234abcdef56"
+
+
+# Capability tiers declared on the doubao task (lockstep with
+# config/defaults.py + examples/config-doubao.yaml).
+_DOUBAO_TIERS = [
+    {"name": "seed", "probe_model": "doubao-seed-2-1-pro-260915"},
+    {"name": "thirdparty", "probe_model": "deepseek-v4-1-flash-261017"},
+]
+
+
+def _tier_provider() -> DoubaoProvider:
+    return DoubaoProvider(conditions=[_make_condition()], capability_tiers=_DOUBAO_TIERS)
 
 
 # Bad-key responses measured 2026-10-29 (wave0-cn.md probe b): no key and a
@@ -200,6 +220,72 @@ class TestDoubaoProviderCheck(unittest.TestCase):
         with mock.patch(CHAT_PATCH, return_value=(200, COMPLETION_OK)) as chat_mock:
             self.provider.check(token=_key())
         self.assertEqual(chat_mock.call_args.kwargs.get("model"), "doubao-seed-2-1-pro-260915")
+
+
+TIER_CHAT_PATCH = "provider.capability.chat"
+
+
+class TestDoubaoCapabilityTiers(unittest.TestCase):
+    """Capability-tier flow: probing runs only after the cheap gate passes,
+    each tier's outcome maps to a class, a zero-tier key is invalid and a
+    partial-tier key records only the OK tier."""
+
+    def setUp(self):
+        self.provider = _tier_provider()
+        self._ua_patcher = mock.patch(UA_PATCH, return_value="test-agent")
+        self._ua_patcher.start()
+
+    def tearDown(self):
+        self._ua_patcher.stop()
+
+    def test_probe_skipped_when_cheap_gate_fails(self):
+        with mock.patch(CHAT_PATCH, return_value=(401, AUTH_ERROR_401)), mock.patch(
+            TIER_CHAT_PATCH
+        ) as tier_chat:
+            result = self.provider.check(token=_key())
+
+        self.assertFalse(result.available)
+        self.assertEqual(result.reason, ErrorReason.INVALID_KEY)
+        self.assertEqual(result.tiers, {})
+        tier_chat.assert_not_called()
+
+    def test_tier_outcome_classes(self):
+        self.assertEqual(classify_tier(200, COMPLETION_OK), TIER_OK)
+        self.assertEqual(classify_tier(401, "unauthorized"), TIER_NO_ACCESS)
+        self.assertEqual(classify_tier(403, "forbidden"), TIER_NO_ACCESS)
+        self.assertEqual(classify_tier(402, '{"error":{"code":"Arrearage"}}'), TIER_NO_QUOTA)
+        self.assertEqual(classify_tier(404, "not found"), TIER_NO_MODEL)
+        self.assertEqual(classify_tier(500, "server error"), TIER_RETRYABLE)
+        self.assertEqual(classify_tier(0, "timeout"), TIER_RETRYABLE)
+        self.assertEqual(classify_tier(200, "<html>captive</html>"), TIER_RETRYABLE)
+
+    def test_zero_tier_pass_is_invalid(self):
+        with mock.patch(CHAT_PATCH, return_value=(200, COMPLETION_OK)), mock.patch(
+            TIER_CHAT_PATCH, side_effect=[(401, "no"), (404, "no")]
+        ):
+            result = self.provider.check(token=_key())
+
+        self.assertFalse(result.available)
+        self.assertEqual(result.reason, ErrorReason.INVALID_KEY)
+        self.assertNotEqual(result.tiers, {})
+
+    def test_partial_tier_records_only_ok(self):
+        with mock.patch(CHAT_PATCH, return_value=(200, COMPLETION_OK)), mock.patch(
+            TIER_CHAT_PATCH, side_effect=[(200, COMPLETION_OK), (404, "no")]
+        ):
+            result = self.provider.check(token=_key())
+
+        self.assertTrue(result.available)
+        self.assertEqual(result.tiers, {"seed": TIER_OK, "thirdparty": TIER_NO_MODEL})
+
+    def test_all_tiers_ok_is_valid(self):
+        with mock.patch(CHAT_PATCH, return_value=(200, COMPLETION_OK)), mock.patch(
+            TIER_CHAT_PATCH, side_effect=[(200, COMPLETION_OK), (200, COMPLETION_OK)]
+        ):
+            result = self.provider.check(token=_key())
+
+        self.assertTrue(result.available)
+        self.assertEqual(result.tiers, {"seed": TIER_OK, "thirdparty": TIER_OK})
 
 
 class TestDoubaoLiveCheck(unittest.TestCase):

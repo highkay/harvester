@@ -9,8 +9,9 @@ import os
 import unittest
 from unittest import mock
 
+from constant.capability import TIER_NO_MODEL, TIER_OK, TIER_RETRYABLE
 from core.enums import ErrorReason
-from core.models import CheckResult, Condition, Patterns
+from core.models import Condition, Patterns
 from provider.qwen import QwenProvider
 from provider.openai_like import OpenAILikeProvider
 from provider.registry import ProviderRegistry, get_available_providers
@@ -26,6 +27,19 @@ def _make_condition() -> Condition:
         description="test",
         enabled=True,
     )
+
+
+# Capability tiers declared on the qwen tasks (lockstep with
+# config/defaults.py + examples/config-qwen*.yaml).
+_QWEN_TIERS = [
+    {"name": "flagship", "probe_model": "qwen3.8-max-0902"},
+    {"name": "legacy", "probe_model": "qwen-turbo"},
+    {"name": "thirdparty", "probe_model": "deepseek-v4.1-flash-1017"},
+]
+
+
+def _tier_provider() -> QwenProvider:
+    return QwenProvider(conditions=[_make_condition()], capability_tiers=_QWEN_TIERS)
 
 
 MODELS_RESPONSE = json.dumps(
@@ -185,6 +199,82 @@ class TestQwenProviderCheck(unittest.TestCase):
 
         self.assertFalse(result.available)
         self.assertEqual(result.reason, ErrorReason.SERVER_ERROR)
+
+
+TIER_CHAT_PATCH = "provider.capability.chat"
+
+
+class TestQwenCapabilityTiers(unittest.TestCase):
+    """Qwen tier flow: probing runs only after the models + completion gates
+    pass, one probe per declared tier, and a zero-tier key is invalid."""
+
+    def setUp(self):
+        self.provider = _tier_provider()
+        self._ua_patcher = mock.patch(UA_PATCH, return_value="test-agent")
+        self._ua_patcher.start()
+
+    def tearDown(self):
+        self._ua_patcher.stop()
+
+    def test_probe_skipped_when_models_gate_fails(self):
+        with _patch_request(FakeResponse(401, '{"error":{"code":"invalid_api_key"}}')), mock.patch(
+            TIER_CHAT_PATCH
+        ) as tier_chat:
+            result = self.provider.check(token="sk-invalid")
+
+        self.assertFalse(result.available)
+        self.assertEqual(result.reason, ErrorReason.INVALID_KEY)
+        self.assertEqual(result.tiers, {})
+        tier_chat.assert_not_called()
+
+    def test_one_probe_per_tier_after_gates_pass(self):
+        with mock.patch(
+            "provider.qwen.request",
+            side_effect=[FakeResponse(200, MODELS_RESPONSE), FakeResponse(200, COMPLETION_OK)],
+        ), mock.patch(
+            TIER_CHAT_PATCH,
+            side_effect=[(200, COMPLETION_OK), (200, COMPLETION_OK), (200, COMPLETION_OK)],
+        ) as tier_chat:
+            result = self.provider.check(token="sk-valid")
+
+        self.assertTrue(result.available)
+        self.assertEqual(
+            result.tiers,
+            {"flagship": TIER_OK, "legacy": TIER_OK, "thirdparty": TIER_OK},
+        )
+        self.assertEqual(
+            [call.kwargs.get("model") for call in tier_chat.call_args_list],
+            ["qwen3.8-max-0902", "qwen-turbo", "deepseek-v4.1-flash-1017"],
+        )
+
+    def test_zero_tier_pass_is_invalid(self):
+        with mock.patch(
+            "provider.qwen.request",
+            side_effect=[FakeResponse(200, MODELS_RESPONSE), FakeResponse(200, COMPLETION_OK)],
+        ), mock.patch(
+            TIER_CHAT_PATCH, side_effect=[(404, "no"), (404, "no"), (404, "no")]
+        ):
+            result = self.provider.check(token="sk-valid")
+
+        self.assertFalse(result.available)
+        self.assertEqual(result.reason, ErrorReason.INVALID_KEY)
+        self.assertEqual(set(result.tiers.values()), {TIER_NO_MODEL})
+
+    def test_retryable_tier_does_not_kill_partial_key(self):
+        with mock.patch(
+            "provider.qwen.request",
+            side_effect=[FakeResponse(200, MODELS_RESPONSE), FakeResponse(200, COMPLETION_OK)],
+        ), mock.patch(
+            TIER_CHAT_PATCH,
+            side_effect=[(200, COMPLETION_OK), (500, "boom"), (404, "no")],
+        ):
+            result = self.provider.check(token="sk-valid")
+
+        self.assertTrue(result.available)
+        self.assertEqual(
+            result.tiers,
+            {"flagship": TIER_OK, "legacy": TIER_RETRYABLE, "thirdparty": TIER_NO_MODEL},
+        )
 
 
 class TestQwenProviderInspect(unittest.TestCase):

@@ -19,6 +19,7 @@ from typing import Any
 
 import requests
 
+from constant.capability import tier_file_name
 from tools.logger import get_logger
 
 from .crypto import decrypt_str
@@ -72,10 +73,12 @@ class PushService:
         # invoke the completion hook twice for one run (TaskManager completion
         # listener + the direct _push_completed_tasks call), which without this
         # guard duplicates the gpt-load HTTP push and the push_logs row.
-        # Keyed by (provider_name, run_id) — NOT run_id alone — because one
-        # config can define multiple tasks (e.g. mimo-cn + mimo-sg) that share
-        # a run_id but push different valid-keys files.
-        self._seen_run_keys: set[tuple[str, str]] = set()
+        # Keyed by (provider_name, tier, run_id) — NOT run_id alone, and tier is
+        # part of the key so a capability-tier push and the single-group push of
+        # the same run never swallow one another; one config can also define
+        # multiple tasks (e.g. mimo-cn + mimo-sg) sharing a run_id but pushing
+        # different valid-keys files.
+        self._seen_run_keys: set[tuple[str, str, str]] = set()
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------------
@@ -83,7 +86,7 @@ class PushService:
     # ------------------------------------------------------------------
 
     def push_valid_keys(self, provider_name: str, run_id: str) -> None:
-        """Read valid-keys.txt and push to gpt-load.
+        """Push valid keys to gpt-load, fanning out per capability tier file.
 
         Called by ``PipelineRunner._on_completed`` in a background thread.
         All errors are caught and logged; the method never raises.
@@ -93,109 +96,32 @@ class PushService:
                 f"Push started: provider={provider_name} run_id={run_id}"
             )
 
-            # 0. Idempotency guard — prevents _on_completed double-fire from
-            # duplicating the push and the push_logs row (see __init__).
-            with self._lock:
-                seen_key = (provider_name, run_id)
-                if seen_key in self._seen_run_keys:
-                    logger.info(
-                        f"Push skipped: provider={provider_name} "
-                        f"run_id={run_id} already pushed"
-                    )
-                    return
-                self._seen_run_keys.add(seen_key)
-
-            # 1. Resolve mapping
-            mapping = self._get_mapping(provider_name)
-            if mapping is None:
+            # Resolve push targets. Capability-tier mappings
+            # ("{provider}:{tier}") win when present and the union file is then
+            # NOT pushed; otherwise this is exactly today's single-group path.
+            targets = self._resolve_push_targets(provider_name)
+            if not targets:
                 logger.info(
                     f"No gpt-load mapping for provider '{provider_name}' — skipping push"
                 )
                 return
 
-            # 2. Resolve gpt-load config
-            config = self._get_gpt_load_config(mapping["gpt_load_config_id"])
-            if config is None:
-                err = (
-                    f"gpt_load_config id={mapping['gpt_load_config_id']} "
-                    f"not found for provider '{provider_name}'"
-                )
-                logger.error(err)
-                self._write_push_log(
-                    run_id=run_id,
-                    provider_name=provider_name,
-                    gpt_load_config_id=mapping["gpt_load_config_id"],
-                    group_id=mapping["group_id"],
-                    keys_count=0,
-                    added_count=0,
-                    ignored_count=0,
-                    status="failed",
-                    error_message=err,
-                )
-                return
+            for tier, mapping in targets:
+                # Per-target idempotency guard — prevents _on_completed
+                # double-fire from duplicating a push; keyed by
+                # (provider_name, tier, run_id) so a tier is never swallowed
+                # by a sibling tier sharing the same run_id (see __init__).
+                with self._lock:
+                    seen_key = (provider_name, tier, run_id)
+                    if seen_key in self._seen_run_keys:
+                        logger.info(
+                            f"Push skipped: provider={provider_name} "
+                            f"tier='{tier}' run_id={run_id} already pushed"
+                        )
+                        continue
+                    self._seen_run_keys.add(seen_key)
 
-            # 3. Decrypt auth_key
-            try:
-                auth_key = decrypt_str(config["auth_key_encrypted"])
-            except ValueError as exc:
-                err = (
-                    f"Failed to decrypt auth_key for gpt_load_config "
-                    f"id={mapping['gpt_load_config_id']}: {exc}"
-                )
-                logger.error(err)
-                self._write_push_log(
-                    run_id=run_id,
-                    provider_name=provider_name,
-                    gpt_load_config_id=mapping["gpt_load_config_id"],
-                    group_id=mapping["group_id"],
-                    keys_count=0,
-                    added_count=0,
-                    ignored_count=0,
-                    status="failed",
-                    error_message=err,
-                )
-                return
-
-            base_url = config["base_url"].rstrip("/")
-
-            # 4. Read valid keys
-            keys = self._read_valid_keys(provider_name)
-            if not keys:
-                logger.info(
-                    f"No valid keys found for provider '{provider_name}' — skipping push"
-                )
-                return
-
-            keys_count = len(keys)
-
-            # 5. Push to gpt-load (with retry)
-            push_result = self._push_keys(
-                base_url,
-                auth_key,
-                mapping["group_id"],
-                keys,
-                max_size=int(mapping.get("max_size") or 10000),
-            )
-
-            # 6. Write push log
-            self._write_push_log(
-                run_id=run_id,
-                provider_name=provider_name,
-                gpt_load_config_id=mapping["gpt_load_config_id"],
-                group_id=mapping["group_id"],
-                keys_count=keys_count,
-                added_count=push_result["added_count"],
-                ignored_count=push_result["ignored_count"],
-                status=push_result["status"],
-                error_message=push_result.get("error_message"),
-            )
-
-            logger.info(
-                f"Push complete: provider={provider_name} run_id={run_id} "
-                f"status={push_result['status']} "
-                f"added={push_result['added_count']} "
-                f"ignored={push_result['ignored_count']}"
-            )
+                self._push_target(provider_name, tier, mapping, run_id)
 
         except Exception as exc:
             logger.error(
@@ -221,6 +147,139 @@ class PushService:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _resolve_push_targets(self, provider_name: str) -> list[tuple[str, dict[str, Any]]]:
+        """Ordered ``(tier, mapping)`` targets; an empty tier means the union file.
+
+        Capability-tier mappings ("{provider}:{tier}") win when present, so a
+        provider wired for tiers pushes each tier file to its own group and
+        never the union. Otherwise the base mapping is the single-group path.
+        """
+        tier_mappings = self._get_tier_mappings(provider_name)
+        if tier_mappings:
+            prefix = f"{provider_name}:"
+            targets: list[tuple[str, dict[str, Any]]] = []
+            for mapping in tier_mappings:
+                mapped_name = mapping.get("provider_name") or ""
+                tier = mapped_name[len(prefix) :] if mapped_name.startswith(prefix) else ""
+                targets.append((tier, mapping))
+            return targets
+
+        mapping = self._get_mapping(provider_name)
+        if mapping is None:
+            return []
+
+        # A "provider:tier" name reads that tier's file; a bare provider name
+        # reads the union file (exactly today's single-group path).
+        tier = provider_name.split(":", 1)[1] if ":" in provider_name else ""
+        return [(tier, mapping)]
+
+    def _push_target(self, provider_name: str, tier: str, mapping: dict[str, Any], run_id: str) -> None:
+        """Push one target (tier file or union file) to its gpt-load group.
+
+        Mirrors the former single-group body of ``push_valid_keys`` one level
+        down so each tier target is logged and retried independently.
+        """
+        # 1. Resolve gpt-load config
+        config = self._get_gpt_load_config(mapping["gpt_load_config_id"])
+        if config is None:
+            err = (
+                f"gpt_load_config id={mapping['gpt_load_config_id']} "
+                f"not found for provider '{provider_name}'"
+            )
+            logger.error(err)
+            self._write_push_log(
+                run_id=run_id,
+                provider_name=provider_name,
+                gpt_load_config_id=mapping["gpt_load_config_id"],
+                group_id=mapping["group_id"],
+                keys_count=0,
+                added_count=0,
+                ignored_count=0,
+                status="failed",
+                error_message=err,
+            )
+            return
+
+        # 2. Decrypt auth_key
+        try:
+            auth_key = decrypt_str(config["auth_key_encrypted"])
+        except ValueError as exc:
+            err = (
+                f"Failed to decrypt auth_key for gpt_load_config "
+                f"id={mapping['gpt_load_config_id']}: {exc}"
+            )
+            logger.error(err)
+            self._write_push_log(
+                run_id=run_id,
+                provider_name=provider_name,
+                gpt_load_config_id=mapping["gpt_load_config_id"],
+                group_id=mapping["group_id"],
+                keys_count=0,
+                added_count=0,
+                ignored_count=0,
+                status="failed",
+                error_message=err,
+            )
+            return
+
+        base_url = config["base_url"].rstrip("/")
+
+        # 3. Read valid keys (union file for tier "", else valid-keys-<tier>.txt)
+        keys = self._read_valid_keys(provider_name, tier)
+        if not keys:
+            logger.info(
+                f"No valid keys found for provider '{provider_name}' "
+                f"tier='{tier}' — skipping push"
+            )
+            return
+
+        keys_count = len(keys)
+
+        # 4. Push to gpt-load (with retry)
+        push_result = self._push_keys(
+            base_url,
+            auth_key,
+            mapping["group_id"],
+            keys,
+            max_size=int(mapping.get("max_size") or 10000),
+        )
+
+        # 5. Write push log
+        self._write_push_log(
+            run_id=run_id,
+            provider_name=provider_name,
+            gpt_load_config_id=mapping["gpt_load_config_id"],
+            group_id=mapping["group_id"],
+            keys_count=keys_count,
+            added_count=push_result["added_count"],
+            ignored_count=push_result["ignored_count"],
+            status=push_result["status"],
+            error_message=push_result.get("error_message"),
+        )
+
+        logger.info(
+            f"Push complete: provider={provider_name} tier='{tier}' run_id={run_id} "
+            f"status={push_result['status']} "
+            f"added={push_result['added_count']} "
+            f"ignored={push_result['ignored_count']}"
+        )
+
+    def _get_tier_mappings(self, provider_name: str) -> list[dict[str, Any]]:
+        """All enabled "{provider}:{tier}" mappings for *provider_name*."""
+        conn = sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True)
+        try:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute(
+                "SELECT provider_name, gpt_load_config_id, group_id, group_name, max_size "
+                "FROM provider_group_mapping "
+                "WHERE provider_name LIKE ? AND enabled = 1 "
+                "ORDER BY provider_name",
+                (f"{provider_name}:%",),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+        finally:
+            conn.close()
 
     def _get_mapping(self, provider_name: str) -> dict[str, Any] | None:
         """Look up provider_group_mapping by *provider_name*.
@@ -264,15 +323,23 @@ class PushService:
         finally:
             conn.close()
 
-    def _read_valid_keys(self, provider_name: str) -> list[str]:
-        """Read valid-keys.txt from the workspace providers directory.
+    def _read_valid_keys(self, provider_name: str, tier: str = "") -> list[str]:
+        """Read a valid-keys file from the workspace providers directory.
 
-        Path: ``{workspace}/providers/{provider_name}/valid-keys.txt``
-        Returns a list of non-empty, deduplicated keys.
+        An empty *tier* reads the union ``valid-keys.txt``; a tier reads
+        ``valid-keys-<tier>.txt``. The tier file lives in the BASE provider
+        directory, so a ``provider:name`` form is stripped of its tier suffix.
+        Returns non-empty, deduplicated keys.
         """
-        keys_path = self._workspace / "providers" / provider_name / "valid-keys.txt"
+        filename = tier_file_name(tier) if tier else "valid-keys.txt"
+        # "doubao:seed" -> directory "doubao" when the tier suffix is present.
+        if tier and provider_name.endswith(f":{tier}"):
+            directory = provider_name[: -(len(tier) + 1)]
+        else:
+            directory = provider_name
+        keys_path = self._workspace / "providers" / directory / filename
         if not keys_path.exists():
-            logger.info(f"valid-keys.txt not found: {keys_path}")
+            logger.info(f"{filename} not found: {keys_path}")
             return []
 
         try:

@@ -768,6 +768,14 @@ def get_default_config() -> Dict[str, Any]:
                 "provider_type": "doubao",
                 "use_api": True,
                 "max_pages": 1000,
+                # Capability tiers (lockstep with examples/config-doubao.yaml):
+                # seed = native doubao models; thirdparty = non-seed models
+                # currently served on Ark (deepseek-v4-1-flash-261017, fetched
+                # 2026-11-02 from the Ark text-generation model list).
+                "capability_tiers": [
+                    {"name": "seed", "probe_model": "doubao-seed-2-1-pro-260915"},
+                    {"name": "thirdparty", "probe_model": "deepseek-v4-1-flash-261017"},
+                ],
                 "stages": {
                     "search": True,
                     "gather": True,
@@ -1587,6 +1595,15 @@ def get_default_config() -> Dict[str, Any]:
                 "provider_type": "qwen",
                 "use_api": True,
                 "max_pages": 1000,
+                # Capability tiers (lockstep with examples/config-qwen*.yaml):
+                # flagship/legacy = qwen family; thirdparty = a non-qwen model
+                # currently served on Bailian (deepseek-v4.1-flash-1017, fetched
+                # 2026-11-02 from the Bailian text-generation model list).
+                "capability_tiers": [
+                    {"name": "flagship", "probe_model": "qwen3.8-max-0902"},
+                    {"name": "legacy", "probe_model": "qwen-turbo"},
+                    {"name": "thirdparty", "probe_model": "deepseek-v4.1-flash-1017"},
+                ],
                 "stages": {
                     "search": True,
                     "gather": True,

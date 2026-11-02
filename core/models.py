@@ -474,6 +474,10 @@ class CheckResult:
     message: str = ""
     response_time: float = 0.0
     status_code: Optional[int] = None
+    # Capability-tier outcomes (provider capability_tiers declared): tier name
+    # -> outcome class (provider/capability.py TIER_*). Empty when the provider
+    # declares no tiers. CheckStage admits a valid key only into the OK tiers.
+    tiers: Dict[str, str] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -520,6 +524,7 @@ class CheckResult:
             "message": self.message,
             "response_time": self.response_time,
             "status_code": self.status_code,
+            "tiers": self.tiers,
         }
 
 

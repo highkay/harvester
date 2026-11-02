@@ -19,6 +19,7 @@ from collections.abc import Hashable
 from typing import Any, Dict, List, Optional, Union
 from weakref import WeakKeyDictionary
 
+from constant.capability import tier_file_name, tier_result_type
 from constant.runtime import RESULT_MAPPINGS
 from core.enums import ResultType
 from core.models import AllRecoveredTasks, RecoveredTasks, ResultStorage, Service
@@ -292,6 +293,13 @@ class ResultManager:
             if not filename:
                 continue
             self.files[result_type.value] = os.path.join(self.directory, filename)
+
+        # Capability-tier files: one valid-keys-<tier>.txt per declared tier,
+        # written through the same buffers/strategy as the union valid-keys.txt.
+        for tier in getattr(provider, "tier_names", []) or []:
+            self.files[tier_result_type(tier)] = os.path.join(
+                self.directory, tier_file_name(tier)
+            )
 
         # Initialize persistence strategy based on mode
         if simple:

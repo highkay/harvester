@@ -73,6 +73,15 @@ tasks:
     # API_MAX_PAGES=10); the corpus is bounded by global.max_links_per_run.
     max_pages: 1000
     search_types: [code]
+    # Capability tiers (lockstep with config/defaults.py doubao preset):
+    # seed = native doubao models; thirdparty = non-seed models currently
+    # served on Ark (deepseek-v4-1-flash-261017, fetched 2026-11-02 from the
+    # Ark text-generation model list).
+    capability_tiers:
+      - name: seed
+        probe_model: doubao-seed-2-1-pro-260915
+      - name: thirdparty
+        probe_model: deepseek-v4-1-flash-261017
     stages:
       search: true
       gather: true

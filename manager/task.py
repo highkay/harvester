@@ -139,6 +139,10 @@ class ProviderFactory:
 
         kwargs["use_proxy"] = bool(api_config.use_proxy)
 
+        # Capability tiers are a task-level declaration; only the providers that
+        # read them will probe (others ignore the empty default).
+        kwargs["capability_tiers"] = task_config.capability_tiers or []
+
         return ProviderRegistry.create(provider_type, conditions=conditions, **kwargs)
 
 
