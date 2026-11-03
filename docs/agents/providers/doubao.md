@@ -96,3 +96,26 @@ is not hex, so the UUID pattern cannot capture them.
 - Lane sampler (this todo's evidence file
   `.omo/evidence/magpie-coverage/todo6-ark.md`) — UUID v4 shape
   verification, corpus totals.
+
+## Depth gate, verdict cache and measured yield (2026-11-03)
+
+`doubao` is inside `VERDICT_CACHE_TASKS`: an explicit `INVALID_KEY` is reused
+for 30 days and an explicit `NO_QUOTA` for 14 days; anything else is re-probed
+on the next pass. The cache key includes task, key, normalized base URL,
+endpoint, probe model and tier, so a region/model change can never produce a
+false hit.
+
+Depth stays at `max_links_per_run: 9000`. The pre-registered gate for raising it
+to 12,000 required `gather_304_empty >= 50%` of processed links; measured
+values were 41.92% (natural run `270a3911-70af-4e20-bbba-8a9991c6ce0f`, 5799 /
+13835), 48.36% (`e865288f`, 8012 / 16566) and 41.06% (`ef06ce7b`, 6079 /
+14804). All three windows fail, so the config was left byte-identical and no
+12,000 canary ran; `yield_causality` remains UNKNOWN. Evidence:
+`.omo/evidence/mimo-qwen-doubao-yield-optimization-execution/task-13-doubao-depth.json`.
+
+Measured production yield through 2026-11-03: 4 runs, 11 lifetime valid keys,
+first run 2026-10-29. The provider is young and thin — do not read a single
+zero-valid run as a verdict on the provider. The 2026-11-03 efficient pass
+(`ef06ce7b-72d1-4cda-98ac-f048e4c48697`, 1200s, 508 checked, 21,423 links,
+1,279 materials) produced 2 valid keys; it is a manual probe, not a natural
+cycle.

@@ -37,6 +37,7 @@ The same table lives in `docs/agents/README.md`.
 | Provider: gemini | `docs/agents/providers/gemini.md` | gemini scans/validation: `/v1beta/models` list gate is real (403 no-key, 400 API_KEY_INVALID for bad keys), width-39 `AIza` corpus shape, `RESOURCE_EXHAUSTED`→NO_QUOTA pin |
 | Provider: doubao | `docs/agents/providers/doubao.md` | doubao work: UUID keys, capability tiers and per-tier groups |
 | Provider: qwen family | `docs/agents/providers/qwen.md` | qwen-cn / qwen-intl work: auth+quota gates, capability tiers and push mappings |
+| Provider: mimo | `docs/agents/providers/mimo.md` | mimo-cn / mimo-sg work: tp- prefix and region-bound Token Plan keys, the presence-only `/models` trap, push groups 5/4, verdict-cache TTLs |
 | Provider: mistral | `docs/agents/providers/mistral.md` | mistral scans/validation: real `/v1/models` 401 gate (no-key and bad-key alike), prefix-less 32-alnum corpus shape (env+domain anchored pattern), unverified `mistral-small-latest` probe id, 429 rate-limit vs quota split |
 | Provider: exa | `docs/agents/providers/exa.md` | exa scans/validation/push, plan/quota handling or its config preset |
 | Infra: egress routing | `docs/agents/egress.md` | changing `_pick_proxy`, `HARVESTER_PROXY*`, the egress pool, exit failover or compose proxy env |

@@ -58,3 +58,25 @@ probe id. Positive qwen tier routing is pinned by unit tests; doubao supplied
 the live seed-only boundary proof.
 
 Evidence: `.omo/evidence/capability-20261030/prod-measure.md`.
+
+## Terminal-verdict cache and measured yield (2026-11-03)
+
+`qwen-cn` and `qwen-intl` are inside `VERDICT_CACHE_TASKS`
+(`stage/definition.py`). An explicit `INVALID_KEY` is reused for 30 days and an
+explicit `NO_QUOTA` for 14 days; every other verdict is re-probed. The cache
+key is `SHA-256(task + key + normalized base_url + endpoint + probe_model +
+tier)`, so a region/endpoint/model/tier change is a miss, never a false hit.
+`run-metrics` reports `live_probes` and `cache_hits` separately and their sum
+equals `checked`.
+
+Measured production yield through 2026-11-03:
+
+| Task | Runs | Lifetime valid | First run | Last run |
+|---|---|---|---|---|
+| `qwen-cn` | 71 | 838 | 2026-08-13 | 2026-11-03 |
+| `qwen-intl` | 11 | 12 | 2026-09-21 | 2026-11-02 |
+
+The 2026-11-03 user-directed efficient pass (`qwen-cn` run
+`d6599132-ddba-48a7-850d-712362aeb3f9`, 1236s, 241 checked, 20,816 links,
+300 materials) returned 0 valid keys. That run is a manual efficiency probe,
+not a natural cycle, so it is not a yield baseline.
