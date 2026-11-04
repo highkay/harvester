@@ -44,3 +44,25 @@
 - **Config**: `auto_restore: false` in both (the first-run pool is ~60k links;
   replaying it daily would re-gather the whole backlog). Schedules: `glm`
   `0 12`, `glm-ai` `0 13` (daily, staggered).
+
+## Capability split: glm-5.3-flash vs glm-4.7-flash (2026-11-04)
+
+`glm` now declares two capability tiers in `examples/config-glm.yaml` with
+`tier_mode: exclusive`:
+
+| tier | probe model | target |
+|---|---|---|
+| `flash53` | `glm-5.3-flash` | gpt-load group 32 (`glm53`) |
+| `flash47` | `glm-4.7-flash` | gpt-load group 15 (`glm`, the original) |
+
+Exclusive mode probes in declared order and stops at the first OK tier, so a
+key lands in exactly one group: a key that can serve `glm-5.3-flash` goes only
+to group 32; a key that can only serve `glm-4.7-flash` stays in group 15. The
+default `fan_out` mode (doubao/qwen) still admits a key into every OK tier.
+A key that serves neither tier is invalid; if no tier is OK but one is
+retryable it stays wait-check.
+
+Mappings are `glm:flash53` -> 32 and `glm:flash47` -> 15; the base `glm` -> 15
+mapping remains for legacy union-only runs. Group 32 was created with
+`confirm_same_target: true` because it shares the upstream base URL with group
+15 (gpt-load otherwise rejects the create with `CHANNEL_TARGET_CONFLICT`).

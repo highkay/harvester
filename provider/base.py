@@ -49,6 +49,12 @@ def _parse_capability_tiers(value) -> List[Dict[str, str]]:
     return tiers
 
 
+def _parse_tier_mode(value) -> str:
+    """Normalize ``tier_mode``; unknown values degrade to ``fan_out``."""
+    mode = str(value or "fan_out").strip().lower()
+    return mode if mode in ("fan_out", "exclusive") else "fan_out"
+
+
 class AIBaseProvider(IProvider):
     """Base implementation for AI service providers.
 
@@ -187,6 +193,7 @@ class AIBaseProvider(IProvider):
         # tier probing. Popped here so the raw config value never leaks into
         # self.extras.
         self._capability_tiers = _parse_capability_tiers(kwargs.pop("capability_tiers", None))
+        self._tier_mode = _parse_tier_mode(kwargs.pop("tier_mode", None))
 
         # additional parameters for provider
         self.extras = kwargs
@@ -307,6 +314,11 @@ class AIBaseProvider(IProvider):
     def tier_names(self) -> List[str]:
         """Declared tier names, in config order."""
         return [entry["name"] for entry in self._capability_tiers]
+
+    @property
+    def tier_mode(self) -> str:
+        """``fan_out`` (every OK tier) or ``exclusive`` (first OK tier only)."""
+        return self._tier_mode
 
     def _apply_capability_tiers(self, token: str, result: CheckResult) -> CheckResult:
         """Measure tier outcomes for a gate-passed key and fold into the verdict.

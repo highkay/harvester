@@ -453,6 +453,7 @@ class ConfigLoader:
             conditions=conditions,
             rate_limit=rate_limit,
             capability_tiers=data.get("capability_tiers") or [],
+            tier_mode=data.get("tier_mode") or "fan_out",
         )
 
     def _create_default_config(self) -> None:

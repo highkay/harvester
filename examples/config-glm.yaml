@@ -93,6 +93,12 @@ tasks:
       timeout: 30
       retries: 3
       use_proxy: false  # domestic endpoint — connect directly
+    capability_tiers:
+      - name: flash53
+        probe_model: glm-5.3-flash
+      - name: flash47
+        probe_model: glm-4.7-flash
+    tier_mode: exclusive
     patterns:
       # Body charset widened [A-Za-z0-9] -> [A-Za-z0-9_-] (2026-10-19: 52% of
       # measured valid keys on the SHARED <32hex>.<body> shape (ollama corpus)

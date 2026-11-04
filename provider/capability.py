@@ -116,8 +116,15 @@ def probe_tier(provider, token: str, probe_model: str) -> str:
 
 
 def probe_tiers(provider, token: str) -> Dict[str, str]:
-    """Probe every declared capability tier; returns ``{name: outcome}``."""
+    """Probe declared capability tiers; returns ``{name: outcome}``.
+
+    ``tier_mode=fan_out`` (default) probes every tier. ``exclusive`` probes in
+    declared order and stops at the first OK tier, so a key is admitted into
+    exactly one tier group (glm 5.3/4.7 split). A non-OK tier never stops the
+    walk; if no tier is OK the full outcome map still drives the verdict.
+    """
     tiers: Dict[str, str] = {}
+    exclusive = getattr(provider, "tier_mode", "fan_out") == "exclusive"
     for entry in provider.capability_tiers:
         if not isinstance(entry, dict):
             continue
@@ -125,5 +132,8 @@ def probe_tiers(provider, token: str) -> Dict[str, str]:
         probe_model = trim(entry.get("probe_model", ""))
         if not name or not probe_model:
             continue
-        tiers[name] = probe_tier(provider, token, probe_model)
+        outcome = probe_tier(provider, token, probe_model)
+        tiers[name] = outcome
+        if exclusive and outcome == TIER_OK:
+            break
     return tiers

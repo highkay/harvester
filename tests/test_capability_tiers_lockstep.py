@@ -32,6 +32,11 @@ _DOUBAO_TIERS = [
     {"name": "thirdparty", "probe_model": "deepseek-v4-1-flash-261017"},
 ]
 
+_GLM_TIERS = [
+    {"name": "flash53", "probe_model": "glm-5.3-flash"},
+    {"name": "flash47", "probe_model": "glm-4.7-flash"},
+]
+
 _QWEN_TIERS = [
     {"name": "flagship", "probe_model": "qwen3.8-max-0902"},
     {"name": "legacy", "probe_model": "qwen-turbo"},
@@ -64,6 +69,14 @@ class TestCapabilityTiersLockstep(unittest.TestCase):
         self.assertEqual(_preset("qwen")["capability_tiers"], _QWEN_TIERS)
         self.assertEqual(_example("config-qwen.yaml")["capability_tiers"], _QWEN_TIERS)
         self.assertEqual(_example("config-qwen-intl.yaml")["capability_tiers"], _QWEN_TIERS)
+
+    def test_glm_tiers_declared_in_lockstep(self):
+        preset = _preset("glm")
+        self.assertEqual(preset["capability_tiers"], _GLM_TIERS)
+        self.assertEqual(preset["tier_mode"], "exclusive")
+        example = _example("config-glm.yaml")
+        self.assertEqual(example["capability_tiers"], _GLM_TIERS)
+        self.assertEqual(example["tier_mode"], "exclusive")
 
     def test_thirdparty_probe_ids_pinned(self):
         doubao = _by_name(_preset("doubao")["capability_tiers"])

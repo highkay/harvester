@@ -455,8 +455,19 @@ class TaskConfig:
     rate_limit: RateLimitConfig = field(default_factory=RateLimitConfig)
     # Capability tiers: list of {name, probe_model}; empty = no tier probing.
     capability_tiers: List[Dict[str, str]] = field(default_factory=list)
+    # fan_out = probe every tier and place the key in each OK tier;
+    # exclusive = probe in declared order and stop at the first OK tier, so a
+    # key lands in exactly one tier group (used by glm 5.3/4.7 split).
+    tier_mode: str = "fan_out"
 
     def __post_init__(self):
+        mode = str(self.tier_mode or "fan_out").strip().lower()
+        if mode not in ("fan_out", "exclusive"):
+            raise ValueError(
+                f"Invalid tier_mode '{self.tier_mode}' for task {self.name or '<unnamed>'}; "
+                "allowed: ['fan_out', 'exclusive']"
+            )
+        self.tier_mode = mode
         if not self.search_types:
             self.search_types = ["code"]
         normalized: List[str] = []

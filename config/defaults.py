@@ -1402,6 +1402,14 @@ def get_default_config() -> Dict[str, Any]:
                 "provider_type": "glm",
                 "use_api": True,
                 "max_pages": 1000,
+                # Capability split locked to examples/config-glm.yaml: probe the
+                # paid 5.3 flash first, fall back to the free 4.7 flash, and in
+                # exclusive mode only the first OK tier receives the key.
+                "capability_tiers": [
+                    {"name": "flash53", "probe_model": "glm-5.3-flash"},
+                    {"name": "flash47", "probe_model": "glm-4.7-flash"},
+                ],
+                "tier_mode": "exclusive",
                 "stages": {
                     "search": True,
                     "gather": True,

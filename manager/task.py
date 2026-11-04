@@ -142,6 +142,7 @@ class ProviderFactory:
         # Capability tiers are a task-level declaration; only the providers that
         # read them will probe (others ignore the empty default).
         kwargs["capability_tiers"] = task_config.capability_tiers or []
+        kwargs["tier_mode"] = getattr(task_config, "tier_mode", "fan_out") or "fan_out"
 
         return ProviderRegistry.create(provider_type, conditions=conditions, **kwargs)
 
