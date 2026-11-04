@@ -117,3 +117,29 @@ class TestGlmAppliesTiers(unittest.TestCase):
                 mock.patch.object(GLMProvider, "_apply_capability_tiers") as apply:
             self.assertIs(provider.check("k"), failed)
         apply.assert_not_called()
+
+
+class TestTierQuotaClassification(unittest.TestCase):
+    def test_glm_1113_body_is_no_quota_not_retryable(self):
+        import json
+
+        from provider.capability import classify_tier
+
+        body = json.dumps({"error": {"code": "1113", "message": "余额不足或无可用资源包,请充值。"}})
+        self.assertEqual(classify_tier(429, body), TIER_NO_QUOTA)
+
+    def test_plain_429_without_quota_marker_stays_retryable(self):
+        import json
+
+        from provider.capability import classify_tier
+
+        body = json.dumps({"error": {"code": "1305", "message": "model overloaded"}})
+        self.assertEqual(classify_tier(429, body), TIER_RETRYABLE)
+
+    def test_exclusive_key_with_only_47_lands_in_flash47(self):
+        with mock.patch("provider.capability.probe_tier",
+                        side_effect=lambda p, t, m: TIER_NO_QUOTA if m == "glm-5.3-flash" else TIER_OK):
+            tiers = probe_tiers(_Stub(TIERS, "exclusive"), "k")
+        self.assertEqual(tiers, {"flash53": TIER_NO_QUOTA, "flash47": TIER_OK})
+        ok = [name for name, outcome in tiers.items() if outcome == TIER_OK]
+        self.assertEqual(ok, ["flash47"])

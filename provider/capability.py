@@ -47,7 +47,14 @@ __all__ = [
 # of the RETRYABLE default. Deliberately wider than the provider-level judges:
 # an over-broad match here merely keeps the tier out of the usable set (same
 # net effect as RETRYABLE), it can never discard a key.
-_QUOTA_MARKERS = re.compile(r"insufficient|quota|billing|credits|balance|arrearage", re.I)
+_QUOTA_MARKERS = re.compile(
+    r"insufficient|quota|billing|credits|balance|arrearage|"
+    r"余额不足|无可用资源包|请充值",
+    re.I,
+)
+
+# Upstream string codes that mean "this account cannot pay for this model".
+_QUOTA_CODES = frozenset({"1113"})
 
 
 def classify_tier(code: int, message: str) -> str:
@@ -81,6 +88,9 @@ def classify_tier(code: int, message: str) -> str:
     if code == 404:
         return TIER_NO_MODEL
 
+    if message and _quota_code(message):
+        return TIER_NO_QUOTA
+
     # Quota markers may ride a 400/429 (e.g. DashScope Arrearage, Ark arrearage).
     if _QUOTA_MARKERS.search(message):
         return TIER_NO_QUOTA
@@ -89,6 +99,19 @@ def classify_tier(code: int, message: str) -> str:
     # a transient fault must not pull a key out of a tier that another attempt
     # would have served.
     return TIER_RETRYABLE
+
+
+def _quota_code(message: str) -> bool:
+    """True when the body carries a known balance/entitlement error code."""
+    try:
+        data = json.loads(message)
+    except (TypeError, ValueError):
+        return False
+    error = data.get("error") if isinstance(data, dict) else None
+    if not isinstance(error, dict):
+        return False
+    code = str(error.get("code", "")).strip()
+    return code in _QUOTA_CODES
 
 
 def probe_tier(provider, token: str, probe_model: str) -> str:
