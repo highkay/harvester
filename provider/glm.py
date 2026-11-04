@@ -47,6 +47,19 @@ class GLMProvider(OpenAILikeProvider):
 
         super().__init__(conditions=conditions, **kwargs)
 
+    def check(self, token: str, address: str = "", endpoint: str = "", model: str = "") -> CheckResult:
+        """Chat-completion probe, then optional capability-tier split.
+
+        The base check only judges the default probe model; the declared tiers
+        (glm-5.3-flash / glm-4.7-flash) are measured here so a key reaches the
+        right per-tier group. Without this override the tier files are never
+        written and the exclusive split silently does nothing.
+        """
+        result = super().check(token=token, address=address, endpoint=endpoint, model=model)
+        if result.available and self._capability_tiers:
+            result = self._apply_capability_tiers(token, result)
+        return result
+
     def _judge(self, code: int, message: str) -> CheckResult:
         """Judge Zhipu (BigModel) API response.
 

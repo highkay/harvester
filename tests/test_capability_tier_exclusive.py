@@ -94,3 +94,26 @@ class TestTierModeWiring(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestGlmAppliesTiers(unittest.TestCase):
+    def test_glm_check_probes_tiers_after_a_successful_probe(self):
+        from provider.glm import GLMProvider
+
+        provider = GLMProvider(conditions=[], capability_tiers=TIERS, tier_mode="exclusive")
+        sentinel = object()
+        with mock.patch.object(GLMProvider, "_capability_tiers", TIERS, create=True), \
+                mock.patch("provider.base.AIBaseProvider.check", return_value=mock.Mock(available=True)), \
+                mock.patch.object(GLMProvider, "_apply_capability_tiers", return_value=sentinel) as apply:
+            self.assertIs(provider.check("k"), sentinel)
+        apply.assert_called_once()
+
+    def test_glm_check_skips_tiers_when_the_probe_fails(self):
+        from provider.glm import GLMProvider
+
+        provider = GLMProvider(conditions=[], capability_tiers=TIERS, tier_mode="exclusive")
+        failed = mock.Mock(available=False)
+        with mock.patch("provider.base.AIBaseProvider.check", return_value=failed), \
+                mock.patch.object(GLMProvider, "_apply_capability_tiers") as apply:
+            self.assertIs(provider.check("k"), failed)
+        apply.assert_not_called()
