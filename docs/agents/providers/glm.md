@@ -66,3 +66,37 @@ Mappings are `glm:flash53` -> 32 and `glm:flash47` -> 15; the base `glm` -> 15
 mapping remains for legacy union-only runs. Group 32 was created with
 `confirm_same_target: true` because it shares the upstream base URL with group
 15 (gpt-load otherwise rejects the create with `CHANNEL_TARGET_CONFLICT`).
+
+### Measured split (run `524e0927`, 2026-11-04)
+
+| tier file | keys | pushed to |
+|---|---|---|
+| `valid-keys-flash53.txt` | 2 | group 32, added 2 / ignored 0 |
+| `valid-keys-flash47.txt` | 425 | group 15, added 1 / ignored 424 |
+| intersection | 0 | the split is strictly exclusive |
+
+The union `valid-keys.txt` held 427 and `checked` was 832.
+
+### Two defects this split exposed
+
+1. **`GLMProvider` never probed tiers.** It inherited `AIBaseProvider.check`,
+   which judges only the default probe model and never calls
+   `_apply_capability_tiers`; the declared tiers were decorative and
+   `valid-keys-<tier>.txt` was never written. Fixed by overriding `check` to
+   run the tier split after a successful probe (`5ef422d`).
+2. **Zhipu's balance error was misclassified.** A key that passes the gate but
+   cannot pay for a tier model answers HTTP 429 with body code `1113`
+   (`余额不足或无可用资源包`). `classify_tier` only matched English quota words,
+   so the tier came back RETRYABLE and a key that *can* serve
+   `glm-4.7-flash` would land in wait-check instead of `flash47`. The `1113`
+   code and the Chinese wording are now quota markers (`c57dccd`).
+
+### Group hygiene
+
+Group 15 originally advertised 13 models (including `glm-5.3-flash`), so a
+4.7-only key could still be asked to serve 5.3 and fail. `PUT
+/api/groups/15/models` narrowed it to `glm-4.7-flash`; group 32 carries only
+`glm-5.3-flash`. Each pool now advertises exactly the tier its keys can serve.
+
+Most of the current free-tier pool is 4.7-only: 425 of 427 keys in this run
+answered `1113` for `glm-5.3-flash`. Expect group 32 to stay small.
