@@ -137,6 +137,21 @@ async def _active_run_count(db_path: str) -> int:
 # ---------------------------------------------------------------------------
 
 _DEFAULT_SCHEDULES: tuple[tuple[str, str, str], ...] = (
+    # 2026-11-05 ROI re-tier (measured keys per machine-hour over the last
+    # 8-12 runs, run_records x run_new_keys):
+    #   A >=10 k/h -> daily: tavily 76.1, nvidia 46.2, glm 15.6, agnes-ai 13.0,
+    #     serpapi 12.6. These five are 98.3% of all net-new keys.
+    #   B 1-10 k/h -> Mon/Thu: glm-ai 7.7, openrouter 7.5, ollama 3.4,
+    #     brave 2.4, exa 2.0, doubao 1.8.
+    #   C 0.02-1 k/h -> weekly: modelscope, qwen-cn, mimo-sg, qwen-intl,
+    #     kimi-ai, kimi-coding, deepseek, kimi, github (github drops from
+    #     every 6 h to weekly: 0.02 k/h at 10.8 h per run).
+    #   D zero -> weekly floor: mimo-cn, mistral, gemini, siliconflow,
+    #     opencode, clinepass, commandcode, groq, cerebras.
+    # Heavy starts are spaced so a 7-day simulation peaks at 3 concurrent
+    # runs (MAX_CONCURRENT_SCANS=3): deepseek Sun 08:00 and mistral Sun 20:00
+    # were moved off the 02:00/05:00 glm+nvidia window for exactly that reason.
+    # Seeds only fill an EMPTY table; prod was changed via PUT /api/schedule.
     # Four former "high-churn" providers, WEEKLY since the 2026-10-24 audit.
     # They were seeded every 4 hours on the theory that leaked keys die fast
     # (kimi once gained 82 valid keys in a ~2.7 h window), but the measured
@@ -147,10 +162,10 @@ _DEFAULT_SCHEDULES: tuple[tuple[str, str, str], ...] = (
     # floor is the correct cadence; the depth bound lives in each config
     # (max_pages 1000 / max_links_per_run 9000). Day names are spelled out for the
     # APScheduler footgun (numeric dow: 0=mon, not 0=sun).
-    ("deepseek", "0 2 * * sun", "examples/config-deepseek.yaml"),
+    ("deepseek", "0 8 * * sun", "examples/config-deepseek.yaml"),
     ("kimi", "0 4 * * mon", "examples/config-kimi.yaml"),
     ("mimo-cn", "0 6 * * tue", "examples/config-mimo.yaml"),
-    ("qwen-cn", "0 7 * * wed", "examples/config-qwen.yaml"),
+    ("qwen-cn", "0 7 * * sun", "examples/config-qwen.yaml"),
     # Medium-churn providers. 2026-10-18 frequency policy (measured over the
     # prior 12 days of run_records×push_logs): glm re-validated the same
     # plateau corpus daily — 5,933 pushed keys produced 9 net-new — so daily
@@ -160,7 +175,7 @@ _DEFAULT_SCHEDULES: tuple[tuple[str, str, str], ...] = (
     # sat inside nvidia's (11:50→13:50); 14:00 clears both nvidia's search
     # and glm-ai's 16:00 (search-phase overlap is the only measured quota
     # cost — solo searches produce zero cooldowns at any hour).
-    ("glm", "0 14 * * mon,wed,fri", "examples/config-glm.yaml"),
+    ("glm", "30 6 * * *", "examples/config-glm.yaml"),
     # 2026-10-09 frequency policy: saturated providers (measured 0-2 net-new
     # keys/day, 98-100% cross-run overlap over 11 days) drop to weekly or
     # 2-3x/week — a weekly floor keeps supply-resumption visibility without
@@ -177,14 +192,14 @@ _DEFAULT_SCHEDULES: tuple[tuple[str, str, str], ...] = (
     # safe in this codebase's crons if you mean APScheduler's mon=0 numbering.
     ("modelscope", "0 3 * * wed", "examples/config-modelscope.yaml"),
     # Tavily keys survive longer (usage-audit based) — every 6 hours.
-    ("tavily", "40 */6 * * *", "examples/config-tavily.yaml"),
+    ("tavily", "0 0 * * *", "examples/config-tavily.yaml"),
     # GitHub token self-bootstrap — scan every 6 hours so the instance's own
     # token pool keeps growing; staggered at :50 to avoid the 0/20/40 burst.
-    ("github", "50 */6 * * *", "examples/config-github.yaml"),
+    ("github", "0 15 * * sat", "examples/config-github.yaml"),
     # SerpApi keys are account-based (monthly plans). 2026-10-09: daily →
     # 3x/week (mild churn: 1-4 new / 1-7 dead per day, pool ~400); hour moved
     # 05→06 to avoid the glm-ai daily 05:00 firing on shared days.
-    ("serpapi", "0 6 * * mon,wed,fri", "examples/config-serpapi.yaml"),
+    ("serpapi", "0 13 * * *", "examples/config-serpapi.yaml"),
     # Agnès AI. 2026-10-09: */6 → 2x/week (measured 0-1 net-new/day, pool
     # saturated at ~40 keys; the scan is cheap — 16k links — but the quota
     # saving goes to the high-churn providers). 2026-10-18: 2x/week → weekly
@@ -192,7 +207,7 @@ _DEFAULT_SCHEDULES: tuple[tuple[str, str, str], ...] = (
     # 2026-10-19: 10:00 → 17:30 fri — the 10:00 fire rode inside tavily's
     # 09:00-11:00 search window; the whole agnes run is 14-54 min, so 17:30
     # lands alone between glm's search end (~15:20) and brave's 20:00.
-    ("agnes-ai", "30 17 * * fri", "examples/config-agnes-ai.yaml"),
+    ("agnes-ai", "10 13 * * *", "examples/config-agnes-ai.yaml"),
     # Secondary regional tasks live in their own config files now (previously
     # bundled into the primary provider's config, which mixed run records,
     # push statistics and schedules together). Daily at staggered hours —
@@ -207,21 +222,21 @@ _DEFAULT_SCHEDULES: tuple[tuple[str, str, str], ...] = (
     # rule. 2026-10-19: 13:00 → 16:00 — 13:00 landed inside nvidia's and
     # glm's search windows (the two measured cooldown-storm hours); 16:00
     # wed is isolated on every side.
-    ("glm-ai", "0 16 * * wed", "examples/config-glm-ai.yaml"),
+    ("glm-ai", "30 14 * * mon,thu", "examples/config-glm-ai.yaml"),
     # Brave Search — daily at 15:00 (no day-of-week field: the seed stays
     # daily regardless of any supply probe; adjust the prod row, not this
     # seed, if a probe shows saturation).
     # 2026-10-19: 15:00 → 20:00 — its search permanently overlapped exa's
     # (60 min/day); night starts are measured ~16x cheaper per query for
     # multi-way overlaps (10 vs 151 cooldown events per 1000 queries).
-    ("brave", "0 20 * * *", "examples/config-brave.yaml"),
+    ("brave", "30 18 * * mon,thu", "examples/config-brave.yaml"),
     # Exa Search — daily at 16:00, one hour behind brave's 15:00 firing so
     # the two daily GitHub-search scans never collide on the shared token
     # pool. No day-of-week field: the seed stays daily; adjust the prod row,
     # not this seed, if a supply probe shows saturation.
     # 2026-10-19: 16:00 → 22:00 — separates from brave's 20:00 (search ends
     # ~21:15) with a 45 min margin; same night-window economics.
-    ("exa", "0 22 * * *", "examples/config-exa.yaml"),
+    ("exa", "30 20 * * mon,thu", "examples/config-exa.yaml"),
     # Evening/weekend weekly slots. These keep the 2026-09-24 evening rationale
     # (the GitHub cooldown storm concentrates 10:00-16:00 Beijing) and add the
     # 2026-10-24 de-collision measured on prod: mimo-sg 20:00 sat fired inside
@@ -253,11 +268,11 @@ _DEFAULT_SCHEDULES: tuple[tuple[str, str, str], ...] = (
     # net-new in 12 days (51,658 / 145,520 gathered links per added key);
     # pools saturated, daily-plus re-validation was paying search quota for
     # duplicates. Weekly floor per house rule.
-    ("ollama", "0 3 * * mon", "examples/config-ollama.yaml"),
+    ("ollama", "30 17 * * mon,thu", "examples/config-ollama.yaml"),
     # 2026-10-19: 08:00 → 07:30 thu — the whole run is ≤57 min; at 08:00 it
     # cleared tavily's 09:00 search by 3 min (razor margin); 07:30 gives 33.
-    ("openrouter", "30 7 * * thu", "examples/config-openrouter.yaml"),
-    ("nvidia", "50 11 * * *", "examples/config-nvidia.yaml"),
+    ("openrouter", "30 16 * * mon,thu", "examples/config-openrouter.yaml"),
+    ("nvidia", "30 2 * * *", "examples/config-nvidia.yaml"),
     # OpenCode Go subscription keys — WEEKLY (Sat 22:00), downgraded from
     # daily on 2026-09-28 after two consecutive zero-valid runs (92k links →
     # 265 materials → 0 valid each time): the corpus carries docs/placeholders
@@ -267,7 +282,7 @@ _DEFAULT_SCHEDULES: tuple[tuple[str, str, str], ...] = (
     # see above) — corrected to the documented Saturday via the name form.
     # 2026-10-19: 22:00 → 18:00 sat — exa moved to 22:00 daily; 18:00 sat is
     # empty (brave moved to 20:00).
-    ("opencode", "0 18 * * sat", "examples/config-opencode.yaml"),
+    ("opencode", "0 3 * * sat", "examples/config-opencode.yaml"),
     # CommandCode relay keys - weekly floor. 2026-10-29 wave-0 verdict:
     # /provider/v1/models is a public trap (same 18,461-byte 200 for
     # no-key/bad-key), so the judge is a minimal chat probe. Monday 05:00
@@ -281,25 +296,25 @@ _DEFAULT_SCHEDULES: tuple[tuple[str, str, str], ...] = (
     # SiliconFlow (api.siliconflow.cn) - weekly floor. Wave-0 (2026-10-29): the
     # /v1/models auth gate is clean (401 for no-key and bad-key), free tier
     # confirmed by the docs' server-rendered text. Saturday 05:00 is empty.
-    ("siliconflow", "0 5 * * sat", "examples/config-siliconflow.yaml"),
+    ("siliconflow", "0 21 * * sat", "examples/config-siliconflow.yaml"),
     # Mistral (api.mistral.ai/v1) - weekly floor. Wave-0 (2026-10-29): no-key
     # and bad-key both answer 401 {"detail":"Invalid API Key"} from both prod
     # socks exits, so the models endpoint is a real application-level gate.
     # Sunday 05:00 sits after deepseek 02:00 (capped) and before kimi 04:00's
     # tail is gone; serpapi 06:00 mon/wed/fri is not on Sunday.
-    ("mistral", "0 5 * * sun", "examples/config-mistral.yaml"),
+    ("mistral", "0 20 * * sun", "examples/config-mistral.yaml"),
     # Gemini (generativelanguage.googleapis.com) - weekly floor. Wave-0
     # (2026-10-29): the /v1beta/models list gate is clean (403 for no-key, 400
     # API_KEY_INVALID for any bad key — never 200), so the existing provider's
     # list-gate check is sound. Friday 05:00 sits after Thursday's openrouter
     # (07:30) chain and before serpapi's 06:00 window.
-    ("gemini", "0 5 * * fri", "examples/config-gemini.yaml"),
+    ("gemini", "0 21 * * fri", "examples/config-gemini.yaml"),
     # Doubao (Volcengine Ark, CN endpoint) - weekly floor. Wave-0
     # (2026-10-29): /api/v3/models and chat are clean auth gates (401 for
     # no-key and bad-key); keys are UUID v4. volcengine_ark_api_key is under
     # GitHub push protection, so fresh supply is suppressed — expect low
     # yield. Tuesday 05:00 sits before mimo-cn 06:00 tue.
-    ("doubao", "0 5 * * tue", "examples/config-doubao.yaml"),
+    ("doubao", "0 22 * * mon,thu", "examples/config-doubao.yaml"),
 )
 
 

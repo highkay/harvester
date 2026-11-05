@@ -123,11 +123,11 @@ class TestSeedData(unittest.TestCase):
         # (70 d: deepseek 17, kimi 4, mimo-cn 2) against 2-13 h runs each, and
         # daily→weekly had already cost ~20 keys/fortnight. Weekly floor per the
         # 2026-10-18 house rule; depth is bounded per config instead.
-        "deepseek": "0 2 * * sun",
+        "deepseek": "0 8 * * sun",
         "kimi": "0 4 * * mon",
         "mimo-cn": "0 6 * * tue",
-        "qwen-cn": "0 7 * * wed",
-        "glm": "0 14 * * mon,wed,fri",
+        "qwen-cn": "0 7 * * sun",
+        "glm": "30 6 * * *",
         # 2026-10-09 frequency policy: saturated providers → weekly floor or
         # 2-3x/week (measured 0-2 net-new/day, 98-100% cross-run overlap).
         # Day-of-week entries are NAME-based on purpose: APScheduler's
@@ -136,17 +136,17 @@ class TestSeedData(unittest.TestCase):
         # policy by one weekday (and made opencode's old "0 22 * * 6" fire on
         # Sunday while docs said Saturday).
         "modelscope": "0 3 * * wed",
-        "tavily": "40 */6 * * *",
-        "github": "50 */6 * * *",
-        "serpapi": "0 6 * * mon,wed,fri",
-        "agnes-ai": "30 17 * * fri",
-        "glm-ai": "0 16 * * wed",
+        "tavily": "0 0 * * *",
+        "github": "0 15 * * sat",
+        "serpapi": "0 13 * * *",
+        "agnes-ai": "10 13 * * *",
+        "glm-ai": "30 14 * * mon,thu",
         # Brave Search: daily 15:00 — NO day-of-week field on purpose (the
         # seed stays daily; a supply probe may only adjust the prod row).
-        "brave": "0 20 * * *",
+        "brave": "30 18 * * mon,thu",
         # Exa Search: daily 16:00 — one hour behind brave's 15:00 firing;
         # NO day-of-week field on purpose (same daily-seed policy).
-        "exa": "0 22 * * *",
+        "exa": "30 20 * * mon,thu",
         # 2026-09-24: moved off the 14:00-17:00 Beijing window — measured prod
         # token-cooldown storm concentrated at 10:00-16:00 Beijing (4529
         # warnings on 2026-09-24), which starved these four providers' search
@@ -159,10 +159,10 @@ class TestSeedData(unittest.TestCase):
         "kimi-coding": "0 16 * * fri",
         "mimo-sg": "0 15 * * sat",
         "qwen-intl": "0 16 * * sun",
-        "ollama": "0 3 * * mon",
-        "openrouter": "30 7 * * thu",
-        "nvidia": "50 11 * * *",
-        "opencode": "0 18 * * sat",
+        "ollama": "30 17 * * mon,thu",
+        "openrouter": "30 16 * * mon,thu",
+        "nvidia": "30 2 * * *",
+        "opencode": "0 3 * * sat",
         # 2026-10-29 wave-1: commandcode weekly floor; Monday 05:00 sits
         # between kimi 04:00 (capped ~45 min) and serpapi 06:00.
         "commandcode": "0 5 * * mon",
@@ -171,16 +171,16 @@ class TestSeedData(unittest.TestCase):
         "clinepass": "0 23 * * sat",
         # 2026-10-29 wave-1: siliconflow weekly floor; Saturday 05:00 sits
         # before mimo-sg 15:00 and opencode 18:00.
-        "siliconflow": "0 5 * * sat",
+        "siliconflow": "0 21 * * sat",
         # 2026-10-29 wave-1: gemini weekly floor; Friday 05:00 sits before
         # serpapi's 06:00 window and after the Thursday chain.
-        "gemini": "0 5 * * fri",
+        "gemini": "0 21 * * fri",
         # 2026-10-29 wave-1: doubao weekly floor; Tuesday 05:00 sits before
         # mimo-cn 06:00 tue. Push protection suppresses fresh supply.
-        "doubao": "0 5 * * tue",
+        "doubao": "0 22 * * mon,thu",
         # 2026-10-29 wave-1: mistral weekly floor; Sunday 05:00 follows
         # deepseek 02:00 (capped) with no same-window overlap.
-        "mistral": "0 5 * * sun",
+        "mistral": "0 20 * * sun",
     }
     _EXPECTED_CONFIG_FILES = {
         "deepseek": "examples/config-deepseek.yaml",
@@ -296,10 +296,10 @@ class TestSeedListShape(unittest.TestCase):
     # weekly-floor policy for cold providers); weekdays NAME-based — see the
     # APScheduler numeric-dow footgun note in _EXPECTED_CRONS.
     _PINNED_ENTRIES = {
-        "ollama": ("0 3 * * mon", "examples/config-ollama.yaml"),
-        "openrouter": ("30 7 * * thu", "examples/config-openrouter.yaml"),
-        "nvidia": ("50 11 * * *", "examples/config-nvidia.yaml"),
-        "github": ("50 */6 * * *", "examples/config-github.yaml"),
+        "ollama": ("30 17 * * mon,thu", "examples/config-ollama.yaml"),
+        "openrouter": ("30 16 * * mon,thu", "examples/config-openrouter.yaml"),
+        "nvidia": ("30 2 * * *", "examples/config-nvidia.yaml"),
+        "github": ("0 15 * * sat", "examples/config-github.yaml"),
     }
 
     def test_groq_is_not_seeded(self) -> None:
