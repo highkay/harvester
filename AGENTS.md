@@ -45,6 +45,7 @@ The same table lives in `docs/agents/README.md`.
 | Audit: 2026-09-28 lifecycle/disk | `docs/agents/audits/2026-09-28-evening.md` | changing restart/lifecycle reconciliation or disk retention bounds |
 | Audit: 2026-09-30 fix sprint | `docs/agents/audits/2026-09-30-fix-sprint.md` | touching false-404 handling, lifecycle or elasticity |
 | Audit: 2026-10-09 frequency | `docs/agents/audits/2026-10-09-frequency.md` | changing schedules/frequency policy or the fleet Fastly probe |
+| Schedule: ROI tiers | `docs/agents/audits/2026-11-05-roi-schedule.md` | changing provider cadence: keys-per-machine-hour tiers, the concurrency simulation, and the seed/PUT lockstep |
 
 ## What this project is
 
