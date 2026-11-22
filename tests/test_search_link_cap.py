@@ -564,6 +564,29 @@ class TestCapConfigContract(unittest.TestCase):
                     self.assertEqual(expected, loaded.global_config.max_links_per_run)
 
 
+class TestChainBlockerCorpusBounds(unittest.TestCase):
+    """2026-11-22 resource wave: the two zero-yield chain blockers carry
+    measured per-run link bounds so a serialized slot (prod cap=1) is never
+    held for 6-7 h — clinepass: 5 prod runs / 0 valid keys / 6.2-7.3 h each,
+    github: 3.8 h search-bound, 0 valid in the last 4 of 16 runs (3 total).
+    """
+
+    @staticmethod
+    def _bound(name: str) -> str | None:
+        source = pathlib.Path(f"examples/config-{name}.yaml").read_text(
+            encoding="utf-8"
+        )
+        source = source.replace("\r\n", "\n")  # github example is CRLF
+        match = re.search(r"(?m)^  max_links_per_run: (\d+)$", source)
+        return match.group(1) if match else None
+
+    def test_clinepass_bound_is_2000(self) -> None:
+        self.assertEqual("2000", self._bound("clinepass"))
+
+    def test_github_bound_is_30000(self) -> None:
+        self.assertEqual("30000", self._bound("github"))
+
+
 class TestLinkIndexWriteGating(unittest.TestCase):
     """The link-index WRITE is gated on should_skip_known_links().
 

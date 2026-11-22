@@ -9,6 +9,12 @@
 global:
   workspace: "./data"
   max_retries_requeued: 3
+  # Per-run corpus bound added in the 2026-11-22 resource wave: the
+  # weekly run sat 3.8 h search-bound (2,093 search pages) holding the
+  # single slot at cap=1, with 0 valid keys in the last 4 runs (16 runs
+  # total have yielded 3). This bound mostly guards the gather/check
+  # tail; search volume is bounded by the dork set.
+  max_links_per_run: 30000
   proxy: ""
   github_credentials:
     sessions:

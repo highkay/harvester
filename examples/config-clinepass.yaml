@@ -9,8 +9,12 @@
 global:
   workspace: "./data-clinepass"
   max_retries_requeued: 3
-  # Per-run corpus bound (house rule since the 2026-10-24 wave).
-  max_links_per_run: 9000
+  # Per-run corpus bound (house rule since the 2026-10-24 wave). 2000 since
+  # the 2026-11-22 resource wave: 5 prod runs over 6.2-7.3 h each (23:00 Sat
+  # → ~06:05 Sun) with 0 valid keys ever, serially blocking the Sunday
+  # morning cluster at cap=1. The whole GitHub corpus is ~11.4k files, so a
+  # 2000-link weekly sample still sweeps it across weeks.
+  max_links_per_run: 2000
   proxy: ""
   github_credentials:
     sessions:
