@@ -19,3 +19,10 @@
 - **Bootstrap requirement**: at least one seed GitHub token must exist in the
   token store first (`POST /api/tokens`), else scans fail at the runner gate
   ("No enabled API tokens found").
+- **Run bound (2026-11-22 resource wave)**: `global.max_links_per_run:
+  30000` guards the gather/check tail — measured, the weekly run is
+  SEARCH-bound, not link-bound: 2,093 search pages × 0.15 req/s ≈ 3.8 h
+  holding the single cap=1 slot, 0 valid keys in the last 4 of 16 runs
+  (3 total). Shortening it further is a dork-diet decision for the next
+  ROI round, not a config cap. See
+  `docs/agents/audits/2026-11-22-resource-wave.md`.

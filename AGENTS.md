@@ -45,6 +45,7 @@ The same table lives in `docs/agents/README.md`.
 | Audit: 2026-09-28 lifecycle/disk | `docs/agents/audits/2026-09-28-evening.md` | changing restart/lifecycle reconciliation or disk retention bounds |
 | Audit: 2026-09-30 fix sprint | `docs/agents/audits/2026-09-30-fix-sprint.md` | touching false-404 handling, lifecycle or elasticity |
 | Audit: 2026-10-09 frequency | `docs/agents/audits/2026-10-09-frequency.md` | changing schedules/frequency policy or the fleet Fastly probe |
+| Audit: 2026-11-22 resource wave | `docs/agents/audits/2026-11-22-resource-wave.md` | touching scheduler deferral/wake (`web/scheduler.py`), queue-state persistence (`manager/`), prod `HARVESTER_MAX_CONCURRENT_SCANS` compose pins, or the retired tavily evict loop |
 | Schedule: ROI tiers | `docs/agents/audits/2026-11-05-roi-schedule.md` | changing provider cadence: keys-per-machine-hour tiers, the concurrency simulation, and the seed/PUT lockstep |
 
 ## What this project is
@@ -843,3 +844,36 @@ Deployed `b5c20b7` + `e5a71a7` (config cp only, no restart; full suite **1340 OK
 - Commit style: `feat(provider):`, `feat(web):`, `fix(examples):`, `docs(web):`,
   one atomic commit per logical change.
 - Credentials: never commit real tokens; use placeholders in examples.
+## Ops: 2026-11-22 resource wave → durable cap=1, deferral wake, queue-state skip
+
+Origin: the operator mitigated resource pressure himself with
+`HARVESTER_MAX_CONCURRENT_SCANS=1` via shell env (2026-11-20 recreate); the
+audit that morning measured four causes and a bare `ulw` landed all fixes
+(`cde61c5`, gate-review APPROVE; full record + cycle evidence:
+`docs/agents/audits/2026-11-22-resource-wave.md`). Cross-cutting rules:
+
+- **cap=1 is now pinned in three agreeing places** (the operator's
+  untracked `docker-compose.override.yml` from 2026-11-20 — which also
+  owns `init: true` + the healthcheck, so it stays; fnos `.env` line; and
+  the committed `docker-compose.hostnet.yml` default, dev bridge stays 3).
+  The override was the original durable home the 2026-11-22 audit missed
+  (untracked file) when it claimed a shell-env-only mitigation — corrected
+  same day. Check `printenv` after any recreate.
+- **The deferral ladder wakes on slot release** (`_watch_run` finally →
+  `_wake_pending_deferrals`, oldest `defer-<provider>-<ms>` first): a slot
+  freed between grid points must not idle for hours, and a fresh cron fire
+  must not jump ahead of an older ladder. Measured: chained handoffs 4-8 s
+  (was: hours of grid waiting; worst case 18 h then DROPPED).
+- **queue_state periodic saves are gated on `auto_restore`**
+  (`manager/task.py`): clean-start runs no longer pay the 60 s full-queue
+  rewrite (measured 14.1M task serializations / 41 h ≈ 25% of block writes
+  for state nothing read back). Stop-path saves remain — do NOT remove them:
+  the SIGTERM-resume flow depends on them.
+- **clinepass 2000 / github 30000 link bounds** are measured chain-blocker
+  caps (0-valid runs that held the single slot 6-7 h); weekly floor kept.
+- **The tavily evict watchdog is RETIRED** (timer disabled, units removed).
+  Do not re-arm it; if pool eviction is ever needed again it is a bounded
+  one-shot script, never a CYCLES=10080 loop.
+- Known leftover: agnes-ai pushes failing since 2026-11-21 (generic push has
+  no gpt-load mapping; satellite idempotency marker blocks retry) — separate
+  workstream, memory `reference/harvester-agnes-push-failure-20261122.md`.

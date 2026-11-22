@@ -56,7 +56,10 @@ pilot run shows the real shape.
 ## Ops
 
 - Config: `examples/config-clinepass.yaml` (use_proxy: true, 0.2 req/s,
-  max_links_per_run 9000).
+  max_links_per_run 2000 since the 2026-11-22 resource wave: 5 runs / 0 valid
+  keys / 6.2-7.3 h each serially blocked the cap=1 Sunday-morning cluster;
+  the whole GitHub corpus is ~11.4k files, so a weekly 2000-link sample still
+  sweeps it across weeks).
 - Schedule seed: weekly `0 23 * * sat` (after mimo-sg 15:00 and opencode
   18:00).
 - Subscription-service keys (magpie counts it as a relay user asked to
