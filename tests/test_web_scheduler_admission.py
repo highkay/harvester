@@ -330,11 +330,14 @@ class TestDeferralWake(unittest.TestCase):
         create_task.assert_not_called()
 
     def test_malformed_defer_ids_are_ignored(self) -> None:
-        # A non-numeric tail (not a ladder this code armed) or a wrong arity
-        # must not be woken; the well-formed sibling IS.
+        # A non-numeric tail, a wrong-arity args tuple (the wake only ever
+        # dispatches the 3-tuple schedule_deferred arms), and a sibling
+        # provider segment must not be woken or mis-parsed; the well-formed
+        # kimi-ai ladder IS.
         svc = self._service(
             [
                 self._defer_job("defer-not-a-ladder", ["x", "c", 1]),
+                self._defer_job("defer-wrong-arity-1699990000001", ["y", "c"]),
                 self._defer_job("defer-kimi-ai-1699990000000", ["kimi-ai", "c.yaml", 3]),
             ]
         )

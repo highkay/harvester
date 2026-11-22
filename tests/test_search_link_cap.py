@@ -576,7 +576,9 @@ class TestChainBlockerCorpusBounds(unittest.TestCase):
         source = pathlib.Path(f"examples/config-{name}.yaml").read_text(
             encoding="utf-8"
         )
-        source = source.replace("\r\n", "\n")  # github example is CRLF
+        # Normalize in case a CRLF checkout appears (the committed blob is
+        # LF; a Windows autocrlf working tree is not).
+        source = source.replace("\r\n", "\n")
         match = re.search(r"(?m)^  max_links_per_run: (\d+)$", source)
         return match.group(1) if match else None
 
