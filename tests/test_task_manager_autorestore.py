@@ -49,6 +49,12 @@ class TestAutoRestoreGate(unittest.TestCase):
         tm.pipeline.result_manager.recover_all_tasks.assert_called_once()
         tm._add_recovered_tasks.assert_called_once()
         tm.pipeline.result_manager.backup_all_existing_files.assert_called_once()
+        # Only a replayable run pays the 60 s full-queue rewrite (measured
+        # 2026-11-22 on prod: 14.1M task serializations / 41 h for state no
+        # clean-start run ever reads back).
+        tm.pipeline.queue_manager.start_periodic_save.assert_called_once_with(
+            tm.pipeline.stages
+        )
 
     def test_auto_restore_false_skips_recovery_but_backs_up(self) -> None:
         tm = _build(False)
@@ -57,6 +63,11 @@ class TestAutoRestoreGate(unittest.TestCase):
         tm.pipeline.result_manager.recover_all_tasks.assert_not_called()
         tm._add_recovered_tasks.assert_not_called()
         tm.pipeline.result_manager.backup_all_existing_files.assert_called_once()
+        # The periodic queue-state rewrite is the write-amplification cost;
+        # a clean-start run must not pay it (stop-path saves remain in the
+        # pipeline, so a SIGTERM'd run is still replayable by a resume
+        # profile).
+        tm.pipeline.queue_manager.start_periodic_save.assert_not_called()
 
     def test_auto_restore_missing_config_defaults_false(self) -> None:
         """The default flipped to False on 2026-09-21 (replay ratchet: a
@@ -69,6 +80,7 @@ class TestAutoRestoreGate(unittest.TestCase):
         tm.pipeline.queue_manager.load_all_queues.assert_not_called()
         tm.pipeline.result_manager.recover_all_tasks.assert_not_called()
         tm.pipeline.result_manager.backup_all_existing_files.assert_called_once()
+        tm.pipeline.queue_manager.start_periodic_save.assert_not_called()
 
 
 if __name__ == "__main__":

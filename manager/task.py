@@ -312,8 +312,22 @@ class TaskManager(LifecycleManager, TaskDataProvider):
         # accepted before 402/no-quota filtering existed) from surviving.
         # NOTE: no reseed_valid_keys call here.
 
-        # 7. Start queue manager periodic save, after recovery to avoid file conflicts
-        self.pipeline.queue_manager.start_periodic_save(self.pipeline.stages)
+        # 7. Periodic queue-state saves only when this profile can replay
+        # them: the ONLY reader of queue_state is the auto_restore branch
+        # above, while the 60 s full-queue rewrite cost is real — measured
+        # 2026-11-22 on prod (cap=1): 14.1M task serializations across 41 h
+        # (~10 GB of indented JSON, ~25% of the container's 46.4 GB block
+        # writes) for state no clean-start run ever reads back. Stop-path
+        # saves (pipeline stop, GracefulShutdown) remain, so a SIGTERM'd
+        # run still leaves replayable state for a resume profile; only
+        # hard-crash in-flight replay is given up for clean-start runs.
+        if auto_restore:
+            self.pipeline.queue_manager.start_periodic_save(self.pipeline.stages)
+        else:
+            logger.info(
+                "persistence.auto_restore is off - periodic queue-state "
+                "saves skipped (stop-path saves remain)"
+            )
 
         # 8. Add initial search tasks
         initial_tasks = self._create_initial_tasks()
