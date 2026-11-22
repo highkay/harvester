@@ -258,6 +258,135 @@ class TestDeferral(unittest.TestCase):
 
         self.assertTrue(any("firing DROPPED" in r.getMessage() for r in logs.records))
 
+class TestDeferralWake(unittest.TestCase):
+    """Slot release must wake the OLDEST pending deferral ladder.
+
+    Measured on prod 2026-11-22 (cap=1): ladders retry on their fixed linear
+    grid, so a slot freed between grid points idled for hours — clinepass
+    held the single slot 23:00→06:05 while nvidia's ladder (armed 02:30)
+    was still waiting past 08:00 after a fresh deepseek cron fire took the
+    free slot at 08:00.
+    """
+
+    def _service(self, jobs: list) -> SchedulerService:
+        svc = SchedulerService.__new__(SchedulerService)
+        svc._scheduler = MagicMock()
+        cast(Any, svc._scheduler).get_jobs.return_value = jobs
+        svc._shutdown = False
+        return svc
+
+    @staticmethod
+    def _defer_job(job_id: str, args: list) -> MagicMock:
+        job = MagicMock()
+        job.id = job_id
+        job.args = args
+        return job
+
+    def test_release_wakes_the_oldest_ladder_with_its_stored_attempts(self) -> None:
+        svc = self._service(
+            [
+                self._defer_job("defer-tavily-1699999999999", ["tavily", "cfg-t.yaml", 6]),
+                self._defer_job("defer-nvidia-1699990000000", ["nvidia", "cfg-n.yaml", 5]),
+            ]
+        )
+
+        with patch.object(
+            scheduler_mod, "_run_provider_job", new=AsyncMock()
+        ) as run_job, patch.object(scheduler_mod.asyncio, "create_task") as create_task:
+            svc._wake_pending_deferrals(freed_by="clinepass")
+
+        cast(Any, svc._scheduler).remove_job.assert_called_once_with(
+            "defer-nvidia-1699990000000"
+        )
+        run_job.assert_called_once_with("nvidia", "cfg-n.yaml", 5)
+        create_task.assert_called_once()
+        create_task.call_args.args[0].close()  # never awaited by design
+
+    def test_release_without_ladders_touches_nothing(self) -> None:
+        svc = self._service([MagicMock(id="scan-p")])  # only a cron job
+
+        with patch.object(
+            scheduler_mod, "_run_provider_job", new=AsyncMock()
+        ) as run_job, patch.object(scheduler_mod.asyncio, "create_task") as create_task:
+            svc._wake_pending_deferrals(freed_by="p")
+
+        cast(Any, svc._scheduler).remove_job.assert_not_called()
+        run_job.assert_not_called()
+        create_task.assert_not_called()
+
+    def test_wake_does_not_fire_after_shutdown(self) -> None:
+        svc = self._service(
+            [self._defer_job("defer-p-1699990000000", ["p", "cfg.yaml", 2])]
+        )
+        svc._shutdown = True
+
+        with patch.object(
+            scheduler_mod, "_run_provider_job", new=AsyncMock()
+        ) as run_job, patch.object(scheduler_mod.asyncio, "create_task") as create_task:
+            svc._wake_pending_deferrals(freed_by="other")
+
+        cast(Any, svc._scheduler).remove_job.assert_not_called()
+        run_job.assert_not_called()
+        create_task.assert_not_called()
+
+    def test_malformed_defer_ids_are_ignored(self) -> None:
+        # A non-numeric tail (not a ladder this code armed) or a wrong arity
+        # must not be woken; the well-formed sibling IS.
+        svc = self._service(
+            [
+                self._defer_job("defer-not-a-ladder", ["x", "c", 1]),
+                self._defer_job("defer-kimi-ai-1699990000000", ["kimi-ai", "c.yaml", 3]),
+            ]
+        )
+
+        with patch.object(
+            scheduler_mod, "_run_provider_job", new=AsyncMock()
+        ) as run_job, patch.object(scheduler_mod.asyncio, "create_task") as create_task:
+            svc._wake_pending_deferrals(freed_by="p")
+
+        cast(Any, svc._scheduler).remove_job.assert_called_once_with(
+            "defer-kimi-ai-1699990000000"
+        )
+        run_job.assert_called_once_with("kimi-ai", "c.yaml", 3)
+        create_task.call_args.args[0].close()
+
+    def test_watch_run_release_wakes_pending_ladder(self) -> None:
+        """The finally hook, not just the helper: a terminal run_records row
+        releases the guard and the oldest ladder is dispatched by the same
+        watcher that observed the release."""
+        svc = SchedulerService.__new__(SchedulerService)
+        svc._scheduler = MagicMock()
+        cast(Any, svc._scheduler).get_jobs.return_value = [
+            self._defer_job("defer-nvidia-1699990000000", ["nvidia", "cfg-n.yaml", 5])
+        ]
+        svc._running = {"clinepass"}
+        svc._watch_tasks = {"clinepass": MagicMock()}
+        svc._shutdown = False
+
+        runner = MagicMock()
+        runner.get_run = AsyncMock(
+            return_value={"status": "completed", "started_at": None}
+        )
+
+        async def _scenario() -> None:
+            with patch.object(
+                scheduler_mod, "_lazy_get_runner", return_value=runner
+            ), patch.object(
+                scheduler_mod, "_WATCH_POLL_SECONDS", 0.01
+            ), patch.object(
+                scheduler_mod, "_run_provider_job", new=AsyncMock()
+            ) as run_job, patch.object(
+                scheduler_mod.asyncio, "create_task"
+            ) as create_task:
+                await svc._watch_run("clinepass", "run-1")
+
+            run_job.assert_called_once_with("nvidia", "cfg-n.yaml", 5)
+            create_task.call_args.args[0].close()
+            self.assertNotIn("clinepass", svc._running)
+
+        _run_async(_scenario())
+
+
 class TestSchedulerJobDefaults(unittest.TestCase):
     """APScheduler defaults to a ONE-SECOND misfire grace.
 

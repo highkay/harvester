@@ -24,6 +24,10 @@ from typing import Any
 from apscheduler.jobstores.memory import MemoryJobStore  # type: ignore[import-untyped]
 from apscheduler.executors.asyncio import AsyncIOExecutor  # type: ignore[import-untyped]
 from apscheduler.schedulers.asyncio import AsyncIOScheduler  # type: ignore[import-untyped]
+from apscheduler.schedulers.base import (  # type: ignore[import-untyped]
+    JobLookupError,
+    SchedulerNotRunningError,
+)
 from apscheduler.triggers.cron import CronTrigger  # type: ignore[import-untyped]
 from apscheduler.triggers.date import DateTrigger  # type: ignore[import-untyped]
 from fastapi import HTTPException
@@ -857,6 +861,10 @@ class SchedulerService:
         # provider → watcher task that keeps _running held for the scan's
         # full lifetime (armed by start_scan, self-removing on release).
         self._watch_tasks: dict[str, asyncio.Task[None]] = {}
+        # Set by shutdown() BEFORE watcher cancellation: a watcher's finally
+        # calls _wake_pending_deferrals, which must not dispatch a scan into
+        # a process that is already tearing down.
+        self._shutdown = False
 
     # -- scan launch (shared by cron jobs + manual trigger) -------------------
 
@@ -970,6 +978,67 @@ class SchedulerService:
             return False
         except Exception:
             return False
+
+    def _wake_pending_deferrals(self, freed_by: str) -> None:
+        """Start the OLDEST pending deferral ladder the moment a slot frees.
+
+        Measured on prod 2026-11-22 (cap=1): the ladder retries on its own
+        fixed linear grid (30 min × attempt), so a slot freed between grid
+        points stayed idle while older ladders waited hours — clinepass held
+        the single slot 23:00→06:05 and nvidia's ladder (armed 02:30) was
+        still waiting past 08:00 after a fresh deepseek cron fire took the
+        free slot at 08:00. Waking the oldest ladder here closes that gap;
+        a fresh cron firing in the same instant only wins the race for the
+        slot, never the ladder's turn.
+
+        Sync by design: enumerate → pick → ``remove_job`` → dispatch holds
+        no ``await``, so two watchers releasing at once cannot wake the same
+        ladder (the loser's ``remove_job`` raises and it stands down). The
+        woken job re-enters :func:`_run_provider_job` with its stored
+        attempt count, so a wake that hits 429 (another fire took the slot)
+        re-arms at attempts+1 exactly like a grid retry.
+        """
+        if self._shutdown:
+            return
+        candidates: list[tuple[int, str, list]] = []
+        try:
+            jobs = self._scheduler.get_jobs()
+        except SchedulerNotRunningError:
+            # A shutdown beat us between the flag check and the enumeration.
+            return
+        for job in jobs:
+            job_id = str(getattr(job, "id", ""))
+            if not job_id.startswith("defer-"):
+                continue
+            # Same provider-segment rule as has_pending_deferral: the tail
+            # after the LAST dash must be numeric, so defer-kimi-ai-<ms>
+            # parses as a ladder for kimi-ai, never for kimi.
+            provider, _, ms = job_id[len("defer-"):].rpartition("-")
+            if not provider or not ms.isdigit():
+                continue
+            args = list(getattr(job, "args", None) or [])
+            if len(args) != 3:
+                continue
+            candidates.append((int(ms), job_id, args))
+        if not candidates:
+            return
+        _ms, job_id, args = min(candidates)
+        try:
+            self._scheduler.remove_job(job_id)
+        except (JobLookupError, SchedulerNotRunningError):
+            # A concurrent wake (or the grid fire) already claimed this
+            # ladder — stand down and let the next release try again.
+            return
+        provider_name: str = args[0]
+        config_file = args[1]
+        deferred_attempts: int = args[2]
+        logger.info(
+            f"Deferral wake: starting {provider_name} ladder "
+            f"(attempt {deferred_attempts}) — slot freed by {freed_by}"
+        )
+        asyncio.create_task(
+            _run_provider_job(provider_name, config_file, deferred_attempts)
+        )
 
     async def _watch_run(self, provider_name: str, run_id: str) -> None:
         """Release the guard when run *run_id* leaves the ``running`` state.
@@ -1129,6 +1198,9 @@ class SchedulerService:
         finally:
             self._running.discard(provider_name)
             self._watch_tasks.pop(provider_name, None)
+            # The slot is free NOW — give the oldest pending ladder its turn
+            # immediately instead of letting it wait for its retry grid.
+            self._wake_pending_deferrals(freed_by=provider_name)
 
     # -- schedule_config CRUD ------------------------------------------------
 
@@ -1347,6 +1419,10 @@ class SchedulerService:
 
     async def shutdown(self) -> None:
         """Gracefully shut down the scheduler and its run watchers."""
+        # BEFORE cancelling watchers: each watcher's finally wakes pending
+        # deferral ladders, and a wake must not dispatch a scan into a
+        # scheduler/process that is already tearing down.
+        self._shutdown = True
         watchers = list(self._watch_tasks.values())
         self._watch_tasks.clear()
         for watcher in watchers:
